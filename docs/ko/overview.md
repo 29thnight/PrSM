@@ -6,7 +6,7 @@ nav_order: 1
 
 # 개요
 
-PrSM은 `.prsm` 소스 파일을 Unity용 생성 C#으로 컴파일하는 언어 도구체인입니다. 컴파일 과정에서는 `.prsmmap.json` 사이드카도 함께 생성되어 진단과 탐색을 원본 소스로 다시 연결합니다.
+PrSM(**P**ragmatic **R**educed **S**yntax for **M**etascript)은 `.prsm` 소스 파일을 Unity용 생성 C#으로 컴파일하는 언어 도구체인입니다. 컴파일 과정에서는 `.prsmmap.json` 사이드카도 함께 생성되어 진단과 탐색을 원본 소스로 다시 연결합니다.
 
 저장소는 네 가지 축으로 구성됩니다.
 

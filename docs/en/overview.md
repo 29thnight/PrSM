@@ -6,13 +6,37 @@ nav_order: 1
 
 # Overview
 
-PrSM uses `.prsm` source files and compiles them into generated C# for Unity projects. The compiler also emits `.prsmmap.json` sidecars so diagnostics and navigation can be mapped back to source.
+PrSM (**P**ragmatic **R**educed **S**yntax for **M**etascript) is a statically typed, Unity-first scripting language that compiles `.prsm` source files into plain C#. There is no runtime library to ship — your Unity project just builds and runs the generated code normally.
 
-The repository is centered on four working areas:
+The language targets the day-to-day gameplay scripting loop: components that react to lifecycle events, coroutines that sequence async logic, events that wire UI actions, and data that flows between systems. PrSM makes these patterns shorter to write without hiding what is happening underneath.
 
-- `crates/refraction`: compiler core and the `prism` CLI
-- `unity-package`: Unity Editor integration and generated-code workflow support
-- `vscode-prsm`: syntax, diagnostics, navigation, snippets, and generated source-map helpers
-- `samples`: local validation and regression fixtures
+## Design goals
 
-PrSM is not positioned as a general-purpose language. Its design center is concise Unity gameplay code with strong null-safety, first-class lifecycle syntax, explicit component lookup, coroutine support, and readable generated C#.
+- **Familiar to Unity developers** — the generated C# looks like code a Unity developer would write by hand, so nothing is hidden
+- **Concise for the common case** — lifecycle blocks, `require`/`optional`/`child` field qualifiers, `listen` event wiring, and coroutine syntax all eliminate boilerplate that is otherwise written the same way every time
+- **Null-safety by default** — field qualifiers carry meaning at compile time so the compiler can reject missing or misused references before Unity processes the asset
+- **Traceable** — `.prsmmap.json` sidecars record how each PrSM declaration maps to the generated C# output, enabling the VS Code extension and Unity editor to navigate, remap diagnostics, and unwind stack traces back to `.prsm` source
+
+## Repository layout
+
+| Path | Role |
+|---|---|
+| `crates/refraction` | Rust compiler and `prism` CLI (lexer, parser, semantic, lowering, codegen, LSP) |
+| `unity-package` | Unity Editor integration: import hooks, diagnostic helpers, source-map consumer, stack-trace remapper |
+| `vscode-prsm` | VS Code extension: syntax, snippets, diagnostics, navigation, LSP client |
+| `samples` | Checked-in `.prsm` files used for smoke tests and regression validation |
+| `roslyn-sidecar` | Optional .NET sidecar that enriches hover with Roslyn/Unity C# symbol data |
+
+## Compiler pipeline
+
+```text
+.prsm source
+  -> Lexer           token stream with source positions
+  -> Parser          typed AST with identifier-level spans
+  -> Semantic        HIR: symbol resolution, type checks, null safety
+  -> Lowering        C# IR construction
+  -> Codegen         formatted .cs output
+  -> Source map      .prsmmap.json sidecar
+```
+
+Each stage feeds into the next. The Typed HIR produced by semantic analysis also backs the editor navigation commands (`definition`, `references`, `index`) and the LSP server.

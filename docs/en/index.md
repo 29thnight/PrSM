@@ -7,7 +7,7 @@ permalink: /en/
 
 # PrSM Documentation
 
-PrSM is a Unity-first scripting language toolkit. It compiles `.prsm` source files into clean, readable C# for Unity projects — keeping your game logic concise while staying fully compatible with the Unity runtime.
+**PrSM** (**P**ragmatic **R**educed **S**yntax for **M**etascript) is a Unity-first scripting language toolkit. It compiles `.prsm` source files into clean, readable C# for Unity projects — keeping your game logic concise while staying fully compatible with the Unity runtime.
 
 ## Why PrSM?
 
@@ -26,9 +26,3 @@ PrSM is a Unity-first scripting language toolkit. It compiles `.prsm` source fil
 | `vscode-prsm` | Syntax highlighting, diagnostics, LSP navigation, and snippets |
 | `samples` | Sample `.prsm` files used for regression validation |
 
-## Quick Links
-
-- [Overview](overview.md)
-- [Getting Started](getting-started.md)
-- [Language Guide](language-guide.md)
-- [Tooling](tooling.md)
