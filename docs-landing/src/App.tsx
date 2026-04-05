@@ -163,8 +163,8 @@ function App() {
         <div className="brand-actions">
           <a 
             className="brand-button brand-button--primary" 
-            href={`${base}/${lang}/getting-started.html`.replace(/\/+/g, '/')}
-            onClick={(e) => { e.preventDefault(); enterDocs('getting-started', lang) }}
+            href={`${base}/${lang}/`.replace(/\/+/g, '/')}
+            onClick={(e) => { e.preventDefault(); enterDocs('index', lang) }}
           >
             <BookOpen size={18} strokeWidth={2} />
             <span>{t.getStarted}</span>
