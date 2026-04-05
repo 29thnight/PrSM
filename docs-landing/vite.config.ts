@@ -11,7 +11,7 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
-  base: '/moon-lang/',
+  base: '/PrSM/',
   build: {
     outDir: 'dist',
     emptyOutDir: true,
