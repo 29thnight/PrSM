@@ -581,12 +581,14 @@
 
 .brand-docs__article code {
   background: rgba(120, 110, 255, 0.15);
-  padding: 0.1rem 0.45rem;
-  border-radius: 6px;
+  padding: 0 0.4rem;
+  border-radius: 4px;
   font-family: 'JetBrains Mono', monospace;
-  font-size: 0.9em;
+  font-size: 0.85em;
   color: #a59fff;
   border: 1px solid rgba(120, 110, 255, 0.2);
+  line-height: 1.6;
+  vertical-align: baseline;
 }
 
 .brand-docs__code-wrapper {
