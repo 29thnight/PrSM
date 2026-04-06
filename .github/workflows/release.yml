@@ -71,7 +71,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: prism-windows-x64
-          path: vscode-prsm/bin
+          path: target/release
 
       - name: Install dependencies
         working-directory: vscode-prsm
