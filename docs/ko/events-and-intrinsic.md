@@ -35,9 +35,77 @@ listen healthBar.onValueChanged { val newValue ->
 }
 ```
 
-### 정리 주의사항
+### listen 수명 정책 (v2)
 
-PrSM은 아직 `OnDestroy`에서 자동 `RemoveListener` 호출을 생성하지 않습니다. 수명이 긴 이벤트 소스를 대상으로 할 경우 `onDestroy` 블록 안에서 `intrinsic`으로 직접 정리 코드를 작성하세요.
+> v2.0에서 추가
+
+v2는 리스너 정리를 자동 관리하는 명시적 수명 정책을 도입합니다. `component` 선언 내부에서만 유효합니다 (외부 사용 시 에러 E083).
+
+#### `until disable` — OnDisable에서 자동 정리
+
+```prsm
+listen button.onClick until disable {
+    fire()
+}
+```
+
+생성 C#:
+
+```csharp
+private System.Action _prsm_h0;
+
+void Start() {
+    _prsm_h0 = () => { fire(); };
+    button.onClick.AddListener(_prsm_h0);
+}
+
+private void __prsm_cleanup_disable() {
+    button.onClick.RemoveListener(_prsm_h0);
+    _prsm_h0 = null;
+}
+
+void OnDisable() {
+    __prsm_cleanup_disable();
+}
+```
+
+#### `until destroy` — OnDestroy에서 자동 정리
+
+```prsm
+listen spawner.onSpawn until destroy {
+    count += 1
+}
+```
+
+`until disable`과 동일한 패턴이지만 `OnDestroy`에서 정리가 실행됩니다.
+
+#### `manual` — 토큰을 이용한 명시적 제어
+
+```prsm
+val token = listen timer.onFinished manual {
+    reset()
+}
+
+// 나중에:
+unlisten token
+```
+
+`unlisten`은 토큰을 backing 필드로 해석하여 `RemoveListener` + null 할당을 생성합니다. 컴포넌트의 모든 메서드(라이프사이클 및 사용자 정의 함수)에서 사용 가능합니다.
+
+#### 기본 동작
+
+| 컨텍스트 | 기본값 |
+|---------|--------|
+| 수정자 없음 (`listen event { }`) | 등록만 — 자동 정리 없음 (v1, v2 동일) |
+| `until disable` | OnDisable에서 자동 정리 |
+| `until destroy` | OnDestroy에서 자동 정리 |
+| `manual` | `unlisten`을 통한 명시적 제어 |
+
+수명 수정자는 명시적으로 작성해야 합니다. v1과 v2 사이에 암묵적 기본값 변경은 없으며, 수정자가 없으면 항상 등록만 수행합니다.
+
+#### 복수 리스너
+
+여러 listen 문은 별도의 핸들러 필드(`_prsm_h0`, `_prsm_h1` 등)를 생성하며 독립적으로 정리됩니다.
 
 ---
 
@@ -58,14 +126,6 @@ update {
         }
     }
 }
-```
-
-### 타입 있는 intrinsic 표현식
-
-raw C# 표현식을 타입이 있는 PrSM 값으로 취급합니다.
-
-```prsm
-val hitPoint: Vector3 = intrinsic<Vector3> { hit.point }
 ```
 
 ### Intrinsic 함수

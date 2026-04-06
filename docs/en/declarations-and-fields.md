@@ -123,3 +123,76 @@ optional shield: Shield?
 child muzzle: Transform
 parent vehicle: Vehicle
 ```
+
+These qualifiers are only valid in components (error E013 in class/asset).
+
+## `data class`
+
+A data class generates a plain C# class with constructor, `Equals`, `GetHashCode`, and `ToString`:
+
+```prsm
+data class DamageInfo(amount: Int, crit: Bool)
+```
+
+Generated C#:
+
+```csharp
+[System.Serializable]
+public class DamageInfo {
+    public int amount;
+    public bool crit;
+
+    public DamageInfo(int amount, bool crit) { ... }
+    public override bool Equals(object obj) { ... }
+    public override int GetHashCode() { ... }
+    public override string ToString() {
+        return $"DamageInfo(amount={amount}, crit={crit})";
+    }
+}
+```
+
+Data classes support v2 destructuring: `val DamageInfo(amount, crit) = info`.
+
+## `enum` (parameterized)
+
+Simple enums map directly to C# enums:
+
+```prsm
+enum Direction { Up, Down, Left, Right }
+```
+
+Parameterized enums generate an enum + extension methods for payload access:
+
+```prsm
+enum Weapon(val damage: Int, val range: Float) {
+    Sword(10, 1.5),
+    Bow(7, 8.0)
+}
+```
+
+Generated C# creates `Weapon.Damage()` and `Weapon.Range()` extension methods that use a switch to return the correct value per entry.
+
+**Rules:**
+- Every entry must provide the same number of arguments as the enum parameters (error E051)
+- At least one entry is required (error E050)
+- No duplicate entry names (error E052)
+
+## `attribute`
+
+Custom attributes for serialized fields:
+
+```prsm
+attribute Cooldown(val duration: Float, val label: String)
+```
+
+Used as decorators on fields: `@cooldown(2.0, "Fire Rate")`.
+
+## Initialization order
+
+For components, the initialization sequence is:
+
+1. Unity calls `Awake()`
+2. Compiler-generated: `require`/`optional`/`child`/`parent` lookups execute
+3. Compiler-generated: serialized field defaults applied
+4. User `awake { }` body runs
+5. Unity calls `Start()` → user `start { }` body runs

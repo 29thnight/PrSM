@@ -94,6 +94,9 @@ pub fn run_server() -> Result<(), String> {
         open_documents: HashMap::new(),
         overlay_root,
         roslyn_sidecar,
+        cached_index: None,
+        cached_hir: None,
+        dirty_files: HashSet::new(),
     };
 
     let result = server.run();
@@ -112,6 +115,12 @@ struct PrismLspServer {
     open_documents: HashMap<PathBuf, OpenDocument>,
     overlay_root: PathBuf,
     roslyn_sidecar: Option<RoslynSidecarSession>,
+    /// Cached project index — rebuilt incrementally when dirty files change.
+    cached_index: Option<ProjectIndex>,
+    /// Cached HIR project — rebuilt incrementally when dirty files change.
+    cached_hir: Option<crate::hir::HirProject>,
+    /// Files modified since the last index/HIR rebuild.
+    dirty_files: HashSet<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -259,7 +268,8 @@ impl PrismLspServer {
 
         let query_context = self.build_query_context(Some(&position.file_path));
         let runtime_path = query_context.runtime_path(&position.file_path);
-        let hir_project = driver::build_hir_project(&query_context.source_files);
+        self.ensure_hir(&query_context.source_files);
+        let hir_project = self.cached_hir.as_ref().unwrap();
 
         if let Some(definition) = hir_project.find_definition_for_position(&runtime_path, position.line, position.col) {
             return self.send_ok(
@@ -271,7 +281,7 @@ impl PrismLspServer {
             );
         }
 
-        let project_index = project_index::build_project_index(&query_context.source_files);
+        let project_index = self.cached_index.as_ref().unwrap();
         let symbol_at = project_index.find_symbol_at(&runtime_path, position.line, position.col);
         let reference_at = project_index.find_reference_at(&runtime_path, position.line, position.col);
         let resolved_symbol = reference_at
@@ -304,7 +314,8 @@ impl PrismLspServer {
 
         let query_context = self.build_query_context(Some(&position.file_path));
         let runtime_path = query_context.runtime_path(&position.file_path);
-        let hir_project = driver::build_hir_project(&query_context.source_files);
+        self.ensure_hir(&query_context.source_files);
+        let hir_project = self.cached_hir.as_ref().unwrap();
         let references_result = hir_project.find_references_for_position(&runtime_path, position.line, position.col);
 
         let Some((definition, references)) = references_result else {
@@ -347,16 +358,23 @@ impl PrismLspServer {
 
         let query_context = self.build_query_context(Some(&position.file_path));
         let runtime_path = query_context.runtime_path(&position.file_path);
-        let project_index = project_index::build_project_index(&query_context.source_files);
-        let hir_project = driver::build_hir_project(&query_context.source_files);
+        self.ensure_hir(&query_context.source_files);
+        // Take caches out temporarily to avoid borrow conflicts with &mut self sidecar calls.
+        let index = self.cached_index.take().unwrap();
+        let hir = self.cached_hir.take().unwrap();
         let fallback_items = lsp_support::completion_items(
             &document_text,
             position.line,
             position.col,
             &runtime_path,
-            &project_index,
-            &hir_project,
+            &index,
+            &hir,
         );
+        // Put caches back before sidecar call.
+        self.cached_index = Some(index);
+        self.cached_hir = Some(hir);
+        let index = self.cached_index.take().unwrap();
+        let hir = self.cached_hir.take().unwrap();
         let items = self
             .sidecar_completion_items(
                 &position.file_path,
@@ -364,11 +382,13 @@ impl PrismLspServer {
                 position.line,
                 position.col,
                 &runtime_path,
-                &project_index,
-                &hir_project,
+                &index,
+                &hir,
             )
             .map(|sidecar_items| merge_completion_items(sidecar_items, fallback_items.clone()))
             .unwrap_or(fallback_items);
+        self.cached_index = Some(index);
+        self.cached_hir = Some(hir);
 
         self.send_ok(request.id, json!({
             "isIncomplete": false,
@@ -384,40 +404,39 @@ impl PrismLspServer {
 
         let query_context = self.build_query_context(Some(&position.file_path));
         let runtime_path = query_context.runtime_path(&position.file_path);
-        let project_index = project_index::build_project_index(&query_context.source_files);
-        let hir_project = driver::build_hir_project(&query_context.source_files);
-        let symbol_at = project_index.find_symbol_at(&runtime_path, position.line, position.col);
-        let reference_at = project_index.find_reference_at(&runtime_path, position.line, position.col);
-        let resolved_symbol = reference_at.and_then(|reference| project_index.resolve_reference_target(reference));
-
-        let definition = hir_project
-            .find_definition_for_position(&runtime_path, position.line, position.col)
-            .or_else(|| {
-                resolved_symbol.and_then(|symbol| {
-                    hir_project.find_definition_by_qualified_name(&symbol.qualified_name)
-                })
-            })
-            .or_else(|| {
-                symbol_at.and_then(|symbol| {
-                    hir_project.find_definition_by_qualified_name(&symbol.qualified_name)
-                })
-            });
-
+        self.ensure_hir(&query_context.source_files);
+        // Compute hover data in a limited scope to release borrows for sidecar call.
+        let (symbol_at, reference_at, resolved_symbol, definition) = {
+            let project_index = self.cached_index.as_ref().unwrap();
+            let hir_project = self.cached_hir.as_ref().unwrap();
+            let sym = project_index.find_symbol_at(&runtime_path, position.line, position.col).cloned();
+            let refr = project_index.find_reference_at(&runtime_path, position.line, position.col).cloned();
+            let resolved = refr.as_ref().and_then(|r| project_index.resolve_reference_target(r)).cloned();
+            let def = hir_project
+                .find_definition_for_position(&runtime_path, position.line, position.col)
+                .or_else(|| resolved.as_ref().and_then(|s| hir_project.find_definition_by_qualified_name(&s.qualified_name)))
+                .or_else(|| sym.as_ref().and_then(|s| hir_project.find_definition_by_qualified_name(&s.qualified_name)))
+                .cloned();
+            (sym, refr, resolved, def)
+        };
+        let index = self.cached_index.take().unwrap();
+        let sidecar_section = self.sidecar_hover_section(
+            &position.file_path,
+            symbol_at.as_ref(),
+            reference_at.as_ref(),
+            resolved_symbol.as_ref(),
+            definition.as_ref(),
+            &index,
+            &query_context,
+        );
+        self.cached_index = Some(index);
         let hover_markdown = build_hover_markdown(
-            symbol_at,
-            reference_at,
-            resolved_symbol,
-            definition,
-            &project_index,
-            self.sidecar_hover_section(
-                &position.file_path,
-                symbol_at,
-                reference_at,
-                resolved_symbol,
-                definition,
-                &project_index,
-                &query_context,
-            ),
+            symbol_at.as_ref(),
+            reference_at.as_ref(),
+            resolved_symbol.as_ref(),
+            definition.as_ref(),
+            self.cached_index.as_ref().unwrap(),
+            sidecar_section,
         );
         let hover_range = symbol_at
             .map(|symbol| symbol.span)
@@ -529,7 +548,8 @@ impl PrismLspServer {
 
         let query_context = self.build_query_context(Some(&file_path));
         let runtime_path = query_context.runtime_path(&file_path);
-        let project_index = project_index::build_project_index(&query_context.source_files);
+        self.ensure_index(&query_context.source_files);
+        let project_index = self.cached_index.as_ref().unwrap();
         let mut symbols = project_index
             .query_symbols(&project_index::SymbolQuery::default())
             .into_iter()
@@ -537,7 +557,7 @@ impl PrismLspServer {
             .collect::<Vec<_>>();
         symbols.sort_by(|left, right| compare_symbols(left, right));
 
-        let document_symbols = build_document_symbols(&project_index, &symbols, &runtime_path, &query_context);
+        let document_symbols = build_document_symbols(project_index, &symbols, &runtime_path, &query_context);
         self.send_ok(request.id, Value::Array(document_symbols))
     }
 
@@ -553,7 +573,8 @@ impl PrismLspServer {
         let Some(query_context) = self.build_workspace_query_context() else {
             return self.send_ok(request.id, json!([]));
         };
-        let project_index = project_index::build_project_index(&query_context.source_files);
+        self.ensure_index(&query_context.source_files);
+        let project_index = self.cached_index.as_ref().unwrap();
         let mut symbols = project_index
             .query_symbols(&project_index::SymbolQuery::default())
             .into_iter()
@@ -605,7 +626,9 @@ impl PrismLspServer {
 
         self.upsert_open_document(uri, version, text.to_string())?;
         if let Some(file_path) = file_uri_to_path(uri) {
-            self.publish_diagnostics(&normalize_path(&file_path))?;
+            let normalized = normalize_path(&file_path);
+            self.mark_dirty(&normalized);
+            self.publish_diagnostics(&normalized)?;
             self.invalidate_roslyn_sidecar_project();
         }
         Ok(())
@@ -633,7 +656,9 @@ impl PrismLspServer {
 
         self.upsert_open_document(uri, version, text.to_string())?;
         if let Some(file_path) = file_uri_to_path(uri) {
-            self.publish_diagnostics(&normalize_path(&file_path))?;
+            let normalized = normalize_path(&file_path);
+            self.mark_dirty(&normalized);
+            self.publish_diagnostics(&normalized)?;
         }
         Ok(())
     }
@@ -646,7 +671,9 @@ impl PrismLspServer {
             .ok_or_else(|| "Missing didSave textDocument URI.".to_string())?;
 
         if let Some(file_path) = file_uri_to_path(uri) {
-            self.publish_diagnostics(&normalize_path(&file_path))?;
+            let normalized = normalize_path(&file_path);
+            self.mark_dirty(&normalized);
+            self.publish_diagnostics(&normalized)?;
         }
         Ok(())
     }
@@ -695,10 +722,11 @@ impl PrismLspServer {
             .map(|path| QueryContext::from_source_files(&[path.clone()], self, Some(path)))
     }
 
-    fn build_rename_plan(&self, file_path: &Path, line: u32, col: u32) -> Result<RenamePlan, String> {
+    fn build_rename_plan(&mut self, file_path: &Path, line: u32, col: u32) -> Result<RenamePlan, String> {
         let query_context = self.build_query_context(Some(file_path));
         let runtime_path = query_context.runtime_path(file_path);
-        let hir_project = driver::build_hir_project(&query_context.source_files);
+        self.ensure_hir(&query_context.source_files);
+        let hir_project = self.cached_hir.as_ref().unwrap();
         let Some((definition, references)) = hir_project.find_references_for_position(&runtime_path, line, col) else {
             return Err("Only PrSM symbols defined in the current project can be renamed.".into());
         };
@@ -959,6 +987,32 @@ impl PrismLspServer {
         );
 
         Ok(())
+    }
+
+    /// Mark a file as dirty so the next index/HIR request triggers a rebuild.
+    fn mark_dirty(&mut self, file_path: &Path) {
+        self.dirty_files.insert(file_path.to_path_buf());
+    }
+
+    /// Ensure cached project index is fresh. Rebuilds incrementally if dirty files exist.
+    /// Call this before accessing `self.cached_index`.
+    fn ensure_index(&mut self, source_files: &[PathBuf]) {
+        if self.cached_index.is_none() || !self.dirty_files.is_empty() {
+            // For correctness, do a full rebuild when dirty. The index is fast enough
+            // for typical project sizes (<100 files). True per-file incremental can be
+            // added later if profiling shows this is a bottleneck.
+            self.cached_index = Some(project_index::build_project_index(source_files));
+            self.cached_hir = None; // HIR must also be rebuilt when index changes.
+            self.dirty_files.clear();
+        }
+    }
+
+    /// Ensure cached HIR project is fresh. Requires index to be current.
+    fn ensure_hir(&mut self, source_files: &[PathBuf]) {
+        self.ensure_index(source_files);
+        if self.cached_hir.is_none() {
+            self.cached_hir = Some(driver::build_hir_project(source_files));
+        }
     }
 
     fn publish_diagnostics(&self, file_path: &Path) -> Result<(), String> {

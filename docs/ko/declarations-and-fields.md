@@ -123,3 +123,74 @@ optional shield: Shield?
 child muzzle: Transform
 parent vehicle: Vehicle
 ```
+
+이 한정자들은 component에서만 유효합니다 (class/asset에서 사용 시 에러 E013).
+
+## `data class`
+
+Data class는 생성자, `Equals`, `GetHashCode`, `ToString`이 포함된 C# 클래스를 생성합니다:
+
+```prsm
+data class DamageInfo(amount: Int, crit: Bool)
+```
+
+생성 C#:
+
+```csharp
+[System.Serializable]
+public class DamageInfo {
+    public int amount;
+    public bool crit;
+
+    public DamageInfo(int amount, bool crit) { ... }
+    public override bool Equals(object obj) { ... }
+    public override int GetHashCode() { ... }
+    public override string ToString() {
+        return $"DamageInfo(amount={amount}, crit={crit})";
+    }
+}
+```
+
+Data class는 v2 구조 분해를 지원합니다: `val DamageInfo(amount, crit) = info`.
+
+## `enum` (파라미터화)
+
+단순 enum은 C# enum으로 직접 매핑됩니다:
+
+```prsm
+enum Direction { Up, Down, Left, Right }
+```
+
+파라미터화 enum은 enum + payload 접근 확장 메서드를 생성합니다:
+
+```prsm
+enum Weapon(val damage: Int, val range: Float) {
+    Sword(10, 1.5),
+    Bow(7, 8.0)
+}
+```
+
+**규칙:**
+- 모든 엔트리는 enum 파라미터와 같은 수의 인자를 제공해야 합니다 (에러 E051)
+- 최소 하나의 엔트리가 필요합니다 (에러 E050)
+- 중복 엔트리 이름 불가 (에러 E052)
+
+## `attribute`
+
+직렬화 필드용 커스텀 어트리뷰트:
+
+```prsm
+attribute Cooldown(val duration: Float, val label: String)
+```
+
+필드 데코레이터로 사용: `@cooldown(2.0, "Fire Rate")`.
+
+## 초기화 순서
+
+component의 초기화 순서:
+
+1. Unity가 `Awake()` 호출
+2. 컴파일러 생성: `require`/`optional`/`child`/`parent` 룩업 실행
+3. 컴파일러 생성: 직렬화 필드 기본값 적용
+4. 사용자 `awake { }` 바디 실행
+5. Unity가 `Start()` 호출 → 사용자 `start { }` 바디 실행

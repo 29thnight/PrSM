@@ -66,3 +66,66 @@ component Empty : MonoBehaviour {
 ```
 
 The generated C# for this is a normal `MonoBehaviour` subclass with an `Update()` method.
+
+## Operator precedence
+
+From lowest to highest binding power:
+
+| Precedence | Operator(s) | Associativity | Description |
+|:---:|---|---|---|
+| 1 | `?:` | Right | Elvis (null coalescing) |
+| 2 | `\|\|` | Left | Logical OR |
+| 3 | `&&` | Left | Logical AND |
+| 4 | `==` `!=` | Left | Equality |
+| 5 | `<` `>` `<=` `>=` `is` | Left | Comparison, type check |
+| 6 | `..` `until` `downTo` | — | Range |
+| 7 | `+` `-` | Left | Additive |
+| 8 | `*` `/` `%` | Left | Multiplicative |
+| 9 | `!` `-` (unary) | Right | Unary negation/not |
+| 10 | `.` `?.` `!!` `[]` `()` | Left | Postfix (member, safe call, assert, index, call) |
+
+## Assignment operators
+
+| Operator | Description |
+|---|---|
+| `=` | Assign |
+| `+=` `-=` `*=` `/=` `%=` | Compound assign |
+
+Assignment is a statement, not an expression.
+
+## String escape sequences
+
+Inside string literals:
+
+| Escape | Character |
+|---|---|
+| `\n` | Newline |
+| `\t` | Tab |
+| `\r` | Carriage return |
+| `\\` | Backslash |
+| `\"` | Double quote |
+| `\$` | Dollar sign (prevents interpolation) |
+
+## String interpolation
+
+Two forms:
+
+```prsm
+val greeting = "hello $name"              // shorthand
+val info = "score: ${player.score + 1}"   // expression
+```
+
+The `${}` form supports any expression including nested braces. Generated C# uses `$"..."` interpolation.
+
+## Duration literals
+
+Numeric literals with a time suffix:
+
+```prsm
+wait 1.5s     // 1.5 seconds → new WaitForSeconds(1.5f)
+wait 500ms    // 500 milliseconds → new WaitForSeconds(0.5f)
+```
+
+## Formal grammar
+
+See [Formal Grammar](grammar.md) for the complete EBNF specification.

@@ -1358,7 +1358,7 @@ fn lower_stmt_with_context(
                                     ty: "var".into(),
                                     name: bname.clone(),
                                     init: format!("{}.Item{}", tmp, i + 1),
-                                    source_span: None,
+                                    source_span: Some(b.span),
                                 });
                             }
                             format!("case {} {}:", type_name, tmp)
@@ -1418,12 +1418,13 @@ fn lower_stmt_with_context(
                             // Lower as: if (subject is TypeName.Variant _prsm_tmp) { var a = _prsm_tmp.Field0; var b = _prsm_tmp.Field1; ... }
                             let tmp = format!("_prsm_m{}_{}", b.span.start.line, b.span.start.col);
                             let type_name = path.join(".");
+                            let bind_span = Some(b.span);
                             let mut bind_stmts: Vec<CsStmt> = bindings.iter().enumerate().map(|(i, bname)| {
                                 CsStmt::VarDecl {
                                     ty: "var".into(),
                                     name: bname.clone(),
                                     init: format!("{}.Item{}", tmp, i + 1),
-                                    source_span: None,
+                                    source_span: bind_span,
                                 }
                             }).collect();
                             bind_stmts.extend(body);
@@ -2219,6 +2220,8 @@ struct SubscriptionRecord {
     event_expr: String,
     /// How the subscription is cleaned up.
     cleanup: SubscriptionCleanup,
+    /// Source span of the original `listen` statement (for source map v2 sugar mapping).
+    origin_span: Option<Span>,
 }
 
 enum SubscriptionCleanup {
@@ -2296,6 +2299,7 @@ fn lower_stmt_with_ctx(
                         field_name: handler.clone(),
                         event_expr: event_str.clone(),
                         cleanup,
+                        origin_span: source_span,
                     });
                     // Emit: fieldName = (params) => { body }; event.AddListener(fieldName);
                     let stmts_vec = lower_listen_stmt(
@@ -2435,10 +2439,11 @@ fn cleanup_methods(records: &[SubscriptionRecord]) -> Vec<CsMember> {
     let mut methods = Vec::new();
 
     if !disable_records.is_empty() {
+        let first_span = disable_records.first().and_then(|r| r.origin_span);
         let body = disable_records.iter().flat_map(|r| {
             vec![
-                CsStmt::Expr(format!("{}.RemoveListener({})", r.event_expr, r.field_name), None),
-                CsStmt::Expr(format!("{} = null", r.field_name), None),
+                CsStmt::Expr(format!("{}.RemoveListener({})", r.event_expr, r.field_name), r.origin_span),
+                CsStmt::Expr(format!("{} = null", r.field_name), r.origin_span),
             ]
         }).collect();
         methods.push(CsMember::Method {
@@ -2448,15 +2453,16 @@ fn cleanup_methods(records: &[SubscriptionRecord]) -> Vec<CsMember> {
             name: "__prsm_cleanup_disable".into(),
             params: vec![],
             body,
-            source_span: None,
+            source_span: first_span,
         });
     }
 
     if !destroy_records.is_empty() {
+        let first_span = destroy_records.first().and_then(|r| r.origin_span);
         let body = destroy_records.iter().flat_map(|r| {
             vec![
-                CsStmt::Expr(format!("{}.RemoveListener({})", r.event_expr, r.field_name), None),
-                CsStmt::Expr(format!("{} = null", r.field_name), None),
+                CsStmt::Expr(format!("{}.RemoveListener({})", r.event_expr, r.field_name), r.origin_span),
+                CsStmt::Expr(format!("{} = null", r.field_name), r.origin_span),
             ]
         }).collect();
         methods.push(CsMember::Method {
@@ -2466,7 +2472,7 @@ fn cleanup_methods(records: &[SubscriptionRecord]) -> Vec<CsMember> {
             name: "__prsm_cleanup_destroy".into(),
             params: vec![],
             body,
-            source_span: None,
+            source_span: first_span,
         });
     }
 

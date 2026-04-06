@@ -1005,7 +1005,7 @@ impl Analyzer {
             Expr::Null(_) => PrismType::Nullable(Box::new(PrismType::Error)),
             Expr::Ident(name, span) => {
                 if let Some((ty, definition_id)) = self.lookup_symbol(name) {
-                    self.record_reference(name.clone(), HirReferenceKind::Identifier, definition_id, None, *span);
+                    self.record_reference(name.clone(), HirReferenceKind::Identifier, definition_id, None, None, *span);
                     ty
                 } else if let Some(ty) = self.known_project_types.get(name).cloned() {
                     self.record_reference(
@@ -1013,13 +1013,14 @@ impl Analyzer {
                         HirReferenceKind::Identifier,
                         None,
                         Some(name.clone()),
+                        None,
                         *span,
                     );
                     ty
                 } else {
                     // Don't error for Unity API names — we can't resolve them without
                     // a full Unity type database. For v1, unknown idents are External.
-                    self.record_reference(name.clone(), HirReferenceKind::Identifier, None, None, *span);
+                    self.record_reference(name.clone(), HirReferenceKind::Identifier, None, None, None, *span);
                     PrismType::External(name.clone())
                 }
             }
@@ -1074,12 +1075,12 @@ impl Analyzer {
                 let receiver_ty = self.analyze_expr(receiver);
                 if receiver_is_this {
                     if let Some((ty, definition_id)) = self.lookup_symbol(name) {
-                        self.record_reference(name.clone(), HirReferenceKind::Member, definition_id, None, *name_span);
+                        self.record_reference(name.clone(), HirReferenceKind::Member, definition_id, None, None, *name_span);
                         return ty;
                     }
                 }
                 let candidate = self.member_candidate_name(&receiver_ty, name);
-                self.record_reference(name.clone(), HirReferenceKind::Member, None, candidate, *name_span);
+                self.record_reference(name.clone(), HirReferenceKind::Member, None, candidate, None, *name_span);
                 // Cannot fully resolve member types without Unity type DB
                 PrismType::External(name.clone())
             }
@@ -1093,12 +1094,12 @@ impl Analyzer {
                 let receiver_ty = self.analyze_expr(receiver);
                 if receiver_is_this {
                     if let Some((ty, definition_id)) = self.lookup_symbol(name) {
-                        self.record_reference(name.clone(), HirReferenceKind::Member, definition_id, None, *name_span);
+                        self.record_reference(name.clone(), HirReferenceKind::Member, definition_id, None, None, *name_span);
                         return ty.make_nullable();
                     }
                 }
                 let candidate = self.member_candidate_name(&receiver_ty, name);
-                self.record_reference(name.clone(), HirReferenceKind::Member, None, candidate, *name_span);
+                self.record_reference(name.clone(), HirReferenceKind::Member, None, candidate, None, *name_span);
                 PrismType::External(name.clone()).make_nullable()
             }
             Expr::SafeMethodCall {
@@ -1115,12 +1116,12 @@ impl Analyzer {
                 }
                 if receiver_is_this {
                     if let Some((ty, definition_id)) = self.lookup_symbol(name) {
-                        self.record_reference(name.clone(), HirReferenceKind::Call, definition_id, None, *name_span);
+                        self.record_reference(name.clone(), HirReferenceKind::Call, definition_id, None, None, *name_span);
                         return ty.make_nullable();
                     }
                 }
                 let candidate = self.member_candidate_name(&receiver_ty, name);
-                self.record_reference(name.clone(), HirReferenceKind::Call, None, candidate, *name_span);
+                self.record_reference(name.clone(), HirReferenceKind::Call, None, candidate, None, *name_span);
                 PrismType::External("var".into())
             }
             Expr::NonNullAssert { expr, span } => {
@@ -1162,7 +1163,7 @@ impl Analyzer {
                     let receiver_ty = self.analyze_expr(recv);
                     if receiver_is_this {
                         if let Some((ty, definition_id)) = self.lookup_symbol(name) {
-                            self.record_reference(name.clone(), HirReferenceKind::Call, definition_id, None, *name_span);
+                            self.record_reference(name.clone(), HirReferenceKind::Call, definition_id, None, None, *name_span);
                             for arg in args {
                                 self.analyze_expr(&arg.value);
                             }
@@ -1170,17 +1171,17 @@ impl Analyzer {
                         }
                     }
                     let candidate = self.member_candidate_name(&receiver_ty, name);
-                    self.record_reference(name.clone(), HirReferenceKind::Call, None, candidate, *name_span);
+                    self.record_reference(name.clone(), HirReferenceKind::Call, None, candidate, None, *name_span);
                 }
                 for arg in args {
                     self.analyze_expr(&arg.value);
                 }
                 if receiver.is_none() {
                     if let Some((ty, definition_id)) = self.lookup_symbol(name) {
-                        self.record_reference(name.clone(), HirReferenceKind::Call, definition_id, None, *name_span);
+                        self.record_reference(name.clone(), HirReferenceKind::Call, definition_id, None, None, *name_span);
                         return ty;
                     }
-                    self.record_reference(name.clone(), HirReferenceKind::Call, None, None, *name_span);
+                    self.record_reference(name.clone(), HirReferenceKind::Call, None, None, None, *name_span);
                 }
                 // Return type depends on the callee — for v1, return External
                 PrismType::External("var".into())
@@ -1381,6 +1382,7 @@ impl Analyzer {
                 HirReferenceKind::Type,
                 definition_id,
                 None,
+                None,
                 span,
             );
             ty
@@ -1390,6 +1392,7 @@ impl Analyzer {
                 HirReferenceKind::Type,
                 None,
                 Some(name.to_string()),
+                None,
                 span,
             );
             ty
@@ -1405,6 +1408,7 @@ impl Analyzer {
                 HirReferenceKind::Type,
                 definition_id,
                 None,
+                None,
                 span,
             );
         } else if self.known_project_types.contains_key(name) {
@@ -1413,6 +1417,7 @@ impl Analyzer {
                 HirReferenceKind::Type,
                 None,
                 Some(name.to_string()),
+                None,
                 span,
             );
         }
@@ -1492,6 +1497,7 @@ impl Analyzer {
         kind: HirReferenceKind,
         resolved_definition_id: Option<u32>,
         candidate_qualified_name: Option<String>,
+        resolved_type: Option<PrismType>,
         span: Span,
     ) {
         let Some(file_path) = self.current_file_path.clone() else {
@@ -1503,6 +1509,7 @@ impl Analyzer {
             kind,
             resolved_definition_id,
             candidate_qualified_name,
+            resolved_type,
             file_path,
             span,
         });
@@ -1516,8 +1523,8 @@ impl Analyzer {
         has_guard: bool,
         span: Span,
     ) {
-        // Validate pattern bindings against known types.
-        self.validate_pattern_bindings(&kind, &type_name, &bindings, span);
+        // Validate pattern bindings against known types and retrieve expected arity.
+        let expected_arity = self.validate_pattern_bindings(&kind, &type_name, &bindings, span);
 
         let Some(file_path) = self.current_file_path.clone() else {
             return;
@@ -1529,34 +1536,35 @@ impl Analyzer {
             type_name,
             bindings,
             has_guard,
+            expected_arity,
             file_path,
             span,
         });
     }
 
     /// Validate pattern binding arity against known enum payloads / data class fields.
-    /// Only validates against types defined in the current file — external types are silently
-    /// skipped to avoid false positives.
+    /// Returns the expected arity if the type is known (for HIR enrichment).
     fn validate_pattern_bindings(
         &mut self,
         kind: &HirPatternBindingKind,
         type_name: &str,
         bindings: &[String],
         span: Span,
-    ) {
+    ) -> Option<usize> {
+        let mut arity = None;
         match kind {
             HirPatternBindingKind::When => {
                 // type_name is e.g. "EnemyState.Chase" — split into enum + variant.
                 let segments: Vec<&str> = type_name.splitn(2, '.').collect();
                 if segments.len() < 2 {
-                    return; // Single-segment pattern — nothing to validate here.
+                    return None; // Single-segment pattern — nothing to validate here.
                 }
                 let enum_name = segments[0];
                 let variant = segments[1];
 
                 // Only validate against enums defined in this file.
                 let Some(entries) = self.enum_entries.get(enum_name) else {
-                    return;
+                    return None;
                 };
                 if !entries.contains(&variant.to_string()) {
                     self.diag.error(
@@ -1564,10 +1572,11 @@ impl Analyzer {
                         format!("Unknown variant '{}' for enum '{}'", variant, enum_name),
                         span,
                     );
-                    return;
+                    return None;
                 }
                 if let Some(payloads) = self.enum_payloads.get(enum_name) {
                     if let Some(&expected_arity) = payloads.get(variant) {
+                        arity = Some(expected_arity);
                         if !bindings.is_empty() && bindings.len() != expected_arity {
                             self.diag.error(
                                 "E082",
@@ -1583,6 +1592,7 @@ impl Analyzer {
             }
             HirPatternBindingKind::ValDestructure | HirPatternBindingKind::ForDestructure => {
                 if let Some(fields) = self.dataclass_fields.get(type_name) {
+                    arity = Some(fields.len());
                     if bindings.len() != fields.len() {
                         self.diag.error(
                             "E082",
@@ -1597,6 +1607,7 @@ impl Analyzer {
                 // Unknown type_name → skip (could be external type).
             }
         }
+        arity
     }
 
     fn record_listen_site(

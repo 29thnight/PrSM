@@ -35,9 +35,77 @@ listen healthBar.onValueChanged { val newValue ->
 }
 ```
 
-### Cleanup note
+### Listen lifetimes (v2)
 
-PrSM does not yet emit automatic `RemoveListener` calls in `OnDestroy`. For long-lived event sources, emit cleanup manually through an `intrinsic` block inside `onDestroy`.
+> Added in v2.0
+
+v2 introduces explicit lifetime policies that automatically manage listener cleanup. These are only valid inside `component` declarations (error E083 outside).
+
+#### `until disable` — auto-cleanup in OnDisable
+
+```prsm
+listen button.onClick until disable {
+    fire()
+}
+```
+
+Generated C#:
+
+```csharp
+private System.Action _prsm_h0;
+
+void Start() {
+    _prsm_h0 = () => { fire(); };
+    button.onClick.AddListener(_prsm_h0);
+}
+
+private void __prsm_cleanup_disable() {
+    button.onClick.RemoveListener(_prsm_h0);
+    _prsm_h0 = null;
+}
+
+void OnDisable() {
+    __prsm_cleanup_disable();
+}
+```
+
+#### `until destroy` — auto-cleanup in OnDestroy
+
+```prsm
+listen spawner.onSpawn until destroy {
+    count += 1
+}
+```
+
+Same pattern as `until disable`, but cleanup runs in `OnDestroy`.
+
+#### `manual` — explicit control with tokens
+
+```prsm
+val token = listen timer.onFinished manual {
+    reset()
+}
+
+// Later:
+unlisten token
+```
+
+`unlisten` resolves the token to the backing field and emits `RemoveListener` + null assignment. Works in any component method (lifecycle or user-defined functions).
+
+#### Default behavior
+
+| Context | Default |
+|---------|---------|
+| No modifier (`listen event { }`) | Register only — no auto-cleanup (same in v1 and v2) |
+| `until disable` | Auto-cleanup in OnDisable |
+| `until destroy` | Auto-cleanup in OnDestroy |
+| `manual` | Explicit control via `unlisten` |
+
+Lifetime modifiers must be explicitly written. There is no implicit default change between v1 and v2 — the compiler always defaults to register-only unless a modifier is specified.
+
+#### Multiple listeners
+
+Multiple listen statements generate separate handler fields (`_prsm_h0`, `_prsm_h1`, etc.) with independent cleanup.
 
 ---
 
@@ -58,14 +126,6 @@ update {
         }
     }
 }
-```
-
-### Typed intrinsic expression
-
-Treats a raw C# expression as a typed PrSM value:
-
-```prsm
-val hitPoint: Vector3 = intrinsic<Vector3> { hit.point }
 ```
 
 ### Intrinsic function

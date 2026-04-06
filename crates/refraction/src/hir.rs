@@ -68,6 +68,8 @@ pub struct HirReference {
     pub kind: HirReferenceKind,
     pub resolved_definition_id: Option<u32>,
     pub candidate_qualified_name: Option<String>,
+    /// The inferred type at this usage site (v2.1 enrichment).
+    pub resolved_type: Option<PrismType>,
     pub file_path: PathBuf,
     pub span: Span,
 }
@@ -96,6 +98,9 @@ pub struct HirPatternBinding {
     pub type_name: String,
     pub bindings: Vec<String>,
     pub has_guard: bool,
+    /// Expected number of bindings (enum payload arity or data class field count).
+    /// `None` if the type is external and arity is unknown.
+    pub expected_arity: Option<usize>,
     pub file_path: PathBuf,
     pub span: Span,
 }
