@@ -42,14 +42,29 @@ nav_order: 2
 
 Unity가 생성된 `.cs` 파일을 열려고 할 때(예: Console 오류 더블 클릭), `MoonScriptProxy`와 `MoonScriptRedirector`가 해당 요청을 가로채고 `.prsmmap.json` 앵커 맵을 사용해 원본 `.prsm` 소스로 리다이렉트합니다.
 
-## 프로젝트 설정
+## Project Settings 창 (PrSM 3 부터)
 
-**Edit → Project Settings → PrSM**에서 접근 가능:
+모든 `.prsmproject` 설정을 Unity 에디터 GUI에서 편집할 수 있습니다:
 
-- 활성 `.prsmproject` 경로
-- 출력 디렉토리 재정의
-- 컴파일러 바이너리 경로 재정의
-- 저장 시 자동 컴파일 토글
+**Window > PrSM > Project Settings**
+
+설정 창은 모든 구성 섹션에 대한 컨트롤을 제공합니다:
+
+| 섹션 | 설정 |
+|------|------|
+| **Project** | Name, PrSM Version |
+| **Language** | Version 드롭다운 (1/2/3), Feature 체크박스 (pattern-bindings, input-system, auto-unlisten, interface, generics, singleton, pool, solid-analysis, optimizer) |
+| **Compiler** | Compiler Path + Browse 버튼, Output Directory + Browse 버튼 |
+| **Source** | Include/Exclude glob 패턴 (콤마 구분) |
+| **Build Features** | Auto Compile on Save, Generate Meta Files, PascalCase Methods |
+| **Analysis** | SOLID Warnings 토글, Max Public Methods / Max Dependencies / Max Method Length 임계값 |
+
+하단 버튼:
+- **Save** — `.prsmproject`에 변경 사항을 저장하고 컴파일러 캐시를 클리어
+- **Revert** — 디스크에서 다시 로드하여 미저장 변경 취소
+- **Open .prsmproject** — 기본 텍스트 에디터에서 TOML 파일 열기
+
+변경 사항은 프로젝트 루트의 `.prsmproject` 파일에 기록됩니다. 전체 TOML 형식 레퍼런스는 [프로젝트 설정](project-configuration.md)을 참조하세요.
 
 ## 템플릿
 

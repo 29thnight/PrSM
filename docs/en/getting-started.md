@@ -110,6 +110,7 @@ The package provides:
 - Custom inspectors for PrSM components
 - Stack trace remapping from generated C# to `.prsm` source
 - Drag-and-drop component addition
+- **Project Settings Window** (since PrSM 3) — open via **Window > PrSM > Project Settings** to configure all `.prsmproject` options through a GUI
 
 ## Watch mode
 

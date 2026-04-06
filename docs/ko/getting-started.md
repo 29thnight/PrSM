@@ -110,6 +110,7 @@ Package Manager를 통해 PrSM Unity 패키지를 추가합니다:
 - PrSM 컴포넌트 커스텀 인스펙터
 - 생성 C# → `.prsm` 소스 스택트레이스 리맵
 - 드래그 앤 드롭 컴포넌트 추가
+- **Project Settings 창** (PrSM 3 부터) — **Window > PrSM > Project Settings**에서 모든 `.prsmproject` 옵션을 GUI로 설정
 
 ## Watch 모드
 

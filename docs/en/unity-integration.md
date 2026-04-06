@@ -42,14 +42,29 @@ Errors from generated `.cs` files are remapped to the original `.prsm` line and 
 
 When Unity tries to open a generated `.cs` file (for example, from a double-clicked Console error), `MoonScriptProxy` and `MoonScriptRedirector` intercept the request and redirect it to the original `.prsm` source using the `.prsmmap.json` anchor map.
 
-## Project settings
+## Project Settings Window (since PrSM 3)
 
-Settings are accessible under **Edit → Project Settings → PrSM**:
+All `.prsmproject` settings can be edited via the Unity Editor GUI:
 
-- Active `.prsmproject` path
-- Output directory override
-- Compiler binary path override
-- Auto-compile on save toggle
+**Window > PrSM > Project Settings**
+
+The settings window provides controls for all configuration sections:
+
+| Section | Settings |
+|---------|----------|
+| **Project** | Name, PrSM Version |
+| **Language** | Version dropdown (1/2/3), Feature flag checkboxes (pattern-bindings, input-system, auto-unlisten, interface, generics, singleton, pool, solid-analysis, optimizer) |
+| **Compiler** | Compiler Path with Browse button, Output Directory with Browse button |
+| **Source** | Include/Exclude glob patterns (comma-separated) |
+| **Build Features** | Auto Compile on Save, Generate Meta Files, PascalCase Methods |
+| **Analysis** | SOLID Warnings toggle, Max Public Methods / Max Dependencies / Max Method Length thresholds |
+
+Buttons at the bottom:
+- **Save** — writes changes to `.prsmproject` and clears the compiler cache
+- **Revert** — reloads from disk, discarding unsaved changes
+- **Open .prsmproject** — opens the TOML file in the default text editor
+
+Changes are written to the `.prsmproject` file at the project root. See [Project Configuration](project-configuration.md) for the complete TOML format reference.
 
 ## Templates
 
