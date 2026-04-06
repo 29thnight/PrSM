@@ -172,7 +172,7 @@ exclude = []
     assert_eq!(json["files"], 1);
     assert_eq!(json["compiled"], 1);
     assert_eq!(json["errors"], 0);
-    assert_eq!(json["language_version"], "1.0");
+    assert_eq!(json["language_version"], "1");
     assert_eq!(json["language_features"][0], "input-system");
     assert_eq!(json["hir"]["files_indexed"], 1);
     assert_eq!(json["hir"]["definitions"], 1);
@@ -554,7 +554,7 @@ exclude = []
     let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
 
     assert_eq!(json["project"], "IndexProject");
-    assert_eq!(json["language_version"], "2.0");
+    assert_eq!(json["language_version"], "2");
     assert_eq!(json["language_features"][0], "pattern-bindings");
     assert_eq!(json["index"]["files_indexed"], 1);
     assert_eq!(json["index"]["total_symbols"], 2);

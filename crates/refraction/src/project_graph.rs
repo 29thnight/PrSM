@@ -12,10 +12,10 @@ pub enum LanguageVersion {
 impl LanguageVersion {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "1.0" => Ok(Self::V1),
-            "2.0" => Ok(Self::V2),
+            "1" | "1.0" => Ok(Self::V1),
+            "2" | "2.0" => Ok(Self::V2),
             other => Err(format!(
-                "Unsupported language version '{}'. Supported versions: 1.0, 2.0",
+                "Unsupported language version '{}'. Supported versions: 1, 2 (or 1.0, 2.0)",
                 other
             )),
         }
@@ -23,8 +23,8 @@ impl LanguageVersion {
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::V1 => "1.0",
-            Self::V2 => "2.0",
+            Self::V1 => "1",
+            Self::V2 => "2",
         }
     }
 }
