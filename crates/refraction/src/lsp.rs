@@ -1,4 +1,4 @@
-use crate::ast::{Annotation, Arg, Block, Decl, ElseBranch, Expr, File, FuncBody, Member, Param, Stmt, StringPart, TypeRef, WaitForm, WhenBody, WhenBranch, WhenPattern};
+use crate::ast::{Annotation, Arg, Block, Decl, ElseBranch, Expr, File, FuncBody, LambdaBody, Member, Param, Stmt, StringPart, TypeRef, WaitForm, WhenBody, WhenBranch, WhenPattern};
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::driver;
 use crate::hir::{HirDefinition, HirDefinitionKind};
@@ -1670,6 +1670,11 @@ fn collect_used_namespaces_for_decl(decl: &Decl, used_namespaces: &mut HashSet<S
                 collect_used_namespaces_for_member(member, used_namespaces);
             }
         }
+        Decl::Extension { members, .. } => {
+            for member in members {
+                collect_used_namespaces_for_member(member, used_namespaces);
+            }
+        }
         Decl::Interface { .. } => {}
         Decl::TypeAlias { target, .. } => {
             collect_used_namespaces_for_type_ref(target, used_namespaces);
@@ -1747,6 +1752,18 @@ fn collect_used_namespaces_for_member(member: &Member, used_namespaces: &mut Has
         }
         Member::Pool { item_type, .. } => {
             collect_used_namespaces_for_type_ref(item_type, used_namespaces);
+        }
+        Member::Property { ty, getter, setter, .. } => {
+            collect_used_namespaces_for_type_ref(ty, used_namespaces);
+            if let Some(body) = getter {
+                match body {
+                    FuncBody::Block(block) => collect_used_namespaces_for_block(block, used_namespaces),
+                    FuncBody::ExprBody(expr) => collect_used_namespaces_for_expr(expr, used_namespaces),
+                }
+            }
+            if let Some(setter) = setter {
+                collect_used_namespaces_for_block(&setter.body, used_namespaces);
+            }
         }
     }
 }
@@ -2030,7 +2047,10 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
             collect_used_namespaces_for_expr(expr, used_namespaces);
             collect_used_namespaces_for_type_ref(ty, used_namespaces);
         }
-        Expr::Lambda { body, .. } => collect_used_namespaces_for_block(body, used_namespaces),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Block(block) => collect_used_namespaces_for_block(block, used_namespaces),
+            LambdaBody::Expr(e) => collect_used_namespaces_for_expr(e, used_namespaces),
+        },
         Expr::IntrinsicExpr { ty, .. } => collect_used_namespaces_for_type_ref(ty, used_namespaces),
         Expr::SafeCastExpr { expr, target_type, .. } => {
             collect_used_namespaces_for_expr(expr, used_namespaces);
@@ -2112,6 +2132,12 @@ fn collect_used_namespaces_for_type_ref(ty: &TypeRef, used_namespaces: &mut Hash
                 collect_used_namespaces_for_type_ref(t, used_namespaces);
             }
         }
+        TypeRef::Function { param_types, return_type, .. } => {
+            for t in param_types {
+                collect_used_namespaces_for_type_ref(t, used_namespaces);
+            }
+            collect_used_namespaces_for_type_ref(return_type, used_namespaces);
+        }
     }
 }
 
@@ -2136,7 +2162,8 @@ fn decl_contains_intrinsic_code(decl: &Decl) -> bool {
         Decl::Component { members, .. }
         | Decl::Asset { members, .. }
         | Decl::Class { members, .. } => members.iter().any(member_contains_intrinsic_code),
-        Decl::Struct { members, .. } => members.iter().any(member_contains_intrinsic_code),
+        Decl::Struct { members, .. }
+        | Decl::Extension { members, .. } => members.iter().any(member_contains_intrinsic_code),
         Decl::DataClass { .. } | Decl::Enum { .. } | Decl::Attribute { .. } | Decl::Interface { .. } | Decl::TypeAlias { .. } => false,
     }
 }
@@ -2158,7 +2185,8 @@ fn member_contains_intrinsic_code(member: &Member) -> bool {
         | Member::Optional { .. }
         | Member::Child { .. }
         | Member::Parent { .. }
-        | Member::Pool { .. } => false,
+        | Member::Pool { .. }
+        | Member::Property { .. } => false,
     }
 }
 
@@ -2307,7 +2335,10 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
                 || step.as_ref().is_some_and(|step| expr_contains_intrinsic_code(step))
         }
         Expr::Is { expr, .. } => expr_contains_intrinsic_code(expr),
-        Expr::Lambda { body, .. } => block_contains_intrinsic_code(body),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Block(block) => block_contains_intrinsic_code(block),
+            LambdaBody::Expr(_) => false,
+        },
         Expr::SafeCastExpr { expr, .. } | Expr::ForceCastExpr { expr, .. } => {
             expr_contains_intrinsic_code(expr)
         }
@@ -2374,6 +2405,7 @@ fn decl_members(decl: &Decl) -> Option<&[Member]> {
         | Decl::Asset { members, .. }
         | Decl::Class { members, .. } => Some(members.as_slice()),
         Decl::Struct { members, .. } => Some(members.as_slice()),
+        Decl::Extension { members, .. } => Some(members.as_slice()),
         Decl::DataClass { .. } | Decl::Enum { .. } | Decl::Attribute { .. } | Decl::Interface { .. } | Decl::TypeAlias { .. } => None,
     }
 }
@@ -2388,7 +2420,8 @@ fn decl_start_position(decl: &Decl) -> Position {
         | Decl::Attribute { span, .. }
         | Decl::Interface { span, .. }
         | Decl::TypeAlias { span, .. }
-        | Decl::Struct { span, .. } => span.start,
+        | Decl::Struct { span, .. }
+        | Decl::Extension { span, .. } => span.start,
     }
 }
 
@@ -2848,9 +2881,14 @@ fn collect_expr_explicit_type_arg_actions(
         Expr::Is { expr, .. } => {
             collect_expr_explicit_type_arg_actions(expr, None, callable_signatures, selection_span, actions);
         }
-        Expr::Lambda { body, .. } => {
-            collect_block_explicit_type_arg_actions(body, callable_signatures, None, selection_span, actions);
-        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Block(block) => {
+                collect_block_explicit_type_arg_actions(block, callable_signatures, None, selection_span, actions);
+            }
+            LambdaBody::Expr(e) => {
+                collect_expr_explicit_type_arg_actions(e, None, callable_signatures, selection_span, actions);
+            }
+        },
         Expr::SafeCastExpr { expr, .. } | Expr::ForceCastExpr { expr, .. } => {
             collect_expr_explicit_type_arg_actions(expr, None, callable_signatures, selection_span, actions);
         }
@@ -2946,6 +2984,12 @@ fn strip_nullable_type_ref(ty: &TypeRef) -> TypeRef {
             nullable: false,
             span: *span,
         },
+        TypeRef::Function { param_types, return_type, span, .. } => TypeRef::Function {
+            param_types: param_types.clone(),
+            return_type: return_type.clone(),
+            nullable: false,
+            span: *span,
+        },
     }
 }
 
@@ -2978,6 +3022,13 @@ fn format_type_ref_source(ty: &TypeRef) -> String {
         TypeRef::Tuple { types, nullable, .. } => {
             let inner: Vec<String> = types.iter().map(format_type_ref_source).collect();
             format_nullable_type_ref_source(format!("({})", inner.join(", ")), *nullable)
+        }
+        TypeRef::Function { param_types, return_type, nullable, .. } => {
+            let inner: Vec<String> = param_types.iter().map(format_type_ref_source).collect();
+            format_nullable_type_ref_source(
+                format!("({}) => {}", inner.join(", "), format_type_ref_source(return_type)),
+                *nullable,
+            )
         }
     }
 }

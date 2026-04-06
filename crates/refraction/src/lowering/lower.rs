@@ -106,6 +106,9 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::Lifecycle { kind, params, body, .. } if *kind != LifecycleKind::Awake => {
                         cs_members.push(lower_lifecycle_with_ctx(*kind, params, body, &mut listen_ctx));
                     }
+                    Member::Func { is_operator: true, name: op_name, params, return_ty, body, .. } => {
+                        cs_members.extend(lower_operator_member(op_name, name, params, return_ty, body));
+                    }
                     Member::Func { .. } => {
                         cs_members.push(lower_func_member_with_ctx(m, &mut listen_ctx));
                     }
@@ -117,6 +120,9 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     }
                     Member::IntrinsicCoroutine { name: cname, params, code, span, .. } => {
                         cs_members.push(lower_intrinsic_coroutine(cname, params, code, *span));
+                    }
+                    Member::Property { name: pname, ty, mutability, getter, setter, .. } => {
+                        cs_members.extend(lower_property_member(pname, ty, *mutability, getter, setter));
                     }
                     _ => {}
                 }
@@ -267,12 +273,18 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
             for m in members {
                 match m {
                     Member::Field { .. } => cs_members.extend(lower_field_member(m)),
+                    Member::Func { is_operator: true, name: op_name, params, return_ty, body, .. } => {
+                        cs_members.extend(lower_operator_member(op_name, name, params, return_ty, body));
+                    }
                     Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
                     Member::IntrinsicFunc { visibility, name: fname, params, return_ty, code, span, .. } => {
                         cs_members.push(lower_intrinsic_func(*visibility, fname, params, return_ty.as_ref(), code, *span));
                     }
                     Member::IntrinsicCoroutine { name: cname, params, code, span, .. } => {
                         cs_members.push(lower_intrinsic_coroutine(cname, params, code, *span));
+                    }
+                    Member::Property { name: pname, ty, mutability, getter, setter, .. } => {
+                        cs_members.extend(lower_property_member(pname, ty, *mutability, getter, setter));
                     }
                     _ => {}
                 }
@@ -441,6 +453,9 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
         Decl::Struct { name, fields, members, .. } => {
             (lower_struct(name, fields, members), vec![])
         }
+        Decl::Extension { target_type, members, .. } => {
+            lower_extension(target_type, members)
+        }
     }
 }
 
@@ -520,11 +535,17 @@ fn lower_struct(name: &str, fields: &[Param], members: &[Member]) -> CsClass {
         source_span: None,
     });
 
-    // Lower optional body members (static fields, funcs)
+    // Lower optional body members (static fields, funcs, properties, operators)
     for m in members {
         match m {
             Member::Field { .. } => cs_members.extend(lower_field_member(m)),
+            Member::Func { is_operator: true, name: op_name, params, return_ty, body, .. } => {
+                cs_members.extend(lower_operator_member(op_name, name, params, return_ty, body));
+            }
             Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
+            Member::Property { name: pname, ty, mutability, getter, setter, .. } => {
+                cs_members.extend(lower_property_member(pname, ty, *mutability, getter, setter));
+            }
             _ => {}
         }
     }
@@ -1599,7 +1620,8 @@ fn member_span(member: &Member) -> Span {
         | Member::Lifecycle { span, .. }
         | Member::IntrinsicFunc { span, .. }
         | Member::IntrinsicCoroutine { span, .. }
-        | Member::Pool { span, .. } => *span,
+        | Member::Pool { span, .. }
+        | Member::Property { span, .. } => *span,
     }
 }
 
@@ -2443,8 +2465,8 @@ fn lower_expr_with_expected_type(
                 result
             }
         }
-        Expr::Lambda { .. } => {
-            "/* lambda */".into()
+        Expr::Lambda { params, body, .. } => {
+            lower_lambda_expr(params, body, callable_signatures)
         }
         Expr::IntrinsicExpr { code, .. } => code.clone(),
         Expr::SafeCastExpr { expr, target_type, .. } => {
@@ -2568,6 +2590,12 @@ fn strip_nullable_type(ty: &TypeRef) -> TypeRef {
             nullable: false,
             span: *span,
         },
+        TypeRef::Function { param_types, return_type, span, .. } => TypeRef::Function {
+            param_types: param_types.clone(),
+            return_type: return_type.clone(),
+            nullable: false,
+            span: *span,
+        },
     }
 }
 
@@ -2644,7 +2672,444 @@ fn lower_type(ty: &TypeRef) -> String {
             let base = format!("({})", inner.join(", "));
             if *nullable { format!("{}?", base) } else { base }
         }
+        TypeRef::Function { param_types, return_type, nullable, .. } => {
+            let ret = lower_type(return_type);
+            let base = if ret == "void" {
+                // Action or Action<T1, T2, ...>
+                if param_types.is_empty() {
+                    "System.Action".into()
+                } else {
+                    let params: Vec<String> = param_types.iter().map(|t| lower_type(t)).collect();
+                    format!("System.Action<{}>", params.join(", "))
+                }
+            } else {
+                // Func<T1, T2, ..., TResult>
+                let mut all: Vec<String> = param_types.iter().map(|t| lower_type(t)).collect();
+                all.push(ret);
+                format!("System.Func<{}>", all.join(", "))
+            };
+            if *nullable { format!("{}?", base) } else { base }
+        }
     }
+}
+
+/// Simple helper to convert a CsStmt into formatted lines (used in inline code generation).
+fn emit_stmt_lines(stmt: &CsStmt, indent: &str) -> Vec<String> {
+    match stmt {
+        CsStmt::VarDecl { ty, name, init, .. } => {
+            vec![format!("{}{} {} = {};", indent, ty, name, init)]
+        }
+        CsStmt::Assignment { target, op, value, .. } => {
+            vec![format!("{}{} {} {};", indent, target, op, value)]
+        }
+        CsStmt::Expr(s, _) => vec![format!("{}{};", indent, s)],
+        CsStmt::Return(Some(s), _) => vec![format!("{}return {};", indent, s)],
+        CsStmt::Return(None, _) => vec![format!("{}return;", indent)],
+        CsStmt::Raw(s, _) => vec![format!("{}{}", indent, s)],
+        CsStmt::Throw(s, _) => vec![format!("{}throw {};", indent, s)],
+        CsStmt::Break(_) => vec![format!("{}break;", indent)],
+        CsStmt::Continue(_) => vec![format!("{}continue;", indent)],
+        _ => vec![format!("{}/* unsupported stmt */", indent)],
+    }
+}
+
+/// Lower a lambda expression to C# lambda syntax.
+fn lower_lambda_expr(
+    params: &[LambdaParam],
+    body: &LambdaBody,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> String {
+    let params_str = if params.is_empty() {
+        // Implicit `it` parameter — emit as `(it) =>`
+        "(it)".to_string()
+    } else if params.len() == 1 {
+        params[0].name.clone()
+    } else {
+        let ps: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+        format!("({})", ps.join(", "))
+    };
+
+    match body {
+        LambdaBody::Expr(expr) => {
+            let expr_str = lower_expr_with_expected_type(expr, None, callable_signatures);
+            format!("{} => {}", params_str, expr_str)
+        }
+        LambdaBody::Block(block) => {
+            if block.stmts.is_empty() {
+                format!("{} => {{}}", params_str)
+            } else {
+                let stmts: Vec<CsStmt> = block.stmts.iter().map(|s| lower_stmt(s)).collect();
+                let lines: Vec<String> = stmts.iter().flat_map(|s| emit_stmt_lines(s, "    ")).collect();
+                format!("{} => {{\n{}\n}}", params_str, lines.join("\n"))
+            }
+        }
+    }
+}
+
+/// Lower an extension declaration to a static class with extension methods.
+fn lower_extension(target_type: &TypeRef, members: &[Member]) -> (CsClass, Vec<CsClass>) {
+    let target_name = match target_type {
+        TypeRef::Simple { name, .. } => name.clone(),
+        TypeRef::Generic { name, .. } => name.clone(),
+        TypeRef::Qualified { name, .. } => name.clone(),
+        _ => "Extension".to_string(),
+    };
+    let class_name = format!("{}Extensions", target_name);
+    let target_cs = lower_type(target_type);
+
+    let mut cs_members = Vec::new();
+    for m in members {
+        match m {
+            Member::Func { name, params, return_ty, body, is_operator, visibility, .. } => {
+                if *is_operator {
+                    // Operator members in extensions are not valid — skip
+                    continue;
+                }
+                let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or_else(|| "void".into());
+                // Extension method: first param is `this TargetType self`
+                let mut cs_params = vec![CsParam {
+                    ty: format!("this {}", target_cs),
+                    name: "__self".into(),
+                    default: None,
+                }];
+                for p in params {
+                    cs_params.push(CsParam {
+                        ty: lower_type(&p.ty),
+                        name: p.name.clone(),
+                        default: p.default.as_ref().map(|e| lower_expr(e)),
+                    });
+                }
+                let cs_body = lower_func_body_ext(body, &HashMap::new(), true);
+                cs_members.push(CsMember::Method {
+                    attributes: vec![],
+                    modifiers: format!("public static"),
+                    return_ty: ret,
+                    name: name.clone(),
+                    params: cs_params,
+                    where_clauses: vec![],
+                    body: cs_body,
+                    source_span: None,
+                });
+            }
+            Member::Property { name, ty, getter, .. } => {
+                // Extension property: static method with `this` param
+                if let Some(getter_body) = getter {
+                    let ret = lower_type(ty);
+                    let cs_params = vec![CsParam {
+                        ty: format!("this {}", target_cs),
+                        name: "__self".into(),
+                        default: None,
+                    }];
+                    let cs_body = lower_func_body_ext_with_funcbody(getter_body, &HashMap::new(), true);
+                    cs_members.push(CsMember::Method {
+                        attributes: vec![],
+                        modifiers: "public static".into(),
+                        return_ty: ret,
+                        name: format!("get_{}", name),
+                        params: cs_params,
+                        where_clauses: vec![],
+                        body: cs_body,
+                        source_span: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (
+        CsClass {
+            attributes: vec![],
+            modifiers: "public static".into(),
+            name: class_name,
+            base_class: None,
+            interfaces: vec![],
+            where_clauses: vec![],
+            members: cs_members,
+        },
+        vec![],
+    )
+}
+
+/// Lower a FuncBody for extension methods (replacing `this` with `__self`).
+fn lower_func_body_ext(body: &FuncBody, sigs: &HashMap<String, CallableSignature>, _is_extension: bool) -> Vec<CsStmt> {
+    match body {
+        FuncBody::ExprBody(expr) => {
+            let expr_str = lower_expr(expr).replace("this", "__self");
+            vec![CsStmt::Return(Some(expr_str), None)]
+        }
+        FuncBody::Block(block) => {
+            let mut stmts: Vec<CsStmt> = block.stmts.iter().map(|s| lower_stmt(s)).collect();
+            replace_this_in_stmts(&mut stmts, "__self");
+            stmts
+        }
+    }
+}
+
+fn lower_func_body_ext_with_funcbody(body: &FuncBody, sigs: &HashMap<String, CallableSignature>, is_ext: bool) -> Vec<CsStmt> {
+    lower_func_body_ext(body, sigs, is_ext)
+}
+
+/// Replace all occurrences of "this" with the given name in statement strings.
+fn replace_this_in_stmts(stmts: &mut Vec<CsStmt>, replacement: &str) {
+    for stmt in stmts.iter_mut() {
+        replace_this_in_stmt(stmt, replacement);
+    }
+}
+
+fn replace_this_in_stmt(stmt: &mut CsStmt, replacement: &str) {
+    match stmt {
+        CsStmt::VarDecl { init, .. } => {
+            *init = init.replace("this", replacement);
+        }
+        CsStmt::Assignment { target, value, .. } => {
+            *target = target.replace("this", replacement);
+            *value = value.replace("this", replacement);
+        }
+        CsStmt::Expr(s, _) => {
+            *s = s.replace("this", replacement);
+        }
+        CsStmt::Return(Some(s), _) => {
+            *s = s.replace("this", replacement);
+        }
+        CsStmt::If { cond, then_body, else_body, .. } => {
+            *cond = cond.replace("this", replacement);
+            replace_this_in_stmts(then_body, replacement);
+            if let Some(eb) = else_body {
+                replace_this_in_stmts(eb, replacement);
+            }
+        }
+        CsStmt::Raw(s, _) => {
+            *s = s.replace("this", replacement);
+        }
+        _ => {}
+    }
+}
+
+/// Lower a Member::Property to CsMember entries.
+fn lower_property_member(
+    name: &str,
+    ty: &TypeRef,
+    mutability: Mutability,
+    getter: &Option<FuncBody>,
+    setter: &Option<PropertySetter>,
+) -> Vec<CsMember> {
+    let cs_ty = lower_type(ty);
+    let mut result = Vec::new();
+
+    match (getter, setter) {
+        // val with getter only → computed property: `public Type Name => expr;`
+        (Some(FuncBody::ExprBody(expr)), None) => {
+            let expr_str = lower_expr(expr);
+            result.push(CsMember::Property {
+                modifiers: "public".into(),
+                ty: cs_ty,
+                name: name.into(),
+                getter_expr: expr_str,
+                setter: None,
+                setter_expr: None,
+            });
+        }
+        // Full property with get block and optional set
+        (Some(getter_body), setter_opt) => {
+            let backing = format!("_{}", name);
+            // Backing field if setter exists
+            if setter_opt.is_some() {
+                result.push(CsMember::Field {
+                    attributes: vec![],
+                    modifiers: "private".into(),
+                    ty: cs_ty.clone(),
+                    name: backing.clone(),
+                    init: None,
+                });
+            }
+            let getter_str = match getter_body {
+                FuncBody::ExprBody(expr) => lower_expr(expr).replace("field", &backing),
+                FuncBody::Block(block) => {
+                    let stmts: Vec<CsStmt> = block.stmts.iter().map(|s| lower_stmt(s)).collect();
+                    let lines: Vec<String> = stmts.iter().flat_map(|s| emit_stmt_lines(s, "            ")).collect();
+                    let code = lines.join("\n");
+                    code.replace("field", &backing)
+                }
+            };
+            let setter_str = setter_opt.as_ref().map(|s| {
+                let stmts: Vec<CsStmt> = s.body.stmts.iter().map(|st| lower_stmt(st)).collect();
+                let lines: Vec<String> = stmts.iter().flat_map(|st| emit_stmt_lines(st, "            ")).collect();
+                let code = lines.join("\n");
+                code.replace("field", &backing).replace(&s.param_name, "value")
+            });
+            // Emit as RawCode for full control
+            let mut code = format!("public {} {}\n    {{\n        get\n        {{\n", cs_ty, name);
+            code.push_str(&format!("            return {};\n", getter_str));
+            code.push_str("        }\n");
+            if let Some(setter_code) = setter_str {
+                code.push_str("        set\n        {\n");
+                code.push_str(&setter_code);
+                code.push_str("\n        }\n");
+            }
+            code.push_str("    }");
+            result.push(CsMember::RawCode(code));
+        }
+        // No getter — just a field with no special handling
+        (None, _) => {
+            result.push(CsMember::Field {
+                attributes: vec![],
+                modifiers: "public".into(),
+                ty: cs_ty,
+                name: name.into(),
+                init: None,
+            });
+        }
+    }
+
+    result
+}
+
+/// Map PrSM operator names to C# operator symbols.
+fn map_operator_name(name: &str) -> Option<&'static str> {
+    match name {
+        "plus" => Some("+"),
+        "minus" => Some("-"),
+        "times" => Some("*"),
+        "div" => Some("/"),
+        "mod" => Some("%"),
+        "equals" => Some("=="),
+        "compareTo" => Some("<"),
+        "get" => None, // indexer getter
+        "set" => None, // indexer setter
+        _ => None,
+    }
+}
+
+/// Lower an operator member to C# method(s).
+fn lower_operator_member(
+    name: &str,
+    enclosing_type: &str,
+    params: &[Param],
+    return_ty: &Option<TypeRef>,
+    body: &FuncBody,
+) -> Vec<CsMember> {
+    let mut result = Vec::new();
+
+    // Indexer: operator get / operator set
+    if name == "get" || name == "set" {
+        return lower_indexer_member(name, params, return_ty, body);
+    }
+
+    // Operator overloading
+    if let Some(op_symbol) = map_operator_name(name) {
+        let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or_else(|| enclosing_type.into());
+        let mut cs_params = vec![CsParam {
+            ty: enclosing_type.into(),
+            name: "left".into(),
+            default: None,
+        }];
+        if let Some(first_param) = params.first() {
+            cs_params.push(CsParam {
+                ty: lower_type(&first_param.ty),
+                name: first_param.name.clone(),
+                default: None,
+            });
+        }
+        let cs_body = match body {
+            FuncBody::ExprBody(expr) => {
+                let expr_str = lower_expr(expr);
+                vec![CsStmt::Return(Some(expr_str), None)]
+            }
+            FuncBody::Block(block) => block.stmts.iter().map(|s| lower_stmt(s)).collect(),
+        };
+        result.push(CsMember::Method {
+            attributes: vec![],
+            modifiers: "public static".into(),
+            return_ty: ret.clone(),
+            name: format!("operator {}", op_symbol),
+            params: cs_params,
+            where_clauses: vec![],
+            body: cs_body,
+            source_span: None,
+        });
+
+        // For `equals`, also generate `operator !=`
+        if name == "equals" {
+            result.push(CsMember::Method {
+                attributes: vec![],
+                modifiers: "public static".into(),
+                return_ty: ret,
+                name: "operator !=".into(),
+                params: vec![
+                    CsParam { ty: enclosing_type.into(), name: "left".into(), default: None },
+                    CsParam { ty: params.first().map(|p| lower_type(&p.ty)).unwrap_or_else(|| enclosing_type.into()), name: params.first().map(|p| p.name.clone()).unwrap_or_else(|| "right".into()), default: None },
+                ],
+                where_clauses: vec![],
+                body: vec![CsStmt::Return(Some(format!("!(left == {})", params.first().map(|p| p.name.as_str()).unwrap_or("right"))), None)],
+                source_span: None,
+            });
+        }
+
+        // For `compareTo`, also generate `operator >`
+        if name == "compareTo" {
+            result.push(CsMember::Method {
+                attributes: vec![],
+                modifiers: "public static".into(),
+                return_ty: "bool".into(),
+                name: "operator >".into(),
+                params: vec![
+                    CsParam { ty: enclosing_type.into(), name: "left".into(), default: None },
+                    CsParam { ty: params.first().map(|p| lower_type(&p.ty)).unwrap_or_else(|| enclosing_type.into()), name: params.first().map(|p| p.name.clone()).unwrap_or_else(|| "right".into()), default: None },
+                ],
+                where_clauses: vec![],
+                body: vec![CsStmt::Return(Some(format!("!(left < {})", params.first().map(|p| p.name.as_str()).unwrap_or("right"))), None)],
+                source_span: None,
+            });
+        }
+    }
+
+    result
+}
+
+/// Lower indexer operator get/set to C# indexer.
+fn lower_indexer_member(
+    name: &str,
+    params: &[Param],
+    return_ty: &Option<TypeRef>,
+    body: &FuncBody,
+) -> Vec<CsMember> {
+    let mut result = Vec::new();
+    if name == "get" {
+        let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or_else(|| "object".into());
+        let index_ty = params.first().map(|p| lower_type(&p.ty)).unwrap_or_else(|| "int".into());
+        let index_name = params.first().map(|p| p.name.as_str()).unwrap_or("index");
+        let body_str = match body {
+            FuncBody::ExprBody(expr) => lower_expr(expr),
+            FuncBody::Block(block) => {
+                let stmts: Vec<CsStmt> = block.stmts.iter().map(|s| lower_stmt(s)).collect();
+                let lines: Vec<String> = stmts.iter().flat_map(|s| emit_stmt_lines(s, "            ")).collect();
+                lines.join("\n")
+            }
+        };
+        result.push(CsMember::RawCode(format!(
+            "public {} this[{} {}]\n    {{\n        get => {};\n    }}",
+            ret, index_ty, index_name, body_str,
+        )));
+    } else if name == "set" {
+        let index_ty = params.first().map(|p| lower_type(&p.ty)).unwrap_or_else(|| "int".into());
+        let index_name = params.first().map(|p| p.name.as_str()).unwrap_or("index");
+        let value_ty = params.get(1).map(|p| lower_type(&p.ty)).unwrap_or_else(|| "object".into());
+        let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or(value_ty.clone());
+        let body_str = match body {
+            FuncBody::ExprBody(expr) => lower_expr(expr),
+            FuncBody::Block(block) => {
+                let stmts: Vec<CsStmt> = block.stmts.iter().map(|s| lower_stmt(s)).collect();
+                let lines: Vec<String> = stmts.iter().flat_map(|s| emit_stmt_lines(s, "            ")).collect();
+                lines.join("\n")
+            }
+        };
+        result.push(CsMember::RawCode(format!(
+            "public {} this[{} {}]\n    {{\n        set\n        {{\n            {}\n        }}\n    }}",
+            ret, index_ty, index_name, body_str,
+        )));
+    }
+    result
 }
 
 fn map_type_name(name: &str) -> String {
@@ -3182,7 +3647,10 @@ fn expr_uses_new_input(expr: &Expr) -> bool {
             if let StringPart::Expr(e) = p { expr_uses_new_input(e) } else { false }
         }),
         Expr::Is { expr, .. } => expr_uses_new_input(expr),
-        Expr::Lambda { body, .. } => body.stmts.iter().any(|s| stmt_uses_new_input(s)),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Block(block) => block.stmts.iter().any(|s| stmt_uses_new_input(s)),
+            LambdaBody::Expr(e) => expr_uses_new_input(e),
+        },
         _ => false,
     }
 }

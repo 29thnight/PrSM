@@ -167,6 +167,17 @@ pub enum TokenKind {
     // === Keywords: value types ===
     Struct,
 
+    // === Keywords: extensions ===
+    Extend,
+
+    // === Keywords: operator ===
+    Operator,
+
+    // === Keywords: property accessors ===
+    Get,
+    Set,
+    Field,
+
     // === Keywords: other ===
     Using,
     Null,
@@ -298,6 +309,8 @@ impl TokenKind {
                 | TokenKind::TypeAlias
                 | TokenKind::As
                 | TokenKind::Struct
+                | TokenKind::Extend
+                | TokenKind::Operator
                 | TokenKind::Using
                 | TokenKind::Null
                 | TokenKind::This
@@ -381,6 +394,12 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
         "typealias" => Some(TokenKind::TypeAlias),
         "as" => Some(TokenKind::As),
         "struct" => Some(TokenKind::Struct),
+        "extend" => Some(TokenKind::Extend),
+        "operator" => Some(TokenKind::Operator),
+        // Note: `get`, `set`, and `field` are contextual keywords. They are
+        // produced as `Identifier` here so that existing usages such as the
+        // built-in `get<Component>()` sugar continue to work, and the parser
+        // recognises them by their identifier text inside property accessors.
         "using" => Some(TokenKind::Using),
         "null" => Some(TokenKind::Null),
         "this" => Some(TokenKind::This),

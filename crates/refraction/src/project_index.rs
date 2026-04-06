@@ -1,6 +1,6 @@
 use crate::ast::{
-    Arg, Block, Decl, ElseBranch, EnumEntry, Expr, FuncBody, LifecycleKind, Member, Param, Stmt,
-    StringPart, TypeRef, Visibility, WaitForm, WhenBody, WhenBranch, WhenPattern,
+    Arg, Block, Decl, ElseBranch, EnumEntry, Expr, FuncBody, LambdaBody, LifecycleKind, Member,
+    Param, Stmt, StringPart, TypeRef, Visibility, WaitForm, WhenBody, WhenBranch, WhenPattern,
 };
 use crate::lexer::lexer::Lexer;
 use crate::lexer::token::{Position, Span};
@@ -534,6 +534,29 @@ fn summarize_decl(path: &Path, decl: &Decl) -> (DeclarationSummary, Vec<IndexedS
                 *name_span,
             )
         }
+        Decl::Extension { target_type, members, span } => {
+            // Extensions don't introduce a new declaration of their own; instead they
+            // augment an existing type. We synthesize an "extend" entry whose name is
+            // the target type so that members are still indexed for navigation/lookup.
+            let name = type_ref_signature(target_type);
+            let synthesized_name = format!("extend {}", name);
+            summarize_named_decl(
+                path,
+                &synthesized_name,
+                DeclarationKind::Class,
+                None,
+                Vec::new(),
+                format!("extend {}", name),
+                summarize_members(path, &synthesized_name, members),
+                {
+                    let mut references = Vec::new();
+                    collect_type_references(path, &synthesized_name, target_type, &mut references);
+                    references.extend(summarize_member_type_references(path, &synthesized_name, members));
+                    references
+                },
+                *span,
+            )
+        }
     }
 }
 
@@ -699,6 +722,22 @@ fn summarize_member_type_references(path: &Path, decl_name: &str, members: &[Mem
             }
             Member::Pool { name, item_type, .. } => {
                 collect_type_references(path, &format!("{}.{}", decl_name, name), item_type, &mut references);
+            }
+            Member::Property {
+                name,
+                ty,
+                getter,
+                setter,
+                ..
+            } => {
+                let container_name = format!("{}.{}", decl_name, name);
+                collect_type_references(path, &container_name, ty, &mut references);
+                if let Some(getter) = getter {
+                    collect_func_body_type_references(path, &container_name, getter, &mut references);
+                }
+                if let Some(setter) = setter {
+                    collect_block_type_references(path, &container_name, &setter.body, &mut references);
+                }
             }
         }
     }
@@ -962,7 +1001,10 @@ fn collect_expr_type_references(
             collect_expr_type_references(path, container_name, expr, references);
             collect_type_references(path, container_name, ty, references);
         }
-        Expr::Lambda { body, .. } => collect_block_type_references(path, container_name, body, references),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Block(block) => collect_block_type_references(path, container_name, block, references),
+            LambdaBody::Expr(expr) => collect_expr_type_references(path, container_name, expr, references),
+        },
         Expr::IntrinsicExpr { ty, .. } => collect_type_references(path, container_name, ty, references),
         Expr::SafeCastExpr { expr, target_type, .. } => {
             collect_expr_type_references(path, container_name, expr, references);
@@ -1033,6 +1075,12 @@ fn collect_type_references(
             for t in types {
                 collect_type_references(path, container_name, t, references);
             }
+        }
+        TypeRef::Function { param_types, return_type, .. } => {
+            for t in param_types {
+                collect_type_references(path, container_name, t, references);
+            }
+            collect_type_references(path, container_name, return_type, references);
         }
     }
 }
@@ -1237,6 +1285,25 @@ fn summarize_members(path: &Path, container_name: &str, members: &[Member]) -> V
                 ),
                 span: *name_span,
             },
+            Member::Property {
+                mutability,
+                name,
+                name_span,
+                ty,
+                ..
+            } => MemberSummary {
+                name: name.clone(),
+                kind: MemberKind::Field,
+                signature: format!(
+                    "{} {}: {}",
+                    mutability_keyword(*mutability),
+                    name,
+                    format_type_ref(ty)
+                )
+                .trim()
+                .to_string(),
+                span: *name_span,
+            },
         })
         .collect()
 }
@@ -1321,6 +1388,11 @@ fn type_ref_signature(ty: &TypeRef) -> String {
             let base = format!("({})", inner.join(", "));
             if *nullable { format!("{}?", base) } else { base }
         }
+        TypeRef::Function { param_types, return_type, nullable, .. } => {
+            let inner: Vec<String> = param_types.iter().map(type_ref_signature).collect();
+            let base = format!("({}) => {}", inner.join(", "), type_ref_signature(return_type));
+            if *nullable { format!("{}?", base) } else { base }
+        }
     }
 }
 
@@ -1385,6 +1457,13 @@ fn format_type_ref(ty: &TypeRef) -> String {
         TypeRef::Tuple { types, nullable, .. } => {
             let inner: Vec<String> = types.iter().map(format_type_ref).collect();
             format_nullable(format!("({})", inner.join(", ")), *nullable)
+        }
+        TypeRef::Function { param_types, return_type, nullable, .. } => {
+            let inner: Vec<String> = param_types.iter().map(format_type_ref).collect();
+            format_nullable(
+                format!("({}) => {}", inner.join(", "), format_type_ref(return_type)),
+                *nullable,
+            )
         }
     }
 }

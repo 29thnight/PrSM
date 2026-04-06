@@ -103,6 +103,12 @@ pub enum Decl {
         members: Vec<Member>,
         span: Span,
     },
+    /// `extend TypeName { members }` — extension methods (since Language 4)
+    Extension {
+        target_type: TypeRef,
+        members: Vec<Member>,
+        span: Span,
+    },
 }
 
 /// A member of an interface declaration — method signature or property.
@@ -199,6 +205,7 @@ pub enum Member {
         is_override: bool,
         is_abstract: bool,
         is_open: bool,
+        is_operator: bool,
         name: String,
         name_span: Span,
         type_params: Vec<String>,
@@ -206,6 +213,16 @@ pub enum Member {
         params: Vec<Param>,
         return_ty: Option<TypeRef>,
         body: FuncBody,
+        span: Span,
+    },
+    /// Custom property with get/set (since Language 4)
+    Property {
+        mutability: Mutability,
+        name: String,
+        name_span: Span,
+        ty: TypeRef,
+        getter: Option<FuncBody>,
+        setter: Option<PropertySetter>,
         span: Span,
     },
     Coroutine {
@@ -428,6 +445,21 @@ pub enum WhenBody {
     Expr(Expr),
 }
 
+/// Setter definition for a custom property.
+#[derive(Debug, Clone)]
+pub struct PropertySetter {
+    /// The name of the value parameter, e.g. "value"
+    pub param_name: String,
+    pub body: Block,
+}
+
+/// Lambda parameter (may have optional type annotation).
+#[derive(Debug, Clone)]
+pub struct LambdaParam {
+    pub name: String,
+    pub ty: Option<TypeRef>,
+}
+
 /// How long a `listen` subscription lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ListenLifetime {
@@ -544,8 +576,8 @@ pub enum Expr {
         span: Span,
     },
     Lambda {
-        params: Vec<String>,
-        body: Block,
+        params: Vec<LambdaParam>,
+        body: LambdaBody,
         span: Span,
     },
     IntrinsicExpr {
@@ -611,6 +643,13 @@ pub enum TypeRef {
         nullable: bool,
         span: Span,
     },
+    /// `(Int, Int) => Bool` — function type (Language 4)
+    Function {
+        param_types: Vec<TypeRef>,
+        return_type: Box<TypeRef>,
+        nullable: bool,
+        span: Span,
+    },
 }
 
 // ── Supporting types ─────────────────────────────────────────────
@@ -656,6 +695,13 @@ pub enum Mutability {
 pub enum FuncBody {
     Block(Block),
     ExprBody(Expr),
+}
+
+/// Lambda body — either a block or a single expression.
+#[derive(Debug, Clone)]
+pub enum LambdaBody {
+    Block(Block),
+    Expr(Box<Expr>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

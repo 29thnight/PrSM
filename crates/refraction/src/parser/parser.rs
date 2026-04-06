@@ -83,12 +83,32 @@ impl Parser {
     }
 
     fn expect_ident(&mut self) -> Result<(String, Span), ParseError> {
-        if let TokenKind::Identifier(name) = self.peek().clone() {
+        match self.peek().clone() {
+            TokenKind::Identifier(name) => {
+                let span = self.peek_span();
+                self.advance();
+                Ok((name, span))
+            }
+            _ => {
+                Err(self.error(format!("Expected identifier, found {:?}", self.peek())))
+            }
+        }
+    }
+
+    /// Check if the current token is the contextual identifier with the given text.
+    fn check_contextual(&self, text: &str) -> bool {
+        matches!(self.peek(), TokenKind::Identifier(name) if name == text)
+    }
+
+    /// If the current token is the contextual identifier with the given text,
+    /// consume it and return its span.
+    fn eat_contextual(&mut self, text: &str) -> Option<Span> {
+        if self.check_contextual(text) {
             let span = self.peek_span();
             self.advance();
-            Ok((name, span))
+            Some(span)
         } else {
-            Err(self.error(format!("Expected identifier, found {:?}", self.peek())))
+            None
         }
     }
 
@@ -220,7 +240,8 @@ impl Parser {
             TokenKind::Interface => self.parse_interface(),
             TokenKind::TypeAlias => self.parse_type_alias(),
             TokenKind::Struct => self.parse_struct(),
-            _ => Err(self.error(format!("Expected declaration (component, singleton, asset, class, enum, attribute, interface, typealias, struct), found {:?}", self.peek()))),
+            TokenKind::Extend => self.parse_extension(),
+            _ => Err(self.error(format!("Expected declaration (component, singleton, asset, class, enum, attribute, interface, typealias, struct, extend), found {:?}", self.peek()))),
         }
     }
 
@@ -751,7 +772,7 @@ impl Parser {
                     }
                     // field: private rb: Rigidbody
                     TokenKind::Identifier(_) => self.parse_field(vis),
-                    TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field(vis),
+                    TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property(vis),
                     _ => Err(self.error(format!("Expected member after visibility, found {:?}", self.peek()))),
                 }
             }
@@ -759,6 +780,7 @@ impl Parser {
                 self.advance(); // consume 'static'
                 match self.peek().clone() {
                     TokenKind::Func => self.parse_func_with_static(Visibility::Public, false, true),
+                    TokenKind::Operator => self.parse_operator_member(),
                     TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_with_static(Visibility::Public, true),
                     _ => Err(self.error(format!("Expected 'func', 'val', or 'var' after 'static', found {:?}", self.peek()))),
                 }
@@ -773,7 +795,8 @@ impl Parser {
                 self.expect(&TokenKind::Func)?;
                 self.parse_func_inner_ext(Visibility::Public, false, false, false, true)
             }
-            TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field(Visibility::Public),
+            TokenKind::Operator => self.parse_operator_member(),
+            TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property(Visibility::Public),
             // Lifecycle blocks
             TokenKind::Awake | TokenKind::Update | TokenKind::FixedUpdate
             | TokenKind::LateUpdate | TokenKind::OnEnable | TokenKind::OnDisable
@@ -1011,6 +1034,7 @@ impl Parser {
             is_override,
             is_abstract,
             is_open,
+            is_operator: false,
             name,
             name_span,
             type_params,
@@ -1162,6 +1186,55 @@ impl Parser {
         self.parse_val_var_field_with_static(vis, false)
     }
 
+    /// Parse val/var that may be a property (with get/set) or a plain field.
+    fn parse_val_var_field_or_property(&mut self, vis: Visibility) -> Result<Member, ParseError> {
+        let start = self.peek_span();
+        let mutability = match self.peek() {
+            TokenKind::Val => { self.advance(); Mutability::Val }
+            TokenKind::Var => { self.advance(); Mutability::Var }
+            TokenKind::Const => { self.advance(); Mutability::Const }
+            TokenKind::Fixed => { self.advance(); Mutability::Fixed }
+            _ => return Err(self.error("Expected val, var, const, or fixed".into())),
+        };
+        let (name, name_span) = self.expect_ident()?;
+        let ty = if self.eat(&TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        // Check if this is a property with get/set accessors.
+        // After `val name: Type` or `var name: Type`, look ahead past newlines for `get` or `set`.
+        if (mutability == Mutability::Val || mutability == Mutability::Var) && ty.is_some() {
+            let saved = self.pos;
+            // Save position, skip newlines, peek for get/set
+            self.skip_newlines();
+            if self.check_contextual("get") || self.check_contextual("set") {
+                // This is a property declaration
+                return self.parse_property_accessors(start, mutability, name, name_span, ty.unwrap());
+            }
+            // Not a property — restore position
+            self.pos = saved;
+        }
+
+        let init = if self.eat(&TokenKind::Eq) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect_newline_or_eof();
+        Ok(Member::Field {
+            visibility: vis,
+            is_static: false,
+            mutability,
+            name,
+            name_span,
+            ty,
+            init,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
     fn parse_val_var_field_with_static(&mut self, vis: Visibility, is_static: bool) -> Result<Member, ParseError> {
         let start = self.peek_span();
         let mutability = if self.eat(&TokenKind::Val) {
@@ -1205,6 +1278,122 @@ impl Parser {
             TokenKind::Protected => { self.advance(); Visibility::Protected }
             _ => Visibility::Public,
         }
+    }
+
+    // ── Property accessor parsing ────────────────────────────────
+
+    /// Parse the get/set accessors after `val name: Type` or `var name: Type`.
+    fn parse_property_accessors(
+        &mut self,
+        start: Span,
+        mutability: Mutability,
+        name: String,
+        name_span: Span,
+        ty: TypeRef,
+    ) -> Result<Member, ParseError> {
+        let mut getter: Option<FuncBody> = None;
+        let mut setter: Option<PropertySetter> = None;
+
+        // Parse `get` and/or `set` in any order
+        loop {
+            self.skip_newlines();
+            if self.check_contextual("get") && getter.is_none() {
+                self.advance(); // consume 'get'
+                if self.eat(&TokenKind::Eq) {
+                    // get = expr
+                    let expr = self.parse_expr()?;
+                    getter = Some(FuncBody::ExprBody(expr));
+                } else {
+                    self.skip_newlines();
+                    let block = self.parse_block()?;
+                    getter = Some(FuncBody::Block(block));
+                }
+            } else if self.check_contextual("set") && setter.is_none() {
+                self.advance(); // consume 'set'
+                self.expect(&TokenKind::LParen)?;
+                let (param_name, _) = self.expect_ident()?;
+                self.expect(&TokenKind::RParen)?;
+                self.skip_newlines();
+                let block = self.parse_block()?;
+                setter = Some(PropertySetter { param_name, body: block });
+            } else {
+                break;
+            }
+        }
+
+        Ok(Member::Property {
+            mutability,
+            name,
+            name_span,
+            ty,
+            getter,
+            setter,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    // ── Operator member parsing ─────────────────────────────────
+
+    /// Parse `operator get(...)`, `operator set(...)`, `operator plus(...)`, etc.
+    fn parse_operator_member(&mut self) -> Result<Member, ParseError> {
+        let start = self.peek_span();
+        self.expect(&TokenKind::Operator)?;
+
+        // The operator name: get, set, plus, minus, times, div, mod, equals, compareTo
+        let (op_name, op_name_span) = self.expect_ident()?;
+
+        self.expect(&TokenKind::LParen)?;
+        let params = self.parse_param_list()?;
+        self.expect(&TokenKind::RParen)?;
+
+        let return_ty = if self.eat(&TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        let body = if self.eat(&TokenKind::Eq) {
+            let expr = self.parse_expr()?;
+            self.expect_newline_or_eof();
+            FuncBody::ExprBody(expr)
+        } else {
+            self.skip_newlines();
+            FuncBody::Block(self.parse_block()?)
+        };
+
+        Ok(Member::Func {
+            visibility: Visibility::Public,
+            is_static: false,
+            is_override: false,
+            is_abstract: false,
+            is_open: false,
+            is_operator: true,
+            name: op_name,
+            name_span: op_name_span,
+            type_params: vec![],
+            where_clauses: vec![],
+            params,
+            return_ty,
+            body,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    // ── Extension declaration parsing ───────────────────────────
+
+    fn parse_extension(&mut self) -> Result<Decl, ParseError> {
+        let start = self.peek_span();
+        self.advance(); // consume 'extend'
+        let target_type = self.parse_type()?;
+        self.skip_newlines();
+        self.expect(&TokenKind::LBrace)?;
+        let members = self.parse_members()?;
+        self.expect(&TokenKind::RBrace)?;
+        Ok(Decl::Extension {
+            target_type,
+            members,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
     }
 
     // ── Block & Statement parsing ────────────────────────────────
@@ -2379,8 +2568,126 @@ impl Parser {
                     Ok(expr)
                 }
             }
+            TokenKind::LBrace => self.parse_lambda_expr(),
             _ => Err(self.error(format!("Expected expression, found {:?}", self.peek()))),
         }
+    }
+
+    /// Parse a lambda expression: `{ }`, `{ expr }`, `{ x => expr }`, `{ x, y => body }`
+    fn parse_lambda_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek_span();
+        self.advance(); // consume '{'
+        self.skip_newlines();
+
+        // Empty lambda: { }
+        if self.check(&TokenKind::RBrace) {
+            self.advance();
+            return Ok(Expr::Lambda {
+                params: vec![],
+                body: LambdaBody::Block(Block { stmts: vec![], span: start }),
+                span: Span { start: start.start, end: self.peek_span().end },
+            });
+        }
+
+        // Try to detect `params =>` pattern
+        // Look ahead to see if we have `ident =>` or `ident, ident, ... =>`
+        let saved = self.pos;
+        let mut maybe_params = Vec::new();
+        let mut found_arrow = false;
+
+        loop {
+            match self.peek().clone() {
+                TokenKind::Identifier(name) => {
+                    self.advance();
+                    maybe_params.push(LambdaParam { name, ty: None });
+                }
+                _ => break,
+            }
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+                self.skip_newlines();
+            } else {
+                break;
+            }
+        }
+        self.skip_newlines();
+        if self.check(&TokenKind::FatArrow) {
+            self.advance(); // consume '=>'
+            self.skip_newlines();
+            found_arrow = true;
+        }
+
+        if found_arrow && !maybe_params.is_empty() {
+            // We have params => body
+            // Parse body: either a single expression or statements until '}'
+            if self.check(&TokenKind::RBrace) {
+                // Empty body after =>
+                self.advance();
+                return Ok(Expr::Lambda {
+                    params: maybe_params,
+                    body: LambdaBody::Block(Block { stmts: vec![], span: start }),
+                    span: Span { start: start.start, end: self.peek_span().end },
+                });
+            }
+            // Try to parse as block (multiple statements)
+            let mut stmts = Vec::new();
+            while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+                match self.parse_stmt() {
+                    Ok(s) => stmts.push(s),
+                    Err(e) => { self.errors.push(e); self.recover_to_newline(); }
+                }
+                self.skip_newlines();
+            }
+            self.expect(&TokenKind::RBrace)?;
+            let body_span = Span { start: start.start, end: self.peek_span().end };
+            // If single expression statement, use Expr body
+            if stmts.len() == 1 {
+                if let Stmt::Expr { expr, .. } = &stmts[0] {
+                    return Ok(Expr::Lambda {
+                        params: maybe_params,
+                        body: LambdaBody::Expr(Box::new(expr.clone())),
+                        span: Span { start: start.start, end: self.peek_span().end },
+                    });
+                }
+            }
+            return Ok(Expr::Lambda {
+                params: maybe_params,
+                body: LambdaBody::Block(Block { stmts, span: body_span }),
+                span: Span { start: start.start, end: self.peek_span().end },
+            });
+        }
+
+        // Not a params => body lambda. Backtrack and parse as implicit `it` lambda.
+        self.pos = saved;
+
+        // Parse body statements
+        let mut stmts = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+            match self.parse_stmt() {
+                Ok(s) => stmts.push(s),
+                Err(e) => { self.errors.push(e); self.recover_to_newline(); }
+            }
+            self.skip_newlines();
+        }
+        self.expect(&TokenKind::RBrace)?;
+        let body_span = Span { start: start.start, end: self.peek_span().end };
+
+        // Single expression: use Expr body, implicit `it`
+        if stmts.len() == 1 {
+            if let Stmt::Expr { expr, .. } = &stmts[0] {
+                return Ok(Expr::Lambda {
+                    params: vec![],
+                    body: LambdaBody::Expr(Box::new(expr.clone())),
+                    span: Span { start: start.start, end: self.peek_span().end },
+                });
+            }
+        }
+
+        Ok(Expr::Lambda {
+            params: vec![],
+            body: LambdaBody::Block(Block { stmts, span: body_span }),
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
     }
 
     fn parse_string_interp(&mut self, first_text: String) -> Result<Expr, ParseError> {
@@ -2428,9 +2735,26 @@ impl Parser {
     fn parse_type(&mut self) -> Result<TypeRef, ParseError> {
         let start = self.peek_span();
 
-        // Tuple type: (Int, String)
+        // Tuple type or function type: (Int, String) or (Int) => Bool
         if self.check(&TokenKind::LParen) {
             self.advance(); // consume '('
+            // Handle empty parens: () => ReturnType
+            if self.check(&TokenKind::RParen) {
+                self.advance(); // consume ')'
+                if self.check(&TokenKind::FatArrow) {
+                    self.advance(); // consume '=>'
+                    let return_type = self.parse_type()?;
+                    let nullable = self.eat(&TokenKind::Question);
+                    return Ok(TypeRef::Function {
+                        param_types: vec![],
+                        return_type: Box::new(return_type),
+                        nullable,
+                        span: Span { start: start.start, end: self.peek_span().end },
+                    });
+                }
+                // Empty parens without => — error or treat as unit
+                return Err(self.error("Expected '=>' after '()' in type position".into()));
+            }
             let first = self.parse_type()?;
             if self.check(&TokenKind::Comma) {
                 let mut types = vec![first];
@@ -2439,6 +2763,18 @@ impl Parser {
                     types.push(self.parse_type()?);
                 }
                 self.expect(&TokenKind::RParen)?;
+                // Check for function type: (Int, Int) => Bool
+                if self.check(&TokenKind::FatArrow) {
+                    self.advance(); // consume '=>'
+                    let return_type = self.parse_type()?;
+                    let nullable = self.eat(&TokenKind::Question);
+                    return Ok(TypeRef::Function {
+                        param_types: types,
+                        return_type: Box::new(return_type),
+                        nullable,
+                        span: Span { start: start.start, end: self.peek_span().end },
+                    });
+                }
                 let nullable = self.eat(&TokenKind::Question);
                 return Ok(TypeRef::Tuple {
                     types,
@@ -2446,8 +2782,20 @@ impl Parser {
                     span: Span { start: start.start, end: self.peek_span().end },
                 });
             } else {
-                // Just a parenthesized type — treat as the inner type
+                // Single type in parens
                 self.expect(&TokenKind::RParen)?;
+                // Check for function type: (Int) => Bool
+                if self.check(&TokenKind::FatArrow) {
+                    self.advance(); // consume '=>'
+                    let return_type = self.parse_type()?;
+                    let nullable = self.eat(&TokenKind::Question);
+                    return Ok(TypeRef::Function {
+                        param_types: vec![first],
+                        return_type: Box::new(return_type),
+                        nullable,
+                        span: Span { start: start.start, end: self.peek_span().end },
+                    });
+                }
                 return Ok(first);
             }
         }

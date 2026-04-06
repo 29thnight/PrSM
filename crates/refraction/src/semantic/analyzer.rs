@@ -279,6 +279,9 @@ impl Analyzer {
                     definition_id,
                 });
             }
+            Decl::Extension { .. } => {
+                // Extension blocks don't register a new type
+            }
         }
     }
 
@@ -481,6 +484,12 @@ impl Analyzer {
             }
             Decl::TypeAlias { .. } => {
                 // Type aliases are resolved during registration; nothing to analyze.
+            }
+            Decl::Extension { members, .. } => {
+                // Extension blocks: analyze members in a fresh scope
+                self.scopes.push_scope();
+                self.analyze_members(members);
+                self.scopes.pop_scope();
             }
             Decl::Struct { name, fields, members, span, .. } => {
                 self.current_decl_name = Some(name.clone());
@@ -735,6 +744,25 @@ impl Analyzer {
                 ..
             } => {
                 let btype = self.resolve_typeref(item_type);
+                let definition_id = self.record_member_definition(
+                    name,
+                    HirDefinitionKind::Field,
+                    btype.clone(),
+                    false,
+                    *name_span,
+                );
+                self.scopes.define(Symbol {
+                    name: name.clone(), ty: btype, kind: SymbolKind::Field, mutable: false,
+                    definition_id,
+                });
+            }
+            Member::Property {
+                name,
+                name_span,
+                ty,
+                ..
+            } => {
+                let btype = self.resolve_typeref(ty);
                 let definition_id = self.record_member_definition(
                     name,
                     HirDefinitionKind::Field,
@@ -1369,7 +1397,10 @@ impl Analyzer {
             }
             Expr::Lambda { body, .. } => {
                 self.scopes.push_scope();
-                self.analyze_block(body);
+                match body {
+                    LambdaBody::Block(block) => self.analyze_block(block),
+                    LambdaBody::Expr(expr) => { self.analyze_expr(expr); }
+                }
                 self.scopes.pop_scope();
                 PrismType::External("lambda".into())
             }
@@ -1485,6 +1516,14 @@ impl Analyzer {
             TypeRef::Tuple { types, nullable, .. } => {
                 let _inner: Vec<PrismType> = types.iter().map(|t| self.resolve_typeref(t)).collect();
                 let base = PrismType::External("tuple".into());
+                if *nullable { base.make_nullable() } else { base }
+            }
+            TypeRef::Function { param_types, return_type, nullable, .. } => {
+                for pt in param_types {
+                    self.resolve_typeref(pt);
+                }
+                self.resolve_typeref(return_type);
+                let base = PrismType::External("function".into());
                 if *nullable { base.make_nullable() } else { base }
             }
         }
