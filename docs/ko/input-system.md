@@ -7,6 +7,8 @@ nav_order: 9
 
 # Input System
 
+(PrSM 2 부터)
+
 PrSM v2는 Unity의 **New Input System** 패키지를 위한 구문 설탕(syntactic sugar)을 도입하여,
 `PlayerInput`이나 `InputAction` 보일러플레이트 코드를 직접 작성하지 않고도
 간결하고 선언적인 방식으로 액션 상태를 조회할 수 있게 해줍니다.

@@ -7,6 +7,8 @@ nav_order: 9
 
 # Input System
 
+(since PrSM 2)
+
 PrSM v2 introduces syntactic sugar for Unity's **New Input System** package,
 giving you a concise, declarative way to query action states without writing
 boilerplate `PlayerInput` or `InputAction` code by hand.

@@ -7,6 +7,8 @@ nav_order: 10
 
 # Generic Inference
 
+(since PrSM 2)
+
 PrSM v2 introduces **limited context-based generic type inference**, allowing
 you to omit explicit type arguments on common generic helper methods when the
 target type can be determined from surrounding context.
