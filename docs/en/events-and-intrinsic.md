@@ -132,11 +132,9 @@ Declares a function whose entire body is raw C#:
 
 ```prsm
 intrinsic func getMouseWorldPos(): Vector3 {
-    """
     var ray = Camera.main.ScreenPointToRay(Input.mousePosition);
     Physics.Raycast(ray, out RaycastHit hit, 100f);
     return hit.point;
-    """
 }
 ```
 
@@ -146,14 +144,12 @@ Declares a coroutine whose body contains raw C# `yield` statements:
 
 ```prsm
 intrinsic coroutine fadeOut(): IEnumerator {
-    """
     float t = 1f;
     while (t > 0f) {
         t -= Time.deltaTime;
         canvasGroup.alpha = t;
         yield return null;
     }
-    """
 }
 ```
 

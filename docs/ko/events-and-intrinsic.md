@@ -132,11 +132,9 @@ update {
 
 ```prsm
 intrinsic func getMouseWorldPos(): Vector3 {
-    """
     var ray = Camera.main.ScreenPointToRay(Input.mousePosition);
     Physics.Raycast(ray, out RaycastHit hit, 100f);
     return hit.point;
-    """
 }
 ```
 
@@ -146,14 +144,12 @@ raw C# `yield` 문장을 포함하는 코루틴을 선언합니다.
 
 ```prsm
 intrinsic coroutine fadeOut(): IEnumerator {
-    """
     float t = 1f;
     while (t > 0f) {
         t -= Time.deltaTime;
         canvasGroup.alpha = t;
         yield return null;
     }
-    """
 }
 ```
 
