@@ -2270,6 +2270,385 @@ exclude = []
 }
 
 #[test]
+fn lsp_code_actions_smoke() {
+    let root = unique_temp_dir("prism_lsp_code_actions_smoke");
+    write_file(
+        &root.join(".prsmproject"),
+        r#"[project]
+name = "LspProject"
+
+[compiler]
+output_dir = "Generated/PrSM"
+
+[source]
+include = ["Assets/**/*.prsm"]
+exclude = []
+"#,
+    );
+    write_file(
+        &root.join("Assets").join("WeaponData.prsm"),
+        r#"data class WeaponData(
+    val damage: Int
+)
+"#,
+    );
+    let player_path = root.join("Assets").join("Player.prsm");
+    write_file(
+        &player_path,
+        r#"using UnityEngine.UI
+using UnityEngine
+component Player : MonoBehaviour {
+    func equip(weapon: WeaponData): Unit {
+        val current: WeaponData = get()
+        val amount = weapon.damage
+    }
+}
+"#,
+    );
+
+    let mut child = Command::new(prism())
+        .arg("lsp")
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let root_uri = url::Url::from_file_path(&root).unwrap().to_string();
+    let player_uri = url::Url::from_file_path(&player_path).unwrap().to_string();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": root_uri,
+                    "capabilities": {}
+                }
+            }),
+        );
+    }
+
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let initialize_response = read_lsp_response(&mut stdout, 1);
+    assert!(initialize_response.get("result").is_some(), "{initialize_response:?}");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            }),
+        );
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/codeAction",
+                "params": {
+                    "textDocument": { "uri": player_uri },
+                    "range": {
+                        "start": { "line": 4, "character": 0 },
+                        "end": { "line": 4, "character": 40 }
+                    },
+                    "context": {
+                        "diagnostics": [],
+                        "only": ["refactor.rewrite"]
+                    }
+                }
+            }),
+        );
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/codeAction",
+                "params": {
+                    "textDocument": { "uri": player_uri },
+                    "range": {
+                        "start": { "line": 4, "character": 0 },
+                        "end": { "line": 4, "character": 40 }
+                    },
+                    "context": {
+                        "diagnostics": [],
+                        "only": ["source.organizeImports"]
+                    }
+                }
+            }),
+        );
+    }
+
+    let explicit_type_arg_response = read_lsp_response(&mut stdout, 2);
+    let explicit_type_arg_actions = explicit_type_arg_response["result"].as_array().unwrap();
+    assert_eq!(explicit_type_arg_actions.len(), 1);
+    assert_eq!(explicit_type_arg_actions[0]["title"], "Add explicit type argument <WeaponData>");
+    assert_eq!(explicit_type_arg_actions[0]["kind"], "refactor.rewrite");
+    assert_eq!(
+        explicit_type_arg_actions[0]["edit"]["changes"][&player_uri][0]["newText"],
+        "<WeaponData>"
+    );
+
+    let organize_imports_response = read_lsp_response(&mut stdout, 3);
+    let organize_imports_actions = organize_imports_response["result"].as_array().unwrap();
+    assert_eq!(organize_imports_actions.len(), 1);
+    assert_eq!(organize_imports_actions[0]["title"], "Organize using declarations");
+    assert_eq!(organize_imports_actions[0]["kind"], "source.organizeImports");
+    assert_eq!(
+        organize_imports_actions[0]["edit"]["changes"][&player_uri][0]["newText"],
+        "using UnityEngine\n\n"
+    );
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "shutdown",
+                "params": null
+            }),
+        );
+    }
+    let shutdown_response = read_lsp_response(&mut stdout, 4);
+    assert!(shutdown_response.get("result").is_some(), "{shutdown_response:?}");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "exit",
+                "params": null
+            }),
+        );
+    }
+
+    let status = child.wait().unwrap();
+    assert!(status.success(), "LSP child exited with status {status}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn lsp_references_rename_and_workspace_symbols_smoke() {
+    let root = unique_temp_dir("prism_lsp_references_rename_symbols_smoke");
+    write_file(
+        &root.join(".prsmproject"),
+        r#"[project]
+name = "LspProject"
+
+[compiler]
+output_dir = "Generated/PrSM"
+
+[source]
+include = ["Assets/**/*.prsm"]
+exclude = []
+"#,
+    );
+    let player_path = root.join("Assets").join("Player.prsm");
+    write_file(
+        &player_path,
+        r#"component Player : MonoBehaviour {
+    var current: WeaponData? = null
+
+    func equip(weapon: WeaponData): Unit {
+        current = weapon
+    }
+}
+"#,
+    );
+    write_file(
+        &root.join("Assets").join("WeaponData.prsm"),
+        r#"data class WeaponData(
+    val damage: Int
+)
+"#,
+    );
+
+    let mut child = Command::new(prism())
+        .arg("lsp")
+        .current_dir(&root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let root_uri = url::Url::from_file_path(&root).unwrap().to_string();
+    let player_uri = url::Url::from_file_path(&player_path).unwrap().to_string();
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "processId": null,
+                    "rootUri": root_uri,
+                    "capabilities": {}
+                }
+            }),
+        );
+    }
+
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let initialize_response = read_lsp_response(&mut stdout, 1);
+    assert!(initialize_response.get("result").is_some(), "{initialize_response:?}");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "initialized",
+                "params": {}
+            }),
+        );
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "textDocument/references",
+                "params": {
+                    "textDocument": { "uri": player_uri },
+                    "position": { "line": 4, "character": 10 },
+                    "context": { "includeDeclaration": true }
+                }
+            }),
+        );
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "textDocument/prepareRename",
+                "params": {
+                    "textDocument": { "uri": player_uri },
+                    "position": { "line": 4, "character": 10 }
+                }
+            }),
+        );
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "textDocument/rename",
+                "params": {
+                    "textDocument": { "uri": player_uri },
+                    "position": { "line": 4, "character": 10 },
+                    "newName": "equippedWeapon"
+                }
+            }),
+        );
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "workspace/symbol",
+                "params": {
+                    "query": "curr"
+                }
+            }),
+        );
+    }
+
+    let references_response = read_lsp_response(&mut stdout, 2);
+    let references = references_response["result"].as_array().unwrap();
+    assert_eq!(references.len(), 2);
+    assert!(references.iter().any(|location| {
+        location["uri"] == player_uri
+            && location["range"]["start"]["line"] == 1
+            && location["range"]["start"]["character"] == 8
+    }));
+    assert!(references.iter().any(|location| {
+        location["uri"] == player_uri
+            && location["range"]["start"]["line"] == 4
+            && location["range"]["start"]["character"] == 8
+    }));
+
+    let prepare_rename_response = read_lsp_response(&mut stdout, 3);
+    assert_eq!(prepare_rename_response["result"]["placeholder"], "current");
+    assert_eq!(prepare_rename_response["result"]["range"]["start"]["line"], 1);
+    assert_eq!(prepare_rename_response["result"]["range"]["start"]["character"], 8);
+
+    let rename_response = read_lsp_response(&mut stdout, 4);
+    let rename_edits = rename_response["result"]["changes"][&player_uri]
+        .as_array()
+        .unwrap();
+    assert_eq!(rename_edits.len(), 2);
+    assert!(rename_edits
+        .iter()
+        .all(|edit| edit["newText"] == "equippedWeapon"));
+    assert!(rename_edits.iter().any(|edit| {
+        edit["range"]["start"]["line"] == 1 && edit["range"]["start"]["character"] == 8
+    }));
+    assert!(rename_edits.iter().any(|edit| {
+        edit["range"]["start"]["line"] == 4 && edit["range"]["start"]["character"] == 8
+    }));
+
+    let workspace_symbols_response = read_lsp_response(&mut stdout, 5);
+    let workspace_symbols = workspace_symbols_response["result"].as_array().unwrap();
+    let current_symbol = workspace_symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "current")
+        .expect("expected current workspace symbol");
+    assert_eq!(current_symbol["containerName"], "Player");
+    assert_eq!(current_symbol["location"]["uri"], player_uri);
+    assert_eq!(current_symbol["location"]["range"]["start"]["line"], 1);
+    assert_eq!(current_symbol["location"]["range"]["start"]["character"], 8);
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "shutdown",
+                "params": null
+            }),
+        );
+    }
+    let shutdown_response = read_lsp_response(&mut stdout, 6);
+    assert!(shutdown_response.get("result").is_some(), "{shutdown_response:?}");
+
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        write_lsp_message(
+            stdin,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "exit",
+                "params": null
+            }),
+        );
+    }
+
+    let status = child.wait().unwrap();
+    assert!(status.success(), "LSP child exited with status {status}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn references_cross_file_member_smoke() {
     let root = unique_temp_dir("prism_references_cross_file_member_smoke");
     write_file(
