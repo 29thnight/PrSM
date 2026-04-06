@@ -2950,11 +2950,12 @@ fn invalid_files_all_produce_errors() {
     let invalid_dir = manifest_dir.join("..").join("..").join("tests").join("invalid");
     let invalid_dir = invalid_dir.canonicalize().unwrap_or(invalid_dir);
 
-    let entries: Vec<_> = fs::read_dir(&invalid_dir)
+    let mut entries: Vec<_> = fs::read_dir(&invalid_dir)
         .unwrap_or_else(|e| panic!("cannot read {}: {}", invalid_dir.display(), e))
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("prsm"))
         .collect();
+    entries.sort_by_key(|entry| entry.file_name());
 
     assert!(!entries.is_empty(), "No .prsm files found in {}", invalid_dir.display());
 

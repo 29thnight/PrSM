@@ -1,0 +1,6 @@
+// E060: Coroutine declarations are only valid inside component declarations
+asset UtilityAsset : ScriptableObject {
+    coroutine flash() {
+        wait 0.5s
+    }
+}

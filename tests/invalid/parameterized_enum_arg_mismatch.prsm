@@ -1,0 +1,4 @@
+// E051: Enum entry payload arity must match the enum parameter list
+enum Weapon(val damage: Int, val range: Float) {
+    Sword(10)
+}
