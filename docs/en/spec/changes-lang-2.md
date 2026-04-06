@@ -1,7 +1,6 @@
 ---
 title: "Language 1 → 2 Changes"
 parent: Specification
-grand_parent: English Docs
 nav_order: 2
 ---
 

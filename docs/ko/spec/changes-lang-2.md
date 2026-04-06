@@ -1,7 +1,6 @@
 ---
 title: "언어 1 → 2 변경사항"
 parent: 사양
-grand_parent: 한국어 문서
 nav_order: 2
 ---
 

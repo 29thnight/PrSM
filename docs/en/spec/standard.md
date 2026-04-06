@@ -1,7 +1,6 @@
 ---
 title: PrSM Language Standard
 parent: Specification
-grand_parent: English Docs
 nav_order: 1
 ---
 

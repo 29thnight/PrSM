@@ -1,7 +1,6 @@
 ---
 title: PrSM 언어 표준
 parent: 사양
-grand_parent: 한국어 문서
 nav_order: 1
 ---
 
