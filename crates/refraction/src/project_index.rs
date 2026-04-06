@@ -742,6 +742,34 @@ fn summarize_member_type_references(path: &Path, decl_name: &str, members: &[Mem
             Member::Event { name, ty, .. } => {
                 collect_type_references(path, &format!("{}.{}", decl_name, name), ty, &mut references);
             }
+            Member::StateMachine { name, states, .. } => {
+                let container_name = format!("{}.{}", decl_name, name);
+                for s in states {
+                    if let Some(b) = &s.enter {
+                        collect_block_type_references(path, &container_name, b, &mut references);
+                    }
+                    if let Some(b) = &s.exit {
+                        collect_block_type_references(path, &container_name, b, &mut references);
+                    }
+                }
+            }
+            Member::Command { name, params, execute, undo, can_execute, .. } => {
+                let container_name = format!("{}.{}", decl_name, name);
+                references.extend(summarize_param_type_references(path, &container_name, params));
+                collect_block_type_references(path, &container_name, execute, &mut references);
+                if let Some(b) = undo {
+                    collect_block_type_references(path, &container_name, b, &mut references);
+                }
+                if let Some(ce) = can_execute {
+                    collect_expr_type_references(path, &container_name, ce, &mut references);
+                }
+            }
+            Member::BindProperty { name, ty, init, .. } => {
+                collect_type_references(path, &format!("{}.{}", decl_name, name), ty, &mut references);
+                if let Some(expr) = init {
+                    collect_expr_type_references(path, &format!("{}.{}", decl_name, name), expr, &mut references);
+                }
+            }
         }
     }
 
@@ -862,6 +890,9 @@ fn collect_stmt_type_references(
             if let Some(body) = body {
                 collect_block_type_references(path, container_name, body, references);
             }
+        }
+        Stmt::BindTo { target, .. } => {
+            collect_expr_type_references(path, container_name, target, references);
         }
     }
 }
@@ -1041,6 +1072,9 @@ fn collect_expr_type_references(
                 collect_expr_type_references(path, container_name, k, references);
                 collect_expr_type_references(path, container_name, v, references);
             }
+        }
+        Expr::Await { expr: inner, .. } => {
+            collect_expr_type_references(path, container_name, inner, references);
         }
     }
 }
@@ -1344,6 +1378,24 @@ fn summarize_members(path: &Path, container_name: &str, members: &[Member]) -> V
                 )
                 .trim()
                 .to_string(),
+                span: *name_span,
+            },
+            Member::StateMachine { name, name_span, .. } => MemberSummary {
+                name: name.clone(),
+                kind: MemberKind::Field,
+                signature: format!("state machine {}", name),
+                span: *name_span,
+            },
+            Member::Command { name, name_span, params, .. } => MemberSummary {
+                name: name.clone(),
+                kind: MemberKind::Function,
+                signature: format!("command {}({})", name, format_params(params)),
+                span: *name_span,
+            },
+            Member::BindProperty { name, name_span, ty, .. } => MemberSummary {
+                name: name.clone(),
+                kind: MemberKind::Field,
+                signature: format!("bind {}: {}", name, format_type_ref(ty)),
                 span: *name_span,
             },
         })

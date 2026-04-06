@@ -35,6 +35,12 @@ pub struct Analyzer {
     scopes: ScopeStack,
     decl_ctx: DeclContext,
     body_ctx: BodyContext,
+    /// Whether we are currently inside an `async func` body.
+    /// Used by Phase 5 to validate `await` usage (E135) and track
+    /// "async without await" (W025).
+    in_async_fn: bool,
+    /// Whether the current async function actually contains an `await` site.
+    async_used_await: bool,
     loop_depth: u32,
     /// Known enum names → entries (for exhaustiveness checking)
     enum_entries: std::collections::HashMap<String, Vec<String>>,
@@ -62,6 +68,8 @@ impl Analyzer {
             scopes: ScopeStack::new(),
             decl_ctx: DeclContext::None,
             body_ctx: BodyContext::None,
+            in_async_fn: false,
+            async_used_await: false,
             loop_depth: 0,
             enum_entries: std::collections::HashMap::new(),
             enum_payloads: std::collections::HashMap::new(),
@@ -796,14 +804,65 @@ impl Analyzer {
                     definition_id,
                 });
             }
+            Member::StateMachine { name, name_span, .. } => {
+                // A state machine introduces a named field of enum type that
+                // lives on the owning component; expose it as a Field symbol.
+                let btype = PrismType::External(format!("{}State", ascii_capitalize(name)));
+                let definition_id = self.record_member_definition(
+                    name,
+                    HirDefinitionKind::Field,
+                    btype.clone(),
+                    true,
+                    *name_span,
+                );
+                self.scopes.define(Symbol {
+                    name: name.clone(), ty: btype, kind: SymbolKind::Field, mutable: true,
+                    definition_id,
+                });
+            }
+            Member::Command { name, name_span, .. } => {
+                // A command lowers to a nested class + helper method; expose the
+                // name so the user can reference it as a callable symbol.
+                let definition_id = self.record_member_definition(
+                    name,
+                    HirDefinitionKind::Function,
+                    PrismType::Unit,
+                    false,
+                    *name_span,
+                );
+                self.scopes.define(Symbol {
+                    name: name.clone(), ty: PrismType::Unit, kind: SymbolKind::Function, mutable: false,
+                    definition_id,
+                });
+            }
+            Member::BindProperty { name, name_span, ty, .. } => {
+                let btype = self.resolve_typeref(ty);
+                let definition_id = self.record_member_definition(
+                    name,
+                    HirDefinitionKind::Field,
+                    btype.clone(),
+                    true,
+                    *name_span,
+                );
+                self.scopes.define(Symbol {
+                    name: name.clone(), ty: btype, kind: SymbolKind::Field, mutable: true,
+                    definition_id,
+                });
+            }
         }
     }
 
     fn analyze_member_body(&mut self, member: &Member) {
         match member {
-            Member::Func { name, params, body, return_ty, .. } => {
+            Member::Func { name, params, body, return_ty, is_async, span, .. } => {
                 self.body_ctx = BodyContext::Function;
                 self.current_member_name = Some(name.clone());
+                let prev_in_async = self.in_async_fn;
+                let prev_used_await = self.async_used_await;
+                if *is_async {
+                    self.in_async_fn = true;
+                    self.async_used_await = false;
+                }
                 self.scopes.push_scope();
                 for p in params {
                     let ty = self.resolve_typeref(&p.ty);
@@ -827,6 +886,15 @@ impl Analyzer {
                     }
                 }
                 self.scopes.pop_scope();
+                if *is_async && !self.async_used_await {
+                    self.diag.warning(
+                        "W025",
+                        format!("async func '{}' never awaits — consider removing 'async'", name),
+                        *span,
+                    );
+                }
+                self.in_async_fn = prev_in_async;
+                self.async_used_await = prev_used_await;
                 self.current_member_name = None;
                 self.body_ctx = BodyContext::None;
             }
@@ -875,6 +943,86 @@ impl Analyzer {
                 self.scopes.pop_scope();
                 self.current_member_name = None;
                 self.body_ctx = BodyContext::None;
+            }
+            Member::StateMachine { name, states, .. } => {
+                // Validate: E140 — every transition target must be a declared state.
+                // E141 — no duplicate state names in the same machine.
+                let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                for s in states {
+                    if !seen.insert(&s.name) {
+                        self.diag.error(
+                            "E141",
+                            format!("Duplicate state '{}' in state machine '{}'", s.name, name),
+                            s.name_span,
+                        );
+                    }
+                }
+                let valid_states: std::collections::HashSet<&str> =
+                    states.iter().map(|s| s.name.as_str()).collect();
+                for s in states {
+                    for tr in &s.transitions {
+                        if !valid_states.contains(tr.target.as_str()) {
+                            self.diag.error(
+                                "E140",
+                                format!(
+                                    "Transition to undeclared state '{}' in state machine '{}'",
+                                    tr.target, name
+                                ),
+                                tr.target_span,
+                            );
+                        }
+                    }
+                }
+                // Analyze enter/exit blocks so variable references inside them
+                // are validated like normal statement bodies.
+                for s in states {
+                    if let Some(enter) = &s.enter {
+                        self.body_ctx = BodyContext::Function;
+                        self.scopes.push_scope();
+                        self.analyze_block(enter);
+                        self.scopes.pop_scope();
+                        self.body_ctx = BodyContext::None;
+                    }
+                    if let Some(exit) = &s.exit {
+                        self.body_ctx = BodyContext::Function;
+                        self.scopes.push_scope();
+                        self.analyze_block(exit);
+                        self.scopes.pop_scope();
+                        self.body_ctx = BodyContext::None;
+                    }
+                }
+            }
+            Member::Command { params, execute, undo, can_execute, .. } => {
+                self.body_ctx = BodyContext::Function;
+                self.scopes.push_scope();
+                for p in params {
+                    let ty = self.resolve_typeref(&p.ty);
+                    let definition_id = self.record_nested_definition(
+                        &p.name,
+                        HirDefinitionKind::Parameter,
+                        ty.clone(),
+                        false,
+                        p.name_span,
+                    );
+                    self.scopes.define(Symbol {
+                        name: p.name.clone(), ty, kind: SymbolKind::Parameter, mutable: false,
+                        definition_id,
+                    });
+                }
+                self.analyze_block(execute);
+                if let Some(undo_block) = undo {
+                    self.analyze_block(undo_block);
+                }
+                if let Some(ce) = can_execute {
+                    let _ = self.analyze_expr(ce);
+                }
+                self.scopes.pop_scope();
+                self.body_ctx = BodyContext::None;
+            }
+            Member::BindProperty { init, .. } => {
+                if let Some(expr) = init {
+                    let _ = self.analyze_expr(expr);
+                }
             }
             _ => {}
         }
@@ -1207,6 +1355,48 @@ impl Analyzer {
                     });
                 }
             }
+            Stmt::BindTo { source, source_span, target, span } => {
+                // E143: the target expression must be assignable (MemberAccess or Ident).
+                // We perform a lightweight check rather than full lvalue analysis.
+                let source_ty = if let Some((ty, _)) = self.lookup_symbol(source) {
+                    ty
+                } else {
+                    self.diag.error(
+                        "E016",
+                        format!("'{}' is not defined", source),
+                        *source_span,
+                    );
+                    PrismType::Error
+                };
+                let target_ty = self.analyze_expr(target);
+                let is_writable = matches!(
+                    target,
+                    Expr::MemberAccess { .. } | Expr::Ident(_, _) | Expr::IndexAccess { .. }
+                );
+                if !is_writable {
+                    self.diag.error(
+                        "E143",
+                        "'bind ... to' target must be a writable member or variable",
+                        *span,
+                    );
+                }
+                // E144: silently skip if either side is Error to avoid cascades.
+                if !matches!(source_ty, PrismType::Error)
+                    && !matches!(target_ty, PrismType::Error)
+                    && !source_ty.is_assignable_to(&target_ty)
+                    && !target_ty.is_assignable_to(&source_ty)
+                {
+                    self.diag.error(
+                        "E144",
+                        format!(
+                            "bind type mismatch: source is {} but target is {}",
+                            source_ty.display_name(),
+                            target_ty.display_name()
+                        ),
+                        *span,
+                    );
+                }
+            }
         }
     }
 
@@ -1496,6 +1686,22 @@ impl Analyzer {
                     self.analyze_expr(v);
                 }
                 PrismType::External("map".into())
+            }
+            Expr::Await { expr: inner, span } => {
+                // E135: await is only allowed inside an async func body.
+                if !self.in_async_fn {
+                    self.diag.error(
+                        "E135",
+                        "'await' is only allowed inside an async func",
+                        *span,
+                    );
+                }
+                self.async_used_await = true;
+                self.analyze_expr(inner);
+                // Type inference for awaited values is approximate — we do not
+                // unwrap Task<T>/UniTask<T> into T yet; downstream inference
+                // treats it as `var`.
+                PrismType::External("var".into())
             }
         }
     }
@@ -2016,6 +2222,16 @@ fn hir_listen_lifetime(lifetime: ListenLifetime) -> HirListenLifetime {
     }
 }
 
+/// Uppercase the first ASCII character of `s` (leaves non-ASCII unchanged).
+/// Used by Phase 5 lowerings that derive C# type names from camelCase sources.
+fn ascii_capitalize(s: &str) -> String {
+    let mut it = s.chars();
+    match it.next() {
+        Some(c) => c.to_ascii_uppercase().to_string() + it.as_str(),
+        None => String::new(),
+    }
+}
+
 fn lifecycle_name(kind: LifecycleKind) -> &'static str {
     match kind {
         LifecycleKind::Awake => "awake",
@@ -2401,5 +2617,108 @@ component PlayerHealth : MonoBehaviour {
             "component Foo : MonoBehaviour {\n  func f() {\n    use s = openFile() {\n      log(s)\n    }\n  }\n}",
         );
         assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    // ── Phase 5: async / state machine / command / bind ──────────
+
+    #[test]
+    fn test_async_func_with_await_no_errors() {
+        let diags = errors(
+            "component Loader : MonoBehaviour {\n  async func ping() {\n    await delay(1)\n  }\n}",
+        );
+        assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    #[test]
+    fn test_await_outside_async_e135() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  func ping() {\n    await delay(1)\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E135"),
+            "expected E135 for await outside async: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_async_func_no_await_warning_w025() {
+        let warns = warnings(
+            "component Foo : MonoBehaviour {\n  async func empty() {\n    log(\"no await\")\n  }\n}",
+        );
+        assert!(
+            warns.iter().any(|d| d.code == "W025"),
+            "expected W025 for async without await: {:?}",
+            warns
+        );
+    }
+
+    #[test]
+    fn test_state_machine_valid_no_errors() {
+        let diags = errors(
+            "component AI : MonoBehaviour {\n  state machine ai {\n    state Idle { on go => Run }\n    state Run { on stopRun => Idle }\n  }\n}",
+        );
+        assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    #[test]
+    fn test_state_machine_unknown_target_e140() {
+        let diags = errors(
+            "component AI : MonoBehaviour {\n  state machine ai {\n    state Idle { on go => Missing }\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E140"),
+            "expected E140 for unknown target state: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_state_machine_duplicate_state_e141() {
+        let diags = errors(
+            "component AI : MonoBehaviour {\n  state machine ai {\n    state Idle { on go => Idle }\n    state Idle { on stopRun => Idle }\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E141"),
+            "expected E141 for duplicate state: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_command_member_no_errors() {
+        let diags = errors(
+            "component Unit : MonoBehaviour {\n  command moveTo(target: Vector3) {\n    log(\"go\")\n  }\n}",
+        );
+        assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    #[test]
+    fn test_command_with_undo_no_errors() {
+        let diags = errors(
+            "component Unit : MonoBehaviour {\n  command damage(amount: Int) {\n    log(\"hurt\")\n  } undo {\n    log(\"heal\")\n  } canExecute = true\n}",
+        );
+        assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    #[test]
+    fn test_bind_property_no_errors() {
+        let diags = errors(
+            "component HUD : MonoBehaviour {\n  bind hp: Int = 100\n}",
+        );
+        assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    #[test]
+    fn test_bind_to_invalid_target_e143() {
+        // Target is a literal — not writable. Expect E143.
+        let diags = errors(
+            "component HUD : MonoBehaviour {\n  bind hp: Int = 100\n  awake {\n    bind hp to 42\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E143"),
+            "expected E143: {:?}",
+            diags
+        );
     }
 }

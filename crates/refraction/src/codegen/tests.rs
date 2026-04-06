@@ -1176,4 +1176,186 @@ hello world
             output
         );
     }
+
+    // ── Phase 5: async / state machine / command / bind ──────────
+
+    #[test]
+    fn test_async_func_lowers_to_unitask() {
+        let src = r#"component Loader : MonoBehaviour {
+  async func loadProfile(): String {
+    val payload = await fetch("/api/profile")
+    return payload
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("async Cysharp.Threading.Tasks.UniTask<string> loadProfile()"),
+            "expected async UniTask<string>: {}",
+            output
+        );
+        assert!(
+            output.contains("await fetch(\"/api/profile\")"),
+            "expected await call: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_async_void_lowers_to_unitask() {
+        let src = r#"component Loader : MonoBehaviour {
+  async func ping() {
+    await delay(1)
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("async Cysharp.Threading.Tasks.UniTask ping()"),
+            "expected async UniTask (void): {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_state_machine_generates_enum_and_dispatcher() {
+        let src = r#"component AI : MonoBehaviour {
+  state machine ai {
+    state Idle {
+      enter { log("idle") }
+      on go => Run
+    }
+    state Run {
+      exit { log("leaving run") }
+      on stopRun => Idle
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("private enum AiState"),
+            "expected enum AiState: {}",
+            output
+        );
+        assert!(
+            output.contains("Idle,") && output.contains("Run,"),
+            "expected enum members: {}",
+            output
+        );
+        assert!(
+            output.contains("public void TransitionAi(string eventName)"),
+            "expected transition method: {}",
+            output
+        );
+        assert!(
+            output.contains("(AiState.Idle, \"go\") => AiState.Run"),
+            "expected switch arm: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_state_machine_initial_state() {
+        let src = r#"component AI : MonoBehaviour {
+  state machine ai {
+    state Idle { on go => Run }
+    state Run { on stopRun => Idle }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("private AiState _ai = AiState.Idle"),
+            "expected initial state assignment: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_command_lowers_to_class_and_helper() {
+        let src = r#"component Unit : MonoBehaviour {
+  command moveTo(target: Vector3) {
+    log("moving")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public class MoveToCommand : ICommand"),
+            "expected nested command class: {}",
+            output
+        );
+        assert!(
+            output.contains("public void Execute()"),
+            "expected Execute method: {}",
+            output
+        );
+        assert!(
+            output.contains("new MoveToCommand(this, target).Execute()"),
+            "expected helper invocation: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_command_with_undo_generates_undo_method() {
+        let src = r#"component Unit : MonoBehaviour {
+  command damage(amount: Int) {
+    log("hurt")
+  } undo {
+    log("heal")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public void Undo()"),
+            "expected Undo method: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_bind_property_lowers_to_inpc() {
+        let src = r#"component HUD : MonoBehaviour {
+  bind hp: Int = 100
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("System.ComponentModel.INotifyPropertyChanged"),
+            "component implements INPC: {}",
+            output
+        );
+        assert!(
+            output.contains("private int _hp = 100"),
+            "backing field: {}",
+            output
+        );
+        assert!(
+            output.contains("public int hp"),
+            "property header: {}",
+            output
+        );
+        assert!(
+            output.contains("OnPropertyChanged(nameof(hp))"),
+            "INPC notification: {}",
+            output
+        );
+        assert!(
+            output.contains("public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged"),
+            "PropertyChanged event: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_bind_to_statement_assigns_initial_value() {
+        let src = r#"component HUD : MonoBehaviour {
+  bind hp: Int = 100
+  awake {
+    bind hp to label.text
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("label.text = this.hp"),
+            "expected initial sync assignment: {}",
+            output
+        );
+    }
 }

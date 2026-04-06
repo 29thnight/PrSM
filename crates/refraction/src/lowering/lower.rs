@@ -104,6 +104,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
 
             // Lower remaining members — use ComponentCtx to collect listen subscriptions.
             let mut listen_ctx = ComponentCtx::new(callable_signatures.clone());
+            let mut command_classes: Vec<CsClass> = Vec::new();
             for m in members {
                 match m {
                     Member::Lifecycle { kind, params, body, .. } if *kind != LifecycleKind::Awake => {
@@ -127,8 +128,39 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::Property { name: pname, ty, mutability, getter, setter, .. } => {
                         cs_members.extend(lower_property_member(pname, ty, *mutability, getter, setter));
                     }
+                    // ── Phase 5 sugar ─────────────────────────────
+                    Member::StateMachine { name: sm_name, states, .. } => {
+                        cs_members.extend(lower_state_machine(sm_name, states, &callable_signatures));
+                    }
+                    Member::Command { name: cmd_name, params, execute, undo, can_execute, .. } => {
+                        let (helper, class) = lower_command_member(
+                            name,
+                            cmd_name,
+                            params,
+                            execute,
+                            undo.as_ref(),
+                            can_execute.as_ref(),
+                            &callable_signatures,
+                        );
+                        cs_members.push(helper);
+                        command_classes.push(class);
+                    }
+                    Member::BindProperty { name: bname, ty, init, .. } => {
+                        cs_members.extend(lower_bind_property(
+                            bname,
+                            ty,
+                            init.as_ref(),
+                            &callable_signatures,
+                        ));
+                    }
                     _ => {}
                 }
+            }
+
+            // Phase 5: append shared INotifyPropertyChanged plumbing if any
+            // `bind` member is present.
+            if let Some(extras) = bind_infrastructure(members) {
+                cs_members.extend(extras);
             }
 
             // Emit private handler fields and cleanup methods if any v2 listen stmts were found.
@@ -221,17 +253,25 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                 cs_members.push(lower_expr_helper_member());
             }
 
+            // Phase 5: components with `bind` members implement INPC.
+            let mut interfaces = interfaces.clone();
+            if members.iter().any(|m| matches!(m, Member::BindProperty { .. }))
+                && !interfaces.iter().any(|i| i.contains("INotifyPropertyChanged"))
+            {
+                interfaces.push("System.ComponentModel.INotifyPropertyChanged".into());
+            }
+
             (
                 CsClass {
                     attributes: vec![],
                     modifiers: "public".into(),
                     name: name.clone(),
                     base_class: Some(base_class.clone()),
-                    interfaces: interfaces.clone(),
+                    interfaces,
                     where_clauses: vec![],
                     members: cs_members,
                 },
-                vec![],
+                command_classes,
             )
         }
         Decl::Asset { name, base_class, members, .. } => {
@@ -1149,6 +1189,18 @@ fn collect_callable_signatures(members: &[Member]) -> HashMap<String, CallableSi
                     },
                 );
             }
+            Member::Command { name, params, .. } => {
+                // Phase 5: a `command Name(params)` lowers to a helper method
+                // `public void Name(params)` that constructs the nested
+                // `NameCommand` and executes it. Register the signature so
+                // callsites (`moveUnit(target)`) get expected-type inference.
+                signatures.insert(
+                    name.clone(),
+                    CallableSignature {
+                        params: params.iter().map(|param| param.ty.clone()).collect(),
+                    },
+                );
+            }
             _ => {}
         }
     }
@@ -1373,8 +1425,13 @@ fn lifecycle_method_name(kind: LifecycleKind) -> &'static str {
 
 fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableSignature>) -> CsMember {
     match m {
-        Member::Func { visibility, is_static, is_override, is_abstract, is_open, name, type_params, where_clauses, params, return_ty, body, .. } => {
-            let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
+        Member::Func { visibility, is_static, is_override, is_abstract, is_open, is_async, name, type_params, where_clauses, params, return_ty, body, .. } => {
+            let inner_ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
+            let ret = if *is_async {
+                async_return_type(&inner_ret)
+            } else {
+                inner_ret.clone()
+            };
             let ps: Vec<CsParam> = params.iter().map(|p| CsParam {
                 ty: lower_type(&p.ty), name: p.name.clone(), default: None,
             }).collect();
@@ -1382,6 +1439,9 @@ fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableS
             let mut mods = lower_visibility(*visibility);
             if *is_static {
                 mods = format!("{} static", mods);
+            }
+            if *is_async {
+                mods = format!("{} async", mods);
             }
             if *is_abstract {
                 mods = format!("{} abstract", mods);
@@ -1433,6 +1493,21 @@ fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableS
             }
         }
         _ => CsMember::RawCode("// unexpected member".into()),
+    }
+}
+
+/// Map a PrSM declared return type (already lowered to a C# type) to the
+/// corresponding async wrapper (`Cysharp.Threading.Tasks.UniTask<T>` when the
+/// UniTask dependency is present — falling back to `System.Threading.Tasks.Task`).
+///
+/// Currently the compiler does not yet inspect the project graph to detect
+/// UniTask; we prefer `UniTask` by default since the target platform is Unity.
+fn async_return_type(inner: &str) -> String {
+    let trimmed = inner.trim();
+    if trimmed.is_empty() || trimmed == "void" {
+        "Cysharp.Threading.Tasks.UniTask".into()
+    } else {
+        format!("Cysharp.Threading.Tasks.UniTask<{}>", trimmed)
     }
 }
 
@@ -1495,8 +1570,13 @@ fn lower_intrinsic_coroutine(name: &str, params: &[Param], code: &str, span: Spa
 /// component-level `ComponentCtx`.
 fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
     match m {
-        Member::Func { visibility, is_static, is_override, is_abstract, is_open, name, type_params, where_clauses, params, return_ty, body, .. } => {
-            let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
+        Member::Func { visibility, is_static, is_override, is_abstract, is_open, is_async, name, type_params, where_clauses, params, return_ty, body, .. } => {
+            let inner_ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
+            let ret = if *is_async {
+                async_return_type(&inner_ret)
+            } else {
+                inner_ret.clone()
+            };
             let ps: Vec<CsParam> = params.iter().map(|p| CsParam {
                 ty: lower_type(&p.ty), name: p.name.clone(), default: None,
             }).collect();
@@ -1504,6 +1584,9 @@ fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
             let mut mods = lower_visibility(*visibility);
             if *is_static {
                 mods = format!("{} static", mods);
+            }
+            if *is_async {
+                mods = format!("{} async", mods);
             }
             if *is_abstract {
                 mods = format!("{} abstract", mods);
@@ -1639,7 +1722,8 @@ fn stmt_span(stmt: &Stmt) -> Span {
         | Stmt::Continue { span, .. }
         | Stmt::Try { span, .. }
         | Stmt::Throw { span, .. }
-        | Stmt::Use { span, .. } => *span,
+        | Stmt::Use { span, .. }
+        | Stmt::BindTo { span, .. } => *span,
     }
 }
 
@@ -1673,7 +1757,8 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::ForceCastExpr { span, .. }
         | Expr::Tuple { span, .. }
         | Expr::ListLit { span, .. }
-        | Expr::MapLit { span, .. } => *span,
+        | Expr::MapLit { span, .. }
+        | Expr::Await { span, .. } => *span,
     }
 }
 
@@ -1692,7 +1777,10 @@ fn member_span(member: &Member) -> Span {
         | Member::IntrinsicCoroutine { span, .. }
         | Member::Pool { span, .. }
         | Member::Property { span, .. }
-        | Member::Event { span, .. } => *span,
+        | Member::Event { span, .. }
+        | Member::StateMachine { span, .. }
+        | Member::Command { span, .. }
+        | Member::BindProperty { span, .. } => *span,
     }
 }
 
@@ -2120,6 +2208,20 @@ fn lower_stmt_with_context(
             } else {
                 // Declaration form → emit as `using var name = init;`
                 CsStmt::Raw(format!("{};", decl_line), source_span)
+            }
+        }
+        Stmt::BindTo { source, target, .. } => {
+            // Phase 5: `bind source to target.x` → initial synchronization.
+            // The reactive property setter generated for the `bind` member
+            // handles future updates; here we just prime the target with the
+            // current value so the UI reflects state immediately.
+            let target_str = lower_expr_with_expected_type(target, None, callable_signatures);
+            let src_expr = format!("this.{}", source);
+            CsStmt::Assignment {
+                target: target_str,
+                op: "=".into(),
+                value: src_expr,
+                source_span,
             }
         }
     }
@@ -2653,6 +2755,11 @@ fn lower_expr_with_expected_type(
                     parts.join(", ")
                 )
             }
+        }
+        Expr::Await { expr: inner, .. } => {
+            // Phase 5: lowered as a prefix `await` expression.
+            let inner_str = lower_expr_with_expected_type(inner, None, callable_signatures);
+            format!("await {}", inner_str)
         }
     }
 }
@@ -3997,5 +4104,478 @@ fn lower_func_name_with_generics(name: &str, type_params: &[String]) -> String {
     } else {
         format!("{}<{}>", name, type_params.join(", "))
     }
+}
+
+// ── Phase 5 sugar: state machine / command / bind ─────────────────
+
+/// Lower a `state machine Name { ... }` member into:
+/// - A private enum `NameState`
+/// - A private backing field `_name`
+/// - A public property `name` with private setter
+/// - A public `TransitionName(string event)` dispatcher
+/// - Private `_enterName` / `_exitName` hooks
+///
+/// Returns the list of C# members for the owning component to embed.
+fn lower_state_machine(
+    name: &str,
+    states: &[StateDecl],
+    callable_signatures: &HashMap<String, CallableSignature>,
+) -> Vec<CsMember> {
+    let mut out: Vec<CsMember> = Vec::new();
+    if states.is_empty() {
+        return out;
+    }
+    let enum_name = format!("{}State", capitalize(name));
+    let backing = format!("_{}", name);
+    let enter_fn = format!("_enter{}", capitalize(name));
+    let exit_fn = format!("_exit{}", capitalize(name));
+    let transition_fn = format!("Transition{}", capitalize(name));
+
+    // enum NameState { S1, S2, ... }
+    let mut enum_lines = vec![format!("private enum {}", enum_name), "{".into()];
+    for s in states {
+        enum_lines.push(format!("    {},", s.name));
+    }
+    enum_lines.push("}".into());
+    out.push(CsMember::RawCode(enum_lines.join("\n")));
+
+    // private NameState _name = NameState.FirstState;
+    let initial = &states[0].name;
+    out.push(CsMember::Field {
+        attributes: vec![],
+        modifiers: "private".into(),
+        ty: enum_name.clone(),
+        name: backing.clone(),
+        init: Some(format!("{}.{}", enum_name, initial)),
+    });
+
+    // public NameState name { get => _name; private set => _name = value; }
+    out.push(CsMember::Property {
+        modifiers: "public".into(),
+        ty: enum_name.clone(),
+        name: name.into(),
+        getter_expr: backing.clone(),
+        setter: Some("private set".into()),
+        setter_expr: Some(backing.clone()),
+    });
+
+    // private void _enterName(NameState state) { switch (state) { ... } }
+    let mut enter_body = Vec::new();
+    let mut enter_cases: Vec<CsSwitchCase> = Vec::new();
+    for s in states {
+        if let Some(block) = &s.enter {
+            let stmts: Vec<CsStmt> = block.stmts
+                .iter()
+                .map(|st| lower_stmt_with_context(st, Some(callable_signatures), None))
+                .chain(std::iter::once(CsStmt::Break(None)))
+                .collect();
+            enter_cases.push(CsSwitchCase {
+                pattern: format!("case {}.{}:", enum_name, s.name),
+                body: stmts,
+            });
+        }
+    }
+    if !enter_cases.is_empty() {
+        enter_body.push(CsStmt::Switch {
+            subject: "state".into(),
+            cases: enter_cases,
+            source_span: None,
+        });
+    }
+    out.push(CsMember::Method {
+        attributes: vec![],
+        modifiers: "private".into(),
+        return_ty: "void".into(),
+        name: enter_fn.clone(),
+        params: vec![CsParam { ty: enum_name.clone(), name: "state".into(), default: None }],
+        where_clauses: vec![],
+        body: enter_body,
+        source_span: None,
+    });
+
+    // private void _exitName(NameState state) { ... }
+    let mut exit_body = Vec::new();
+    let mut exit_cases: Vec<CsSwitchCase> = Vec::new();
+    for s in states {
+        if let Some(block) = &s.exit {
+            let stmts: Vec<CsStmt> = block.stmts
+                .iter()
+                .map(|st| lower_stmt_with_context(st, Some(callable_signatures), None))
+                .chain(std::iter::once(CsStmt::Break(None)))
+                .collect();
+            exit_cases.push(CsSwitchCase {
+                pattern: format!("case {}.{}:", enum_name, s.name),
+                body: stmts,
+            });
+        }
+    }
+    if !exit_cases.is_empty() {
+        exit_body.push(CsStmt::Switch {
+            subject: "state".into(),
+            cases: exit_cases,
+            source_span: None,
+        });
+    }
+    out.push(CsMember::Method {
+        attributes: vec![],
+        modifiers: "private".into(),
+        return_ty: "void".into(),
+        name: exit_fn.clone(),
+        params: vec![CsParam { ty: enum_name.clone(), name: "state".into(), default: None }],
+        where_clauses: vec![],
+        body: exit_body,
+        source_span: None,
+    });
+
+    // public void TransitionName(string eventName) { var prev=_name; _name=...; if(prev!=_name){...} }
+    let mut transition_body = Vec::new();
+    transition_body.push(CsStmt::VarDecl {
+        ty: "var".into(),
+        name: "__prev".into(),
+        init: backing.clone(),
+        source_span: None,
+    });
+
+    // Build the (state, event) switch as nested if/else for readability.
+    // Emit as Raw block so we can produce tuple pattern syntax directly.
+    let mut switch_lines = Vec::new();
+    switch_lines.push(format!("{} = ({}, eventName) switch", backing, backing));
+    switch_lines.push("{".into());
+    for s in states {
+        for tr in &s.transitions {
+            switch_lines.push(format!(
+                "    ({}.{}, \"{}\") => {}.{},",
+                enum_name, s.name, tr.event, enum_name, tr.target
+            ));
+        }
+    }
+    switch_lines.push(format!("    _ => {},", backing));
+    switch_lines.push("};".into());
+    transition_body.push(CsStmt::Raw(switch_lines.join("\n"), None));
+
+    // if (__prev != _name) { _exitName(__prev); _enterName(_name); }
+    transition_body.push(CsStmt::If {
+        cond: format!("__prev != {}", backing),
+        then_body: vec![
+            CsStmt::Expr(format!("{}(__prev)", exit_fn), None),
+            CsStmt::Expr(format!("{}({})", enter_fn, backing), None),
+        ],
+        else_body: None,
+        source_span: None,
+    });
+
+    out.push(CsMember::Method {
+        attributes: vec![],
+        modifiers: "public".into(),
+        return_ty: "void".into(),
+        name: transition_fn,
+        params: vec![CsParam { ty: "string".into(), name: "eventName".into(), default: None }],
+        where_clauses: vec![],
+        body: transition_body,
+        source_span: None,
+    });
+
+    out
+}
+
+/// Lower a `command Name(params) { ... } undo { ... } canExecute = expr` member.
+///
+/// Emits:
+/// - A nested class `NameCommand : ICommand` that captures the owner + params
+/// - A helper method `public void Name(params)` on the owner that constructs
+///   the command and invokes `Execute()`.
+///
+/// The generated class lives in `extra_types` of the lowered file so the
+/// emitter prints it after the owning component.
+fn lower_command_member(
+    owner_name: &str,
+    member_name: &str,
+    params: &[Param],
+    execute: &Block,
+    undo: Option<&Block>,
+    can_execute: Option<&Expr>,
+    callable_signatures: &HashMap<String, CallableSignature>,
+) -> (CsMember, CsClass) {
+    let class_name = format!("{}Command", capitalize(member_name));
+    let mut cs_members: Vec<CsMember> = Vec::new();
+
+    // Private fields: owner + each param + any variables captured by undo.
+    cs_members.push(CsMember::Field {
+        attributes: vec![],
+        modifiers: "private".into(),
+        ty: owner_name.into(),
+        name: "_owner".into(),
+        init: None,
+    });
+    for p in params {
+        cs_members.push(CsMember::Field {
+            attributes: vec![],
+            modifiers: "private".into(),
+            ty: lower_type(&p.ty),
+            name: format!("_{}", p.name),
+            init: None,
+        });
+    }
+
+    // Constructor: `public NameCommand(Owner owner, T1 p1, ...) { _owner = owner; _p1 = p1; ... }`
+    let ctor_params: Vec<CsParam> = std::iter::once(CsParam {
+        ty: owner_name.into(),
+        name: "owner".into(),
+        default: None,
+    })
+    .chain(params.iter().map(|p| CsParam {
+        ty: lower_type(&p.ty),
+        name: p.name.clone(),
+        default: None,
+    }))
+    .collect();
+    let mut ctor_body = vec![CsStmt::Assignment {
+        target: "_owner".into(),
+        op: "=".into(),
+        value: "owner".into(),
+        source_span: None,
+    }];
+    for p in params {
+        ctor_body.push(CsStmt::Assignment {
+            target: format!("_{}", p.name),
+            op: "=".into(),
+            value: p.name.clone(),
+            source_span: None,
+        });
+    }
+    cs_members.push(CsMember::Method {
+        attributes: vec![],
+        modifiers: "public".into(),
+        return_ty: "".into(), // constructor — no return type printed
+        name: class_name.clone(),
+        params: ctor_params,
+        where_clauses: vec![],
+        body: ctor_body,
+        source_span: None,
+    });
+
+    // CanExecute
+    let can_expr = match can_execute {
+        Some(e) => lower_expr_with_expected_type(e, None, Some(callable_signatures)),
+        None => "true".into(),
+    };
+    cs_members.push(CsMember::RawCode(format!(
+        "public bool CanExecute() => {};",
+        can_expr
+    )));
+
+    // Execute { ...execute body... } with rewriting: bare identifiers that match
+    // params or owner members are left as-is; owner references use `_owner.`.
+    // We generate lines manually via lower_stmt then text-replace `this` → `_owner`.
+    let mut exec_body: Vec<CsStmt> = execute
+        .stmts
+        .iter()
+        .map(|s| lower_stmt_with_context(s, Some(callable_signatures), None))
+        .collect();
+    replace_this_in_stmts(&mut exec_body, "_owner");
+    // Also rewrite parameter references `pname` → `_pname` by wrapping via map.
+    for p in params {
+        replace_ident_in_stmts(&mut exec_body, &p.name, &format!("_{}", p.name));
+    }
+
+    cs_members.push(CsMember::Method {
+        attributes: vec![],
+        modifiers: "public".into(),
+        return_ty: "void".into(),
+        name: "Execute".into(),
+        params: vec![],
+        where_clauses: vec![],
+        body: exec_body,
+        source_span: None,
+    });
+
+    // Undo
+    if let Some(undo_block) = undo {
+        let mut undo_body: Vec<CsStmt> = undo_block
+            .stmts
+            .iter()
+            .map(|s| lower_stmt_with_context(s, Some(callable_signatures), None))
+            .collect();
+        replace_this_in_stmts(&mut undo_body, "_owner");
+        for p in params {
+            replace_ident_in_stmts(&mut undo_body, &p.name, &format!("_{}", p.name));
+        }
+        cs_members.push(CsMember::Method {
+            attributes: vec![],
+            modifiers: "public".into(),
+            return_ty: "void".into(),
+            name: "Undo".into(),
+            params: vec![],
+            where_clauses: vec![],
+            body: undo_body,
+            source_span: None,
+        });
+    }
+
+    // Wrap in a class implementing ICommand (or the bare interface if ICommand is absent).
+    let class = CsClass {
+        attributes: vec![],
+        modifiers: "public".into(),
+        name: class_name.clone(),
+        base_class: None,
+        interfaces: vec!["ICommand".into()],
+        where_clauses: vec![],
+        members: cs_members,
+    };
+
+    // Owner helper method: `public void MemberName(params) { new NameCommand(this, params).Execute(); }`
+    let helper_params: Vec<CsParam> = params.iter().map(|p| CsParam {
+        ty: lower_type(&p.ty),
+        name: p.name.clone(),
+        default: None,
+    }).collect();
+    let ctor_arg_list: Vec<String> = std::iter::once("this".to_string())
+        .chain(params.iter().map(|p| p.name.clone()))
+        .collect();
+    let helper_body = vec![CsStmt::Expr(
+        format!("new {}({}).Execute()", class_name, ctor_arg_list.join(", ")),
+        None,
+    )];
+    let helper_method = CsMember::Method {
+        attributes: vec![],
+        modifiers: "public".into(),
+        return_ty: "void".into(),
+        name: member_name.into(),
+        params: helper_params,
+        where_clauses: vec![],
+        body: helper_body,
+        source_span: None,
+    };
+
+    (helper_method, class)
+}
+
+/// Text-level rename of bare identifier occurrences inside statement strings.
+/// Used by `lower_command_member` to rewrite parameter references (`target`) as
+/// captured field references (`_target`) inside the generated Execute / Undo
+/// bodies. Whole-word match only (ASCII word boundaries).
+fn replace_ident_in_stmts(stmts: &mut Vec<CsStmt>, from: &str, to: &str) {
+    for s in stmts.iter_mut() {
+        replace_ident_in_stmt(s, from, to);
+    }
+}
+
+fn replace_ident_in_stmt(stmt: &mut CsStmt, from: &str, to: &str) {
+    match stmt {
+        CsStmt::VarDecl { init, .. } => *init = replace_word(init, from, to),
+        CsStmt::Assignment { target, value, .. } => {
+            *target = replace_word(target, from, to);
+            *value = replace_word(value, from, to);
+        }
+        CsStmt::Expr(s, _) => *s = replace_word(s, from, to),
+        CsStmt::Return(Some(s), _) => *s = replace_word(s, from, to),
+        CsStmt::Raw(s, _) => *s = replace_word(s, from, to),
+        CsStmt::If { cond, then_body, else_body, .. } => {
+            *cond = replace_word(cond, from, to);
+            replace_ident_in_stmts(then_body, from, to);
+            if let Some(eb) = else_body {
+                replace_ident_in_stmts(eb, from, to);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn replace_word(text: &str, from: &str, to: &str) -> String {
+    if from.is_empty() {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let from_bytes = from.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if i + from_bytes.len() <= bytes.len() && &bytes[i..i + from_bytes.len()] == from_bytes {
+            let prev_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let next_ok = i + from_bytes.len() == bytes.len()
+                || !is_ident_byte(bytes[i + from_bytes.len()]);
+            if prev_ok && next_ok {
+                out.push_str(to);
+                i += from_bytes.len();
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    (b >= b'a' && b <= b'z')
+        || (b >= b'A' && b <= b'Z')
+        || (b >= b'0' && b <= b'9')
+        || b == b'_'
+}
+
+/// Lower a `bind name: Type = init` member to a reactive property + backing
+/// field that calls `OnPropertyChanged(nameof(name))` on assignment. This
+/// generates a minimal INotifyPropertyChanged plumbing that the owning
+/// component can expose via `implements INotifyPropertyChanged`.
+fn lower_bind_property(
+    name: &str,
+    ty: &TypeRef,
+    init: Option<&Expr>,
+    callable_signatures: &HashMap<String, CallableSignature>,
+) -> Vec<CsMember> {
+    let cs_ty = lower_type(ty);
+    let backing = format!("_{}", name);
+    let init_str = init.map(|e| lower_expr_with_expected_type(e, Some(ty), Some(callable_signatures)));
+
+    let mut out: Vec<CsMember> = Vec::new();
+
+    // private T _name = init;
+    out.push(CsMember::Field {
+        attributes: vec![],
+        modifiers: "private".into(),
+        ty: cs_ty.clone(),
+        name: backing.clone(),
+        init: init_str,
+    });
+
+    // public T name { get => _name; set { if (_name != value) { _name = value; OnPropertyChanged(nameof(name)); } } }
+    let body = vec![
+        format!("public {} {}", cs_ty, name),
+        "{".into(),
+        format!("    get => {};", backing),
+        "    set".into(),
+        "    {".into(),
+        format!("        if (!System.Collections.Generic.EqualityComparer<{}>.Default.Equals({}, value))", cs_ty, backing),
+        "        {".into(),
+        format!("            {} = value;", backing),
+        format!("            OnPropertyChanged(nameof({}));", name),
+        "        }".into(),
+        "    }".into(),
+        "}".into(),
+    ];
+    out.push(CsMember::RawCode(body.join("\n")));
+
+    out
+}
+
+/// Append a single shared `PropertyChanged` event + `OnPropertyChanged` helper
+/// to a component that contains at least one `bind` member. Returns `None` if
+/// `members` has no `bind`. Otherwise returns the two extra CsMembers.
+fn bind_infrastructure(members: &[Member]) -> Option<Vec<CsMember>> {
+    let has_bind = members.iter().any(|m| matches!(m, Member::BindProperty { .. }));
+    if !has_bind {
+        return None;
+    }
+    let event_line = "public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;".to_string();
+    let helper_lines = vec![
+        "private void OnPropertyChanged(string name)".to_string(),
+        "{".into(),
+        "    PropertyChanged?.Invoke(this, new System.ComponentModel.PropertyChangedEventArgs(name));".into(),
+        "}".into(),
+    ];
+    Some(vec![
+        CsMember::RawCode(event_line),
+        CsMember::RawCode(helper_lines.join("\n")),
+    ])
 }
 

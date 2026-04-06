@@ -1768,6 +1768,32 @@ fn collect_used_namespaces_for_member(member: &Member, used_namespaces: &mut Has
         Member::Event { ty, .. } => {
             collect_used_namespaces_for_type_ref(ty, used_namespaces);
         }
+        Member::StateMachine { states, .. } => {
+            for s in states {
+                if let Some(b) = &s.enter {
+                    collect_used_namespaces_for_block(b, used_namespaces);
+                }
+                if let Some(b) = &s.exit {
+                    collect_used_namespaces_for_block(b, used_namespaces);
+                }
+            }
+        }
+        Member::Command { params, execute, undo, can_execute, .. } => {
+            collect_used_namespaces_for_params(params, used_namespaces);
+            collect_used_namespaces_for_block(execute, used_namespaces);
+            if let Some(u) = undo {
+                collect_used_namespaces_for_block(u, used_namespaces);
+            }
+            if let Some(ce) = can_execute {
+                collect_used_namespaces_for_expr(ce, used_namespaces);
+            }
+        }
+        Member::BindProperty { ty, init, .. } => {
+            collect_used_namespaces_for_type_ref(ty, used_namespaces);
+            if let Some(e) = init {
+                collect_used_namespaces_for_expr(e, used_namespaces);
+            }
+        }
     }
 }
 
@@ -1911,6 +1937,9 @@ fn collect_used_namespaces_for_stmt(stmt: &Stmt, used_namespaces: &mut HashSet<S
             if let Some(body) = body {
                 collect_used_namespaces_for_block(body, used_namespaces);
             }
+        }
+        Stmt::BindTo { target, .. } => {
+            collect_used_namespaces_for_expr(target, used_namespaces);
         }
     }
 }
@@ -2092,6 +2121,10 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
                 collect_used_namespaces_for_expr(v, used_namespaces);
             }
         }
+        Expr::Await { expr: inner, .. } => {
+            // Phase 5: await is just a prefix on the inner expression.
+            collect_used_namespaces_for_expr(inner, used_namespaces);
+        }
     }
 }
 
@@ -2214,7 +2247,14 @@ fn member_contains_intrinsic_code(member: &Member) -> bool {
         | Member::Parent { .. }
         | Member::Pool { .. }
         | Member::Property { .. }
-        | Member::Event { .. } => false,
+        | Member::Event { .. }
+        | Member::BindProperty { .. }
+        | Member::StateMachine { .. } => false,
+        Member::Command { execute, undo, can_execute, .. } => {
+            block_contains_intrinsic_code(execute)
+                || undo.as_ref().is_some_and(block_contains_intrinsic_code)
+                || can_execute.as_ref().is_some_and(expr_contains_intrinsic_code)
+        }
     }
 }
 
@@ -2280,6 +2320,7 @@ fn stmt_contains_intrinsic_code(stmt: &Stmt) -> bool {
             expr_contains_intrinsic_code(init)
                 || body.as_ref().is_some_and(block_contains_intrinsic_code)
         }
+        Stmt::BindTo { target, .. } => expr_contains_intrinsic_code(target),
     }
 }
 
@@ -2379,6 +2420,7 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
         Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
             expr_contains_intrinsic_code(k) || expr_contains_intrinsic_code(v)
         }),
+        Expr::Await { expr: inner, .. } => expr_contains_intrinsic_code(inner),
         Expr::IntLit(_, _)
         | Expr::FloatLit(_, _)
         | Expr::DurationLit(_, _)
@@ -2745,6 +2787,15 @@ fn collect_stmt_explicit_type_arg_actions(
                 );
             }
         }
+        Stmt::BindTo { target, .. } => {
+            collect_expr_explicit_type_arg_actions(
+                target,
+                None,
+                callable_signatures,
+                selection_span,
+                actions,
+            );
+        }
     }
 }
 
@@ -2961,6 +3012,9 @@ fn collect_expr_explicit_type_arg_actions(
                 collect_expr_explicit_type_arg_actions(k, None, callable_signatures, selection_span, actions);
                 collect_expr_explicit_type_arg_actions(v, None, callable_signatures, selection_span, actions);
             }
+        }
+        Expr::Await { expr: inner, .. } => {
+            collect_expr_explicit_type_arg_actions(inner, None, callable_signatures, selection_span, actions);
         }
     }
 }

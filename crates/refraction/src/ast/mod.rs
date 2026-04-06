@@ -209,6 +209,8 @@ pub enum Member {
         is_abstract: bool,
         is_open: bool,
         is_operator: bool,
+        /// v4: `async func` — lowered to async Task/UniTask method.
+        is_async: bool,
         name: String,
         name_span: Span,
         type_params: Vec<String>,
@@ -274,6 +276,55 @@ pub enum Member {
         ty: TypeRef,
         span: Span,
     },
+    /// `state machine Name { state S { enter { } exit { } on ev => T } }`
+    /// Phase 5: finite state machine sugar (sugar.state).
+    StateMachine {
+        name: String,
+        name_span: Span,
+        states: Vec<StateDecl>,
+        span: Span,
+    },
+    /// `command Name(params) { execute { } undo { } canExecute = expr }`
+    /// Phase 5: command pattern sugar (sugar.command).
+    Command {
+        name: String,
+        name_span: Span,
+        params: Vec<Param>,
+        execute: Block,
+        undo: Option<Block>,
+        can_execute: Option<Expr>,
+        span: Span,
+    },
+    /// `bind name: Type = init` — reactive property with change notification.
+    /// Phase 5: bind / MVVM sugar (sugar.bind).
+    BindProperty {
+        name: String,
+        name_span: Span,
+        ty: TypeRef,
+        init: Option<Expr>,
+        span: Span,
+    },
+}
+
+/// A single state inside a `state machine` declaration.
+#[derive(Debug, Clone)]
+pub struct StateDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub enter: Option<Block>,
+    pub exit: Option<Block>,
+    pub transitions: Vec<StateTransition>,
+    pub span: Span,
+}
+
+/// `on event => targetState` transition rule.
+#[derive(Debug, Clone)]
+pub struct StateTransition {
+    pub event: String,
+    pub event_span: Span,
+    pub target: String,
+    pub target_span: Span,
+    pub span: Span,
 }
 
 // ── Statements ───────────────────────────────────────────────────
@@ -399,6 +450,18 @@ pub enum Stmt {
         init: Expr,
         /// `Some(block)` → block form; `None` → declaration form (`use val ...`)
         body: Option<Block>,
+        span: Span,
+    },
+    /// `bind source to target.member` — Phase 5 bind/MVVM statement form.
+    /// Registers a one-way push so that subsequent changes to `source`
+    /// propagate to `target` automatically (lowered to a direct assignment
+    /// plus an entry in the owning component's bind table).
+    BindTo {
+        /// The bound source identifier (must refer to a `bind` property).
+        source: String,
+        source_span: Span,
+        /// The target expression, usually a member access like `label.text`.
+        target: Expr,
         span: Span,
     },
 }
@@ -634,6 +697,12 @@ pub enum Expr {
     /// `{"a": 1, "b": 2}` — map literal (Language 4)
     MapLit {
         entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
+    /// `await expr` — Phase 5 async/await (stmt.async).
+    /// Modeled as an expression so `val x = await foo()` works naturally.
+    Await {
+        expr: Box<Expr>,
         span: Span,
     },
 }

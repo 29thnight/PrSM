@@ -112,6 +112,28 @@ impl Parser {
         }
     }
 
+    /// Look ahead `offset` non-newline tokens and test whether that token is
+    /// an Identifier with the given text. `offset = 0` tests the current token.
+    fn peek_ahead_is_contextual(&self, offset: usize, text: &str) -> bool {
+        let mut p = self.pos;
+        let mut seen = 0usize;
+        // skip any leading newlines
+        while p < self.tokens.len() && self.tokens[p].kind == TokenKind::Newline {
+            p += 1;
+        }
+        while p < self.tokens.len() {
+            if seen == offset {
+                return matches!(&self.tokens[p].kind, TokenKind::Identifier(n) if n == text);
+            }
+            p += 1;
+            while p < self.tokens.len() && self.tokens[p].kind == TokenKind::Newline {
+                p += 1;
+            }
+            seen += 1;
+        }
+        false
+    }
+
     fn skip_newlines(&mut self) {
         while self.peek() == &TokenKind::Newline {
             self.advance();
@@ -761,6 +783,22 @@ impl Parser {
             return self.parse_event_member(Visibility::Public);
         }
 
+        // Phase 5 contextual keywords: async / state machine / command / bind
+        if self.check_contextual("async") {
+            self.advance(); // consume 'async'
+            self.expect(&TokenKind::Func)?;
+            return self.parse_func_inner_async(Visibility::Public);
+        }
+        if self.check_contextual("state") && self.peek_ahead_is_contextual(1, "machine") {
+            return self.parse_state_machine();
+        }
+        if self.check_contextual("command") {
+            return self.parse_command_member();
+        }
+        if self.check_contextual("bind") {
+            return self.parse_bind_member();
+        }
+
         match self.peek().clone() {
             TokenKind::Serialize => self.parse_serialize_field(annotations),
             TokenKind::Require => self.parse_require(),
@@ -781,6 +819,11 @@ impl Parser {
                 if self.check_contextual("event") {
                     return self.parse_event_member(vis);
                 }
+                if self.check_contextual("async") {
+                    self.advance(); // consume 'async'
+                    self.expect(&TokenKind::Func)?;
+                    return self.parse_func_inner_async(vis);
+                }
                 match self.peek().clone() {
                     TokenKind::Serialize => self.parse_serialize_field_with_vis(annotations, Some(vis)),
                     TokenKind::Func => self.parse_func(vis, false),
@@ -790,7 +833,7 @@ impl Parser {
                         self.parse_func_inner(vis, false, true)
                     }
                     // field: private rb: Rigidbody
-                    TokenKind::Identifier(_) => self.parse_field(vis),
+                    TokenKind::Identifier(name) if name != "async" => self.parse_field(vis),
                     TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property(vis),
                     _ => Err(self.error(format!("Expected member after visibility, found {:?}", self.peek()))),
                 }
@@ -807,12 +850,12 @@ impl Parser {
             TokenKind::Abstract => {
                 self.advance(); // consume 'abstract'
                 self.expect(&TokenKind::Func)?;
-                self.parse_func_inner_ext(Visibility::Public, false, false, true, false)
+                self.parse_func_inner_ext(Visibility::Public, false, false, true, false, false)
             }
             TokenKind::Open => {
                 self.advance(); // consume 'open'
                 self.expect(&TokenKind::Func)?;
-                self.parse_func_inner_ext(Visibility::Public, false, false, false, true)
+                self.parse_func_inner_ext(Visibility::Public, false, false, false, true, false)
             }
             TokenKind::Operator => self.parse_operator_member(),
             TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property(Visibility::Public),
@@ -1013,6 +1056,177 @@ impl Parser {
         })
     }
 
+    // ── Phase 5: state machine member ───────────────────────────
+
+    /// Parse `state machine Name { state S { enter { } exit { } on ev => T } }`.
+    fn parse_state_machine(&mut self) -> Result<Member, ParseError> {
+        let start = self.peek_span();
+        let _ = self.eat_contextual("state")
+            .ok_or_else(|| self.error("Expected 'state'".into()))?;
+        self.skip_newlines();
+        let _ = self.eat_contextual("machine")
+            .ok_or_else(|| self.error("Expected 'machine' after 'state'".into()))?;
+        self.skip_newlines();
+        let (name, name_span) = self.expect_ident()?;
+        self.skip_newlines();
+        self.expect(&TokenKind::LBrace)?;
+        self.skip_newlines();
+
+        let mut states = Vec::new();
+        while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+            let state = self.parse_state_decl()?;
+            states.push(state);
+            self.skip_newlines();
+        }
+        self.expect(&TokenKind::RBrace)?;
+        self.expect_newline_or_eof();
+
+        Ok(Member::StateMachine {
+            name,
+            name_span,
+            states,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    /// Parse a single `state Name { ... }` entry.
+    fn parse_state_decl(&mut self) -> Result<StateDecl, ParseError> {
+        let start = self.peek_span();
+        let _ = self.eat_contextual("state")
+            .ok_or_else(|| self.error("Expected 'state'".into()))?;
+        let (name, name_span) = self.expect_ident()?;
+        self.skip_newlines();
+        self.expect(&TokenKind::LBrace)?;
+        self.skip_newlines();
+
+        let mut enter: Option<Block> = None;
+        let mut exit: Option<Block> = None;
+        let mut transitions: Vec<StateTransition> = Vec::new();
+
+        while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
+            if self.check_contextual("enter") {
+                self.advance(); // consume 'enter'
+                self.skip_newlines();
+                let block = self.parse_block()?;
+                enter = Some(block);
+                self.skip_newlines();
+            } else if self.check_contextual("exit") {
+                self.advance(); // consume 'exit'
+                self.skip_newlines();
+                let block = self.parse_block()?;
+                exit = Some(block);
+                self.skip_newlines();
+            } else if self.check_contextual("on") {
+                let t_start = self.peek_span();
+                self.advance(); // consume 'on'
+                let (event, event_span) = self.expect_ident()?;
+                self.expect(&TokenKind::FatArrow)?;
+                let (target, target_span) = self.expect_ident()?;
+                self.expect_newline_or_eof();
+                transitions.push(StateTransition {
+                    event,
+                    event_span,
+                    target,
+                    target_span,
+                    span: Span { start: t_start.start, end: self.peek_span().end },
+                });
+                self.skip_newlines();
+            } else {
+                return Err(self.error(format!(
+                    "Expected 'enter', 'exit', or 'on' inside state '{}', found {:?}",
+                    name,
+                    self.peek()
+                )));
+            }
+        }
+        self.expect(&TokenKind::RBrace)?;
+        self.expect_newline_or_eof();
+
+        Ok(StateDecl {
+            name,
+            name_span,
+            enter,
+            exit,
+            transitions,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    // ── Phase 5: command member ─────────────────────────────────
+
+    /// Parse `command Name(params) { stmts } [undo { stmts }] [canExecute = expr]`.
+    fn parse_command_member(&mut self) -> Result<Member, ParseError> {
+        let start = self.peek_span();
+        let _ = self.eat_contextual("command")
+            .ok_or_else(|| self.error("Expected 'command'".into()))?;
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&TokenKind::LParen)?;
+        let params = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_param_list()?
+        };
+        self.expect(&TokenKind::RParen)?;
+        self.skip_newlines();
+        let execute = self.parse_block()?;
+        self.skip_newlines();
+
+        let undo = if self.check_contextual("undo") {
+            self.advance(); // consume 'undo'
+            self.skip_newlines();
+            let block = self.parse_block()?;
+            self.skip_newlines();
+            Some(block)
+        } else {
+            None
+        };
+
+        let can_execute = if self.check_contextual("canExecute") {
+            self.advance(); // consume 'canExecute'
+            self.expect(&TokenKind::Eq)?;
+            let expr = self.parse_expr()?;
+            self.expect_newline_or_eof();
+            Some(expr)
+        } else {
+            None
+        };
+
+        Ok(Member::Command {
+            name,
+            name_span,
+            params,
+            execute,
+            undo,
+            can_execute,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    // ── Phase 5: bind member ────────────────────────────────────
+
+    /// Parse `bind name: Type [= init]` member declaration (reactive property).
+    fn parse_bind_member(&mut self) -> Result<Member, ParseError> {
+        let start = self.peek_span();
+        let _ = self.eat_contextual("bind")
+            .ok_or_else(|| self.error("Expected 'bind'".into()))?;
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+        let init = if self.eat(&TokenKind::Eq) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        self.expect_newline_or_eof();
+        Ok(Member::BindProperty {
+            name,
+            name_span,
+            ty,
+            init,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
     fn parse_func(&mut self, vis: Visibility, is_override: bool) -> Result<Member, ParseError> {
         self.advance(); // consume 'func'
         self.parse_func_inner(vis, false, is_override)
@@ -1024,10 +1238,15 @@ impl Parser {
     }
 
     fn parse_func_inner(&mut self, vis: Visibility, is_static: bool, is_override: bool) -> Result<Member, ParseError> {
-        self.parse_func_inner_ext(vis, is_static, is_override, false, false)
+        self.parse_func_inner_ext(vis, is_static, is_override, false, false, false)
     }
 
-    fn parse_func_inner_ext(&mut self, vis: Visibility, is_static: bool, is_override: bool, is_abstract: bool, is_open: bool) -> Result<Member, ParseError> {
+    /// Convenience: parse `func` after a contextual `async` prefix has already been consumed.
+    fn parse_func_inner_async(&mut self, vis: Visibility) -> Result<Member, ParseError> {
+        self.parse_func_inner_ext(vis, false, false, false, false, true)
+    }
+
+    fn parse_func_inner_ext(&mut self, vis: Visibility, is_static: bool, is_override: bool, is_abstract: bool, is_open: bool, is_async: bool) -> Result<Member, ParseError> {
         let start = self.peek_span();
         let (name, name_span) = self.expect_ident()?;
 
@@ -1072,6 +1291,7 @@ impl Parser {
             is_abstract,
             is_open,
             is_operator: false,
+            is_async,
             name,
             name_span,
             type_params,
@@ -1405,6 +1625,7 @@ impl Parser {
             is_abstract: false,
             is_open: false,
             is_operator: true,
+            is_async: false,
             name: op_name,
             name_span: op_name_span,
             type_params: vec![],
@@ -1463,6 +1684,13 @@ impl Parser {
         // Two forms: `use val name = expr` (declaration) or `use name = expr { body }` (block).
         if self.check_contextual("use") {
             return self.parse_use_stmt();
+        }
+
+        // Phase 5: `bind source to target` — declarative push binding statement.
+        // Parsed here so that `bind x to y` inside lifecycle blocks is a statement,
+        // not interpreted as a call to a function named `bind`.
+        if self.check_contextual("bind") && self.peek_ahead_is_contextual(2, "to") {
+            return self.parse_bind_to_stmt();
         }
 
         match self.peek().clone() {
@@ -2111,6 +2339,25 @@ impl Parser {
         })
     }
 
+    /// Phase 5: parse `bind source to target.expr` declarative binding statement.
+    /// Form: `bind IDENT to EXPR` — wired via `BindTo` Stmt.
+    fn parse_bind_to_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.peek_span();
+        let _ = self.eat_contextual("bind")
+            .ok_or_else(|| self.error("Expected 'bind'".into()))?;
+        let (source, source_span) = self.expect_ident()?;
+        let _ = self.eat_contextual("to")
+            .ok_or_else(|| self.error("Expected 'to' in bind statement".into()))?;
+        let target = self.parse_expr()?;
+        self.expect_newline_or_eof();
+        Ok(Stmt::BindTo {
+            source,
+            source_span,
+            target,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
     fn parse_expr_or_assignment_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek_span();
         let expr = self.parse_expr()?;
@@ -2406,6 +2653,14 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        // Phase 5: `await EXPR` is a prefix expression (contextual keyword).
+        if self.check_contextual("await") {
+            let start = self.peek_span();
+            self.advance(); // consume 'await'
+            let operand = self.parse_unary()?;
+            let span = Span { start: start.start, end: operand.span().end };
+            return Ok(Expr::Await { expr: Box::new(operand), span });
+        }
         match self.peek().clone() {
             TokenKind::Bang => {
                 let start = self.peek_span();
@@ -3246,7 +3501,8 @@ impl Expr {
             | Expr::ForceCastExpr { span, .. }
             | Expr::Tuple { span, .. }
             | Expr::ListLit { span, .. }
-            | Expr::MapLit { span, .. } => *span,
+            | Expr::MapLit { span, .. }
+            | Expr::Await { span, .. } => *span,
         }
     }
 }
@@ -4057,6 +4313,185 @@ component PlayerHealth : MonoBehaviour {
             assert!(no_default, "expected no default body");
         } else {
             panic!("expected interface");
+        }
+    }
+
+    // ── Phase 5: async / state machine / command / bind ──────────
+
+    #[test]
+    fn test_parse_async_func() {
+        let src = r#"component Loader : MonoBehaviour {
+  async func loadProfile(): String {
+    val payload = await fetch("/api/profile")
+    return payload
+  }
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Component { members, .. } = file.decl {
+            let mut found = false;
+            for m in &members {
+                if let Member::Func { name, is_async, .. } = m {
+                    if name == "loadProfile" {
+                        assert!(*is_async, "loadProfile must be async");
+                        found = true;
+                    }
+                }
+            }
+            assert!(found, "loadProfile not found");
+        } else {
+            panic!("expected component");
+        }
+    }
+
+    #[test]
+    fn test_parse_await_inside_async() {
+        let src = r#"component Loader : MonoBehaviour {
+  async func ping() {
+    await delay(1)
+  }
+}"#;
+        let file = parse_ok(src);
+        let _ = file;
+    }
+
+    #[test]
+    fn test_parse_state_machine_basic() {
+        let src = r#"component EnemyAI : MonoBehaviour {
+  state machine aiState {
+    state Idle {
+      on playerDetected => Chase
+    }
+    state Chase {
+      on playerLost => Idle
+    }
+  }
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Component { members, .. } = file.decl {
+            let sm = members.iter().find_map(|m| match m {
+                Member::StateMachine { name, states, .. } if name == "aiState" => Some(states),
+                _ => None,
+            }).expect("state machine");
+            assert_eq!(sm.len(), 2, "two states");
+            assert_eq!(sm[0].name, "Idle");
+            assert_eq!(sm[0].transitions.len(), 1);
+            assert_eq!(sm[0].transitions[0].event, "playerDetected");
+            assert_eq!(sm[0].transitions[0].target, "Chase");
+        } else {
+            panic!("expected component");
+        }
+    }
+
+    #[test]
+    fn test_parse_state_machine_enter_exit() {
+        let src = r#"component EnemyAI : MonoBehaviour {
+  state machine aiState {
+    state Idle {
+      enter { log("idle") }
+      exit { log("leaving idle") }
+      on go => Run
+    }
+    state Run {
+      on stopRun => Idle
+    }
+  }
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Component { members, .. } = file.decl {
+            let sm = members.iter().find_map(|m| match m {
+                Member::StateMachine { states, .. } => Some(states),
+                _ => None,
+            }).expect("state machine");
+            let idle = sm.iter().find(|s| s.name == "Idle").expect("Idle state");
+            assert!(idle.enter.is_some(), "Idle.enter present");
+            assert!(idle.exit.is_some(), "Idle.exit present");
+        } else {
+            panic!("expected component");
+        }
+    }
+
+    #[test]
+    fn test_parse_command_basic() {
+        let src = r#"component Unit : MonoBehaviour {
+  command moveTo(target: Vector3) {
+    log("execute")
+  }
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Component { members, .. } = file.decl {
+            let cmd = members.iter().find_map(|m| match m {
+                Member::Command { name, params, .. } if name == "moveTo" => Some(params.len()),
+                _ => None,
+            }).expect("command");
+            assert_eq!(cmd, 1, "moveTo has one param");
+        } else {
+            panic!("expected component");
+        }
+    }
+
+    #[test]
+    fn test_parse_command_with_undo_and_canexecute() {
+        let src = r#"component Unit : MonoBehaviour {
+  command damage(amount: Int) {
+    log("dealing damage")
+  } undo {
+    log("undo")
+  } canExecute = true
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Component { members, .. } = file.decl {
+            let (has_undo, has_can) = members.iter().find_map(|m| match m {
+                Member::Command { name, undo, can_execute, .. } if name == "damage" => {
+                    Some((undo.is_some(), can_execute.is_some()))
+                }
+                _ => None,
+            }).expect("command");
+            assert!(has_undo, "undo block present");
+            assert!(has_can, "canExecute present");
+        } else {
+            panic!("expected component");
+        }
+    }
+
+    #[test]
+    fn test_parse_bind_property() {
+        let src = r#"component HUD : MonoBehaviour {
+  bind hp: Int = 100
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Component { members, .. } = file.decl {
+            let found = members.iter().any(|m| matches!(m,
+                Member::BindProperty { name, .. } if name == "hp"
+            ));
+            assert!(found, "bind property hp present");
+        } else {
+            panic!("expected component");
+        }
+    }
+
+    #[test]
+    fn test_parse_bind_to_statement() {
+        let src = r#"component HUD : MonoBehaviour {
+  bind hp: Int = 100
+  awake {
+    bind hp to label.text
+  }
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Component { members, .. } = file.decl {
+            let mut saw_bind_to = false;
+            for m in &members {
+                if let Member::Lifecycle { body, .. } = m {
+                    for s in &body.stmts {
+                        if matches!(s, Stmt::BindTo { source, .. } if source == "hp") {
+                            saw_bind_to = true;
+                        }
+                    }
+                }
+            }
+            assert!(saw_bind_to, "bind hp to statement present");
+        } else {
+            panic!("expected component");
         }
     }
 }
