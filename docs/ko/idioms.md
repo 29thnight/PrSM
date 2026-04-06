@@ -33,6 +33,40 @@ component DamageReceiver : MonoBehaviour {
 
 이동, 입력, 체력, UI, 오디오를 하나의 선언에서 처리하는 "만능 컴포넌트"는 피하세요. 별도의 컴포넌트로 분리하고 이벤트나 공유 `asset` 데이터를 통해 통신합니다.
 
+### 싱글톤 패턴 (PrSM 3 부터)
+
+싱글톤 패턴을 직접 구현하는 대신 `singleton component`를 사용하세요:
+
+```prsm
+// 권장 — 키워드 하나로 해결
+singleton component GameManager : MonoBehaviour {
+    var score: Int = 0
+}
+
+// 안티패턴 — 수동 싱글톤 보일러플레이트
+component GameManager : MonoBehaviour {
+    // 이렇게 하지 마세요 — 대신 singleton 키워드를 사용하세요
+    // private static instance, Awake 검사, DontDestroyOnLoad...
+}
+```
+
+### 오브젝트 풀링 (PrSM 3 부터)
+
+수동 풀 관리 대신 `pool` 수정자를 사용하세요:
+
+```prsm
+// 권장 — 선언적 풀
+component Spawner : MonoBehaviour {
+    serialize prefab: Bullet
+    pool bullets: Bullet(capacity = 20, max = 100)
+
+    func fire() {
+        val bullet = bullets.get()
+        bullet.launch(direction)
+    }
+}
+```
+
 ## 이벤트 구독 패턴
 
 ### 권장 — `until disable`로 자동 정리
@@ -282,3 +316,22 @@ func captureScreenshot() {
 - 입력 — `on input` 사용 (PrSM 2 부터)
 
 큰 `intrinsic` 블록을 자주 작성하게 된다면, 해당 패턴을 네이티브로 지원할 수 있도록 기능 요청을 제출하는 것을 고려하세요.
+
+### Interface 주도 설계 (PrSM 3 부터)
+
+컴포넌트 계약을 위한 interface를 정의하세요:
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int)
+    val isAlive: Bool
+}
+
+component Enemy : MonoBehaviour, IDamageable {
+    var hp: Int = 100
+    val isAlive: Bool = hp > 0
+    func takeDamage(amount: Int) { hp -= amount }
+}
+```
+
+느슨한 결합을 위해 `require`와 함께 interface를 사용하세요: `require target: Enemy` 대신 `require target: IDamageable`을 사용합니다.

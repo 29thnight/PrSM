@@ -61,6 +61,30 @@ The extension activates for `.prsm` files and provides:
 | `prsm.showWarnings` | `true` | Show warning-level diagnostics |
 | `prsm.unityApiDbPath` | `""` (bundled) | Path to Unity API SQLite database |
 
+### SOLID analysis (since PrSM 3)
+
+The compiler includes static analysis warnings for common design issues:
+
+| Warning | Condition |
+|---------|-----------|
+| W010 | Component has 8+ public methods |
+| W011 | Component has 6+ dependency fields |
+| W012 | Method/lifecycle has 50+ statements |
+
+Configurable in `.prsmproject`:
+
+```toml
+[analysis]
+solid_warnings = true
+disabled_warnings = ["W012"]
+```
+
+### Code optimizer (since PrSM 3)
+
+The compiler optimizes generated C# when `--optimize` is used:
+- Single-binding destructure inlining (removes unnecessary temp variables)
+- Additional optimization rules planned for future versions
+
 ## Installation methods
 
 See [Getting Started](getting-started.md) for full installation instructions including MSI, winget, and source build options.

@@ -325,6 +325,138 @@ component Demo : MonoBehaviour {
 
 ---
 
+### E090 -- Interface member not implemented (since PrSM 3)
+
+**Severity:** Error
+**Message:** `Interface member '{name}' is not implemented`
+**Explanation:** A component or class declares that it implements an interface but does not provide an implementation for a required member.
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int)
+    val isAlive: Bool
+}
+
+component Enemy : MonoBehaviour, IDamageable {
+    var hp: Int = 100
+    // E090: missing takeDamage and isAlive
+}
+```
+
+**Fix:** Add the missing method or property to satisfy the interface contract.
+
+---
+
+### E091 -- Interface member has implementation body (since PrSM 3)
+
+**Severity:** Error
+**Message:** `Interface members shall not have implementation bodies`
+**Explanation:** Interface members are signatures only. Providing a body inside an interface declaration is not allowed.
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int) { }  // E091
+}
+```
+
+**Fix:** Remove the body -- interface members are signatures only.
+
+---
+
+### E095 -- Generic type constraint violation (since PrSM 3)
+
+**Severity:** Error
+**Message:** `Type argument '{T}' does not satisfy constraint '{constraint}'`
+**Explanation:** A generic type parameter was instantiated with a type that does not meet the declared constraint.
+
+```prsm
+class Registry<T> where T : Component {
+    var items: List<T> = []
+}
+
+val r = Registry<String>()  // E095: String does not satisfy Component
+```
+
+**Fix:** Use a type that satisfies the constraint.
+
+---
+
+### E096 -- Generic params on unsupported declaration (since PrSM 3)
+
+**Severity:** Error
+**Message:** `Generic type parameters cannot be declared on component/asset/enum/data class`
+**Explanation:** Generic type parameters are only supported on `class` and `func` declarations. Unity-serialized types (`component`, `asset`) and value-like types (`enum`, `data class`) cannot be generic.
+
+```prsm
+component Foo<T> : MonoBehaviour { }  // E096
+```
+
+**Fix:** Use generics only on `class` and `func`.
+
+---
+
+### E097 -- singleton on non-component (since PrSM 3)
+
+**Severity:** Error
+**Message:** `'singleton' can only be used before 'component'`
+**Explanation:** The `singleton` modifier generates Unity-specific `Awake` and `DontDestroyOnLoad` code that is only meaningful on a `component`.
+
+```prsm
+singleton class Foo { }  // E097
+```
+
+**Fix:** Use `singleton` only with `component`.
+
+---
+
+### E098 -- Pool missing prefab (since PrSM 3)
+
+**Severity:** Error
+**Message:** `Pool type '{T}' has no matching serialize prefab field`
+**Explanation:** A `pool` declaration requires a corresponding `serialize` field of the same type to serve as the prefab source.
+
+```prsm
+component Spawner : MonoBehaviour {
+    pool bullets: Bullet(capacity = 20, max = 100)  // E098: no serialize Bullet field
+}
+```
+
+**Fix:** Add a `serialize` field of the pool's type (e.g. `serialize bulletPrefab: Bullet`).
+
+---
+
+### E099 -- Pool outside component (since PrSM 3)
+
+**Severity:** Error
+**Message:** `'pool' is only valid inside a component declaration`
+**Explanation:** Object pools depend on Unity lifecycle hooks and are only valid inside `component` bodies.
+
+```prsm
+class Utility {
+    pool items: Bullet(capacity = 10, max = 50)  // E099
+}
+```
+
+**Fix:** Move the `pool` declaration into a `component`.
+
+---
+
+### E101 -- Reserved built-in method name (since PrSM 3)
+
+**Severity:** Error
+**Message:** `'{name}' is a reserved built-in method name`
+**Explanation:** Certain method names are reserved by the compiler for generated code and cannot be used as user-defined function names.
+
+```prsm
+component Demo : MonoBehaviour {
+    func get() { }  // E101
+}
+```
+
+**Fix:** Rename the function (e.g. `getData`, `findTarget`).
+
+---
+
 ## Warnings
 
 ### W001 -- Unnecessary non-null assertion
@@ -375,3 +507,33 @@ data class Empty()  // W005
 ```
 
 **Fix:** Add fields to the parameter list, or remove the data class if it is unused.
+
+---
+
+### W010 -- Too many public methods (since PrSM 3)
+
+**Severity:** Warning
+**Message:** `Component '{name}' has {n} public methods. Consider splitting responsibilities.`
+**Explanation:** A component with 8 or more public methods may be taking on too many responsibilities. This warning encourages adherence to the SOLID Single Responsibility Principle.
+
+**Fix:** Split the component into smaller, focused components with distinct responsibilities.
+
+---
+
+### W011 -- Too many dependencies (since PrSM 3)
+
+**Severity:** Warning
+**Message:** `Component '{name}' has {n} dependency fields. Consider reducing dependencies.`
+**Explanation:** A component with 6 or more `require`/`optional`/`child`/`parent` fields may have too many dependencies. This warning encourages adherence to the SOLID Dependency Inversion Principle.
+
+**Fix:** Reduce the number of dependency fields by extracting intermediary components or using events.
+
+---
+
+### W012 -- Method too long (since PrSM 3)
+
+**Severity:** Warning
+**Message:** `Method '{name}' has {n} statements. Consider extracting helper methods.`
+**Explanation:** A method or lifecycle block with 50 or more statements is difficult to read and maintain. This warning encourages adherence to the SOLID Single Responsibility Principle.
+
+**Fix:** Extract logic into smaller helper methods.

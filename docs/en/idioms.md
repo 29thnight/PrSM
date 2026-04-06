@@ -33,6 +33,40 @@ component DamageReceiver : MonoBehaviour {
 
 Avoid "god components" that handle movement, input, health, UI, and audio in one declaration. Split them into separate components and communicate through events or shared `asset` data.
 
+### Singleton pattern (since PrSM 3)
+
+Use `singleton component` instead of manually implementing the singleton pattern:
+
+```prsm
+// Preferred — one keyword
+singleton component GameManager : MonoBehaviour {
+    var score: Int = 0
+}
+
+// Anti-pattern — manual singleton boilerplate
+component GameManager : MonoBehaviour {
+    // Don't do this — use singleton keyword instead
+    // private static instance, Awake checks, DontDestroyOnLoad...
+}
+```
+
+### Object pooling (since PrSM 3)
+
+Use `pool` modifier instead of manual pool management:
+
+```prsm
+// Preferred — declarative pool
+component Spawner : MonoBehaviour {
+    serialize prefab: Bullet
+    pool bullets: Bullet(capacity = 20, max = 100)
+
+    func fire() {
+        val bullet = bullets.get()
+        bullet.launch(direction)
+    }
+}
+```
+
 ## Event subscription patterns
 
 ### Preferred — auto-cleanup with `until disable`
@@ -282,3 +316,22 @@ func captureScreenshot() {
 - Input — use `on input` (since PrSM 2)
 
 If you find yourself writing large `intrinsic` blocks frequently, consider filing a feature request so the pattern can be supported natively.
+
+### Interface-driven design (since PrSM 3)
+
+Define interfaces for component contracts:
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int)
+    val isAlive: Bool
+}
+
+component Enemy : MonoBehaviour, IDamageable {
+    var hp: Int = 100
+    val isAlive: Bool = hp > 0
+    func takeDamage(amount: Int) { hp -= amount }
+}
+```
+
+Use interfaces with `require` for loose coupling: `require target: IDamageable` instead of `require target: Enemy`.

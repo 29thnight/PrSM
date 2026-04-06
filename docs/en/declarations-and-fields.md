@@ -187,6 +187,78 @@ attribute Cooldown(val duration: Float, val label: String)
 
 Used as decorators on fields: `@cooldown(2.0, "Fire Rate")`.
 
+## `interface` (since PrSM 3)
+
+Interfaces define method signatures and properties without implementation:
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int)
+    val isAlive: Bool
+}
+
+interface IHealable : IDamageable {
+    func heal(amount: Int)
+}
+```
+
+Generated C#:
+
+```csharp
+public interface IDamageable
+{
+    void takeDamage(int amount);
+    bool isAlive { get; }
+}
+```
+
+Components and classes implement interfaces after the base class:
+
+```prsm
+component Enemy : MonoBehaviour, IDamageable {
+    var hp: Int = 100
+    val isAlive: Bool = hp > 0
+    func takeDamage(amount: Int) { hp -= amount }
+}
+```
+
+Interfaces can be used with `require`: `require target: IDamageable`.
+
+Unimplemented members produce error E090. Implementation bodies in interface produce E091.
+
+## `singleton` component (since PrSM 3)
+
+The `singleton` modifier on a component auto-generates the singleton pattern:
+
+```prsm
+singleton component AudioManager : MonoBehaviour {
+    serialize volume: Float = 1.0
+    func playSound(clip: AudioClip) { /* ... */ }
+}
+```
+
+This generates: static `Instance` property with lazy initialization, `Awake` duplicate check with `DontDestroyOnLoad`. Access via `AudioManager.instance.playSound(clip)`.
+
+`singleton` is only valid on `component` declarations (E097).
+
+## `pool` modifier (since PrSM 3)
+
+The `pool` modifier creates an object pool backed by `UnityEngine.Pool.ObjectPool<T>`:
+
+```prsm
+component BulletSpawner : MonoBehaviour {
+    serialize bulletPrefab: Bullet
+    pool bullets: Bullet(capacity = 20, max = 100)
+
+    func fire(direction: Vector3) {
+        val bullet = bullets.get()
+        bullet.launch(direction)
+    }
+}
+```
+
+The pool auto-matches a `serialize` field by type for the prefab. Missing prefab produces E098. `pool` is only valid inside components (E099).
+
 ## Initialization order
 
 For components, the initialization sequence is:

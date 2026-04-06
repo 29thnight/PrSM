@@ -325,6 +325,138 @@ component Demo : MonoBehaviour {
 
 ---
 
+### E090 -- Interface 멤버가 구현되지 않음 (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `Interface member '{name}' is not implemented`
+**설명:** component 또는 class가 interface를 구현한다고 선언했지만 필수 멤버에 대한 구현을 제공하지 않았습니다.
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int)
+    val isAlive: Bool
+}
+
+component Enemy : MonoBehaviour, IDamageable {
+    var hp: Int = 100
+    // E090: takeDamage와 isAlive 누락
+}
+```
+
+**해결 방법:** interface 계약을 만족하도록 누락된 메서드 또는 프로퍼티를 추가하세요.
+
+---
+
+### E091 -- Interface 멤버에 구현 본문이 있음 (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `Interface members shall not have implementation bodies`
+**설명:** Interface 멤버는 시그니처만 가집니다. Interface 선언 내부에 본문을 제공하는 것은 허용되지 않습니다.
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int) { }  // E091
+}
+```
+
+**해결 방법:** 본문을 제거하세요 -- interface 멤버는 시그니처만 가집니다.
+
+---
+
+### E095 -- 제네릭 타입 제약 위반 (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `Type argument '{T}' does not satisfy constraint '{constraint}'`
+**설명:** 제네릭 타입 파라미터가 선언된 제약을 충족하지 않는 타입으로 인스턴스화되었습니다.
+
+```prsm
+class Registry<T> where T : Component {
+    var items: List<T> = []
+}
+
+val r = Registry<String>()  // E095: String은 Component를 충족하지 않음
+```
+
+**해결 방법:** 제약을 충족하는 타입을 사용하세요.
+
+---
+
+### E096 -- 지원되지 않는 선언에 제네릭 파라미터 사용 (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `Generic type parameters cannot be declared on component/asset/enum/data class`
+**설명:** 제네릭 타입 파라미터는 `class`와 `func` 선언에서만 지원됩니다. Unity 직렬화 타입(`component`, `asset`)과 값 유사 타입(`enum`, `data class`)은 제네릭이 될 수 없습니다.
+
+```prsm
+component Foo<T> : MonoBehaviour { }  // E096
+```
+
+**해결 방법:** 제네릭은 `class`와 `func`에서만 사용하세요.
+
+---
+
+### E097 -- component가 아닌 곳에 singleton 사용 (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `'singleton' can only be used before 'component'`
+**설명:** `singleton` 수정자는 `component`에서만 의미 있는 Unity 전용 `Awake` 및 `DontDestroyOnLoad` 코드를 생성합니다.
+
+```prsm
+singleton class Foo { }  // E097
+```
+
+**해결 방법:** `singleton`은 `component`에서만 사용하세요.
+
+---
+
+### E098 -- Pool에 프리팹 없음 (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `Pool type '{T}' has no matching serialize prefab field`
+**설명:** `pool` 선언은 프리팹 소스로 사용할 동일한 타입의 `serialize` 필드가 필요합니다.
+
+```prsm
+component Spawner : MonoBehaviour {
+    pool bullets: Bullet(capacity = 20, max = 100)  // E098: serialize Bullet 필드 없음
+}
+```
+
+**해결 방법:** 풀의 타입과 일치하는 `serialize` 필드를 추가하세요 (예: `serialize bulletPrefab: Bullet`).
+
+---
+
+### E099 -- component 외부의 pool (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `'pool' is only valid inside a component declaration`
+**설명:** 오브젝트 풀은 Unity 라이프사이클 훅에 의존하므로 `component` 본문 안에서만 유효합니다.
+
+```prsm
+class Utility {
+    pool items: Bullet(capacity = 10, max = 50)  // E099
+}
+```
+
+**해결 방법:** `pool` 선언을 `component`로 이동하세요.
+
+---
+
+### E101 -- 예약된 내장 메서드 이름 (PrSM 3 부터)
+
+**심각도:** Error
+**메시지:** `'{name}' is a reserved built-in method name`
+**설명:** 특정 메서드 이름은 컴파일러가 생성 코드를 위해 예약하고 있어 사용자 정의 함수 이름으로 사용할 수 없습니다.
+
+```prsm
+component Demo : MonoBehaviour {
+    func get() { }  // E101
+}
+```
+
+**해결 방법:** 함수 이름을 변경하세요 (예: `getData`, `findTarget`).
+
+---
+
 ## 경고(Warning)
 
 ### W001 -- 불필요한 non-null 단언
@@ -375,3 +507,33 @@ data class Empty()  // W005
 ```
 
 **해결 방법:** 매개변수 목록에 필드를 추가하거나, 사용하지 않는다면 data class를 제거하세요.
+
+---
+
+### W010 -- public 메서드가 너무 많음 (PrSM 3 부터)
+
+**심각도:** Warning
+**메시지:** `Component '{name}' has {n} public methods. Consider splitting responsibilities.`
+**설명:** public 메서드가 8개 이상인 component는 너무 많은 책임을 맡고 있을 수 있습니다. 이 경고는 SOLID 단일 책임 원칙 준수를 권장합니다.
+
+**해결 방법:** component를 명확한 책임을 가진 더 작고 집중된 component로 분리하세요.
+
+---
+
+### W011 -- 의존성이 너무 많음 (PrSM 3 부터)
+
+**심각도:** Warning
+**메시지:** `Component '{name}' has {n} dependency fields. Consider reducing dependencies.`
+**설명:** `require`/`optional`/`child`/`parent` 필드가 6개 이상인 component는 의존성이 너무 많을 수 있습니다. 이 경고는 SOLID 의존성 역전 원칙 준수를 권장합니다.
+
+**해결 방법:** 중간 component를 추출하거나 이벤트를 사용하여 의존성 필드 수를 줄이세요.
+
+---
+
+### W012 -- 메서드가 너무 긺 (PrSM 3 부터)
+
+**심각도:** Warning
+**메시지:** `Method '{name}' has {n} statements. Consider extracting helper methods.`
+**설명:** 50개 이상의 구문을 가진 메서드 또는 라이프사이클 블록은 읽고 유지하기 어렵습니다. 이 경고는 SOLID 단일 책임 원칙 준수를 권장합니다.
+
+**해결 방법:** 로직을 더 작은 헬퍼 메서드로 분리하세요.

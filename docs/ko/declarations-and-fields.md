@@ -185,6 +185,78 @@ attribute Cooldown(val duration: Float, val label: String)
 
 필드 데코레이터로 사용: `@cooldown(2.0, "Fire Rate")`.
 
+## `interface` (PrSM 3 부터)
+
+Interface는 구현 없이 메서드 시그니처와 프로퍼티를 정의합니다:
+
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int)
+    val isAlive: Bool
+}
+
+interface IHealable : IDamageable {
+    func heal(amount: Int)
+}
+```
+
+생성 C#:
+
+```csharp
+public interface IDamageable
+{
+    void takeDamage(int amount);
+    bool isAlive { get; }
+}
+```
+
+Component와 class는 기본 클래스 뒤에 interface를 구현합니다:
+
+```prsm
+component Enemy : MonoBehaviour, IDamageable {
+    var hp: Int = 100
+    val isAlive: Bool = hp > 0
+    func takeDamage(amount: Int) { hp -= amount }
+}
+```
+
+Interface는 `require`와 함께 사용할 수 있습니다: `require target: IDamageable`.
+
+구현되지 않은 멤버는 에러 E090을, interface 안의 구현 본문은 E091을 발생시킵니다.
+
+## `singleton` component (PrSM 3 부터)
+
+component에 `singleton` 수정자를 붙이면 싱글톤 패턴이 자동으로 생성됩니다:
+
+```prsm
+singleton component AudioManager : MonoBehaviour {
+    serialize volume: Float = 1.0
+    func playSound(clip: AudioClip) { /* ... */ }
+}
+```
+
+정적 `Instance` 프로퍼티(지연 초기화), `DontDestroyOnLoad`가 포함된 `Awake` 중복 체크가 생성됩니다. `AudioManager.instance.playSound(clip)`으로 접근합니다.
+
+`singleton`은 `component` 선언에서만 유효합니다 (E097).
+
+## `pool` 수정자 (PrSM 3 부터)
+
+`pool` 수정자는 `UnityEngine.Pool.ObjectPool<T>`를 기반으로 오브젝트 풀을 생성합니다:
+
+```prsm
+component BulletSpawner : MonoBehaviour {
+    serialize bulletPrefab: Bullet
+    pool bullets: Bullet(capacity = 20, max = 100)
+
+    func fire(direction: Vector3) {
+        val bullet = bullets.get()
+        bullet.launch(direction)
+    }
+}
+```
+
+풀은 프리팹을 위해 동일한 타입의 `serialize` 필드를 자동으로 매칭합니다. 프리팹이 없으면 E098이, `pool`이 component 외부에 있으면 E099가 발생합니다.
+
 ## 초기화 순서
 
 component의 초기화 순서:
