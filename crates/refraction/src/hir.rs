@@ -72,11 +72,69 @@ pub struct HirReference {
     pub span: Span,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum HirPatternBindingKind {
+    When,
+    ValDestructure,
+    ForDestructure,
+}
+
+impl HirPatternBindingKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::When => "when",
+            Self::ValDestructure => "val-destructure",
+            Self::ForDestructure => "for-destructure",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HirPatternBinding {
+    pub kind: HirPatternBindingKind,
+    pub owner_qualified_name: Option<String>,
+    pub type_name: String,
+    pub bindings: Vec<String>,
+    pub has_guard: bool,
+    pub file_path: PathBuf,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum HirListenLifetime {
+    Register,
+    UntilDisable,
+    UntilDestroy,
+    Manual,
+}
+
+impl HirListenLifetime {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::UntilDisable => "until-disable",
+            Self::UntilDestroy => "until-destroy",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HirListenSite {
+    pub owner_qualified_name: Option<String>,
+    pub lifetime: HirListenLifetime,
+    pub bound_name: Option<String>,
+    pub file_path: PathBuf,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HirFile {
     pub path: PathBuf,
     pub definitions: Vec<HirDefinition>,
     pub references: Vec<HirReference>,
+    pub pattern_bindings: Vec<HirPatternBinding>,
+    pub listen_sites: Vec<HirListenSite>,
 }
 
 impl HirFile {
@@ -131,6 +189,16 @@ impl HirProject {
             .iter()
             .map(|file| file.references.len())
             .sum::<usize>();
+        let pattern_bindings = self
+            .files
+            .iter()
+            .map(|file| file.pattern_bindings.len())
+            .sum::<usize>();
+        let listen_sites = self
+            .files
+            .iter()
+            .map(|file| file.listen_sites.len())
+            .sum::<usize>();
         let resolved_references = self
             .files
             .iter()
@@ -143,6 +211,8 @@ impl HirProject {
             files_skipped: self.skipped_files.len(),
             definitions,
             references,
+            pattern_bindings,
+            listen_sites,
             resolved_references,
             unresolved_references: references.saturating_sub(resolved_references),
         }
@@ -218,6 +288,8 @@ pub struct HirStats {
     pub files_skipped: usize,
     pub definitions: usize,
     pub references: usize,
+    pub pattern_bindings: usize,
+    pub listen_sites: usize,
     pub resolved_references: usize,
     pub unresolved_references: usize,
 }

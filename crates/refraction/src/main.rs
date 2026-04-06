@@ -371,11 +371,15 @@ fn main() {
                         "file": hir_file.path,
                         "definitions": hir_file.definitions,
                         "references": hir_file.references,
+                        "pattern_bindings": hir_file.pattern_bindings,
+                        "listen_sites": hir_file.listen_sites,
                     }));
                 } else {
                     println!("File: {}", hir_file.path.display());
                     println!("Definitions: {}", hir_file.definitions.len());
                     println!("References: {}", hir_file.references.len());
+                    println!("Pattern bindings: {}", hir_file.pattern_bindings.len());
+                    println!("Listen sites: {}", hir_file.listen_sites.len());
                 }
             } else {
                 let graph = match project_graph::ProjectGraph::discover(&start_path) {
@@ -404,18 +408,22 @@ fn main() {
                         graph.project_root.display()
                     );
                     println!(
-                        "HIR: {} file(s), {} definition(s), {} reference(s)",
+                        "HIR: {} file(s), {} definition(s), {} reference(s), {} pattern binding(s), {} listen site(s)",
                         stats.files_indexed,
                         stats.definitions,
-                        stats.references
+                        stats.references,
+                        stats.pattern_bindings,
+                        stats.listen_sites
                     );
 
                     for file in &hir_project.files {
                         println!(
-                            "  {} -> {} definition(s), {} reference(s)",
+                            "  {} -> {} definition(s), {} reference(s), {} pattern binding(s), {} listen site(s)",
                             file.path.display(),
                             file.definitions.len(),
-                            file.references.len()
+                            file.references.len(),
+                            file.pattern_bindings.len(),
+                            file.listen_sites.len()
                         );
                     }
                 }

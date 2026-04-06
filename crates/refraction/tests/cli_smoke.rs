@@ -968,7 +968,90 @@ exclude = []
     assert_eq!(json["stats"]["files_indexed"], 1);
     assert_eq!(json["stats"]["definitions"], 4);
     assert_eq!(json["stats"]["references"], 1);
+    assert_eq!(json["stats"]["pattern_bindings"], 0);
+    assert_eq!(json["stats"]["listen_sites"], 0);
     assert_eq!(json["stats"]["resolved_references"], 1);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn hir_project_v2_metadata_smoke() {
+    let root = unique_temp_dir("prism_hir_v2_metadata_smoke");
+    write_file(
+        &root.join(".prsmproject"),
+        r#"[project]
+name = "HirV2Project"
+
+[language]
+version = "2.0"
+features = ["pattern-bindings", "auto-unlisten"]
+
+[source]
+include = ["Assets/**/*.prsm"]
+exclude = []
+"#,
+    );
+    write_file(
+        &root.join("Assets").join("Player.prsm"),
+        r#"component Player : MonoBehaviour {
+    serialize timer: UnityEvent
+
+    onEnable {
+        val sub = listen timer manual {
+            log("done")
+        }
+    }
+
+    func tick(stats: PlayerStats, spawns: List<EnemySpawn>, state: EnemyState): Unit {
+        val PlayerStats(hp, speed) = stats
+
+        when state {
+            EnemyState.Chase(target) if target != null => log(target)
+            else => log("idle")
+        }
+
+        for EnemySpawn(position, delay) in spawns {
+            log(position)
+        }
+    }
+}
+"#,
+    );
+
+    let output = Command::new(prism())
+        .args(["hir", ".", "--json"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert_eq!(json["project"], "HirV2Project");
+    assert_eq!(json["stats"]["files_indexed"], 1);
+    assert_eq!(json["stats"]["pattern_bindings"], 3);
+    assert_eq!(json["stats"]["listen_sites"], 1);
+
+    let file = &json["hir"]["files"][0];
+    assert_eq!(file["pattern_bindings"].as_array().unwrap().len(), 3);
+    assert_eq!(file["listen_sites"].as_array().unwrap().len(), 1);
+
+    let when_binding = file["pattern_bindings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["kind"] == "When")
+        .expect("expected when pattern binding");
+    assert_eq!(when_binding["type_name"], "EnemyState.Chase");
+    assert_eq!(when_binding["bindings"][0], "target");
+    assert_eq!(when_binding["has_guard"], true);
+
+    let listen_site = &file["listen_sites"][0];
+    assert_eq!(listen_site["lifetime"], "Manual");
+    assert_eq!(listen_site["bound_name"], "sub");
 
     let _ = fs::remove_dir_all(root);
 }

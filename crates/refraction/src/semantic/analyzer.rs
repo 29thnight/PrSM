@@ -1,6 +1,9 @@
 use crate::ast::*;
 use crate::diagnostics::DiagnosticCollector;
-use crate::hir::{HirDefinition, HirDefinitionKind, HirFile, HirReference, HirReferenceKind};
+use crate::hir::{
+    HirDefinition, HirDefinitionKind, HirFile, HirListenLifetime, HirListenSite,
+    HirPatternBinding, HirPatternBindingKind, HirReference, HirReferenceKind,
+};
 use crate::lexer::token::Span;
 use super::types::*;
 use super::scope::*;
@@ -39,6 +42,8 @@ pub struct Analyzer {
     current_file_path: Option<PathBuf>,
     hir_definitions: Vec<HirDefinition>,
     hir_references: Vec<HirReference>,
+    hir_pattern_bindings: Vec<HirPatternBinding>,
+    hir_listen_sites: Vec<HirListenSite>,
     next_definition_id: u32,
     current_decl_name: Option<String>,
     current_member_name: Option<String>,
@@ -59,6 +64,8 @@ impl Analyzer {
             current_file_path: None,
             hir_definitions: Vec::new(),
             hir_references: Vec::new(),
+            hir_pattern_bindings: Vec::new(),
+            hir_listen_sites: Vec::new(),
             next_definition_id: 1,
             current_decl_name: None,
             current_member_name: None,
@@ -817,8 +824,20 @@ impl Analyzer {
                     }
                 }
                 for branch in branches {
+                    if let WhenPattern::Binding { path, bindings, span } = &branch.pattern {
+                        self.record_pattern_binding(
+                            HirPatternBindingKind::When,
+                            path.join("."),
+                            bindings.clone(),
+                            branch.guard.is_some(),
+                            *span,
+                        );
+                    }
                     if let WhenPattern::Expression(expr) = &branch.pattern {
                         self.analyze_expr(expr);
+                    }
+                    if let Some(guard) = &branch.guard {
+                        self.analyze_expr(guard);
                     }
                     match &branch.body {
                         WhenBody::Block(b) => self.analyze_block(b),
@@ -829,11 +848,21 @@ impl Analyzer {
             Stmt::For {
                 var_name,
                 name_span,
+                for_pattern,
                 iterable,
                 body,
                 ..
             } => {
                 let iter_ty = self.analyze_expr(iterable);
+                if let Some(pattern) = for_pattern {
+                    self.record_pattern_binding(
+                        HirPatternBindingKind::ForDestructure,
+                        pattern.type_name.clone(),
+                        pattern.bindings.clone(),
+                        false,
+                        pattern.span,
+                    );
+                }
                 self.scopes.push_scope();
                 // For range expressions, infer the element type
                 let elem_ty = match &iter_ty {
@@ -856,7 +885,14 @@ impl Analyzer {
                 self.loop_depth -= 1;
                 self.scopes.pop_scope();
             }
-            Stmt::DestructureVal { init, .. } => {
+            Stmt::DestructureVal { pattern, init, .. } => {
+                self.record_pattern_binding(
+                    HirPatternBindingKind::ValDestructure,
+                    pattern.type_name.clone(),
+                    pattern.bindings.clone(),
+                    false,
+                    pattern.span,
+                );
                 self.analyze_expr(init);
             }
             Stmt::While { cond, body, .. } => {
@@ -889,7 +925,8 @@ impl Analyzer {
                 self.analyze_expr(target);
             }
             Stmt::StopAll { .. } => {}
-            Stmt::Listen { event, body, .. } => {
+            Stmt::Listen { event, lifetime, bound_name, body, span, .. } => {
+                self.record_listen_site(lifetime.clone(), bound_name.clone(), *span);
                 self.analyze_expr(event);
                 self.scopes.push_scope();
                 self.analyze_block(body);
@@ -1263,6 +1300,8 @@ impl Analyzer {
         self.current_file_path = Some(file_path.to_path_buf());
         self.hir_definitions.clear();
         self.hir_references.clear();
+        self.hir_pattern_bindings.clear();
+        self.hir_listen_sites.clear();
         self.next_definition_id = 1;
         self.current_decl_name = None;
         self.current_member_name = None;
@@ -1271,6 +1310,8 @@ impl Analyzer {
     fn finish_hir(&mut self, file_path: &Path) -> HirFile {
         let definitions = std::mem::take(&mut self.hir_definitions);
         let references = std::mem::take(&mut self.hir_references);
+        let pattern_bindings = std::mem::take(&mut self.hir_pattern_bindings);
+        let listen_sites = std::mem::take(&mut self.hir_listen_sites);
         self.current_file_path = None;
         self.current_decl_name = None;
         self.current_member_name = None;
@@ -1279,6 +1320,8 @@ impl Analyzer {
             path: file_path.to_path_buf(),
             definitions,
             references,
+            pattern_bindings,
+            listen_sites,
         }
     }
 
@@ -1431,6 +1474,56 @@ impl Analyzer {
             span,
         });
     }
+
+    fn record_pattern_binding(
+        &mut self,
+        kind: HirPatternBindingKind,
+        type_name: String,
+        bindings: Vec<String>,
+        has_guard: bool,
+        span: Span,
+    ) {
+        let Some(file_path) = self.current_file_path.clone() else {
+            return;
+        };
+
+        self.hir_pattern_bindings.push(HirPatternBinding {
+            kind,
+            owner_qualified_name: self.current_owner_qualified_name(),
+            type_name,
+            bindings,
+            has_guard,
+            file_path,
+            span,
+        });
+    }
+
+    fn record_listen_site(
+        &mut self,
+        lifetime: ListenLifetime,
+        bound_name: Option<String>,
+        span: Span,
+    ) {
+        let Some(file_path) = self.current_file_path.clone() else {
+            return;
+        };
+
+        self.hir_listen_sites.push(HirListenSite {
+            owner_qualified_name: self.current_owner_qualified_name(),
+            lifetime: hir_listen_lifetime(lifetime),
+            bound_name,
+            file_path,
+            span,
+        });
+    }
+
+    fn current_owner_qualified_name(&self) -> Option<String> {
+        match (&self.current_decl_name, &self.current_member_name) {
+            (Some(decl_name), Some(member_name)) => Some(format!("{}.{}", decl_name, member_name)),
+            (Some(decl_name), None) => Some(decl_name.clone()),
+            _ => None,
+        }
+    }
 }
 
 fn supports_expected_type_inference_call(receiver: Option<&Expr>, name: &str) -> bool {
@@ -1440,6 +1533,15 @@ fn supports_expected_type_inference_call(receiver: Option<&Expr>, name: &str) ->
             name,
             "getComponent" | "getComponentInChildren" | "getComponentInParent" | "findFirstObjectByType"
         ),
+    }
+}
+
+fn hir_listen_lifetime(lifetime: ListenLifetime) -> HirListenLifetime {
+    match lifetime {
+        ListenLifetime::Register => HirListenLifetime::Register,
+        ListenLifetime::UntilDisable => HirListenLifetime::UntilDisable,
+        ListenLifetime::UntilDestroy => HirListenLifetime::UntilDestroy,
+        ListenLifetime::Manual => HirListenLifetime::Manual,
     }
 }
 
