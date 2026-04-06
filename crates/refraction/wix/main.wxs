@@ -57,6 +57,19 @@
                             Source='$(var.CargoTargetBinDir)\..\prsm-lang.prsm-lang-0.1.0.vsix'
                             KeyPath='yes' />
                     </Component>
+                    <Component Id='file_icon' Guid='E5F6A7B8-C9D0-1234-EFAB-345678901234'>
+                        <File Id='prsm_ico' Name='prsm-file-icon.ico'
+                            Source='crates\refraction\wix\prsm-file-icon.ico'
+                            KeyPath='yes' />
+                    </Component>
+                    <Component Id='file_association' Guid='F6A7B8C9-D0E1-2345-FABC-456789012345'>
+                        <RegistryValue Root='HKCR' Key='.prsm' Type='string' Value='PrSM.Script' />
+                        <RegistryValue Root='HKCR' Key='PrSM.Script' Type='string' Value='PrSM Script File' />
+                        <RegistryValue Root='HKCR' Key='PrSM.Script\DefaultIcon' Type='string'
+                            Value='[APPLICATIONFOLDER]prsm-file-icon.ico' />
+                        <RegistryValue Root='HKCR' Key='PrSM.Script\shell\open\command' Type='string'
+                            Value='&quot;[APPLICATIONFOLDER]prism.exe&quot; compile &quot;%1&quot;' KeyPath='yes' />
+                    </Component>
                 </Directory>
             </Directory>
         </Directory>
@@ -70,6 +83,8 @@
             Display='expand' Absent='disallow'>
             <ComponentRef Id='prism_exe' />
             <ComponentRef Id='Path' />
+            <ComponentRef Id='file_icon' />
+            <ComponentRef Id='file_association' />
         </Feature>
 
         <Feature Id='VSCodeExtension' Title='VS Code Extension'
