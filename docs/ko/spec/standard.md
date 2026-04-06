@@ -6,17 +6,9 @@ nav_order: 1
 
 # PrSM 언어 표준
 
-{: .no_toc }
-
+::: warning
 Language 2 --- 작업 초안
-{: .label .label-yellow }
-
-<details open markdown="block">
-  <summary>목차</summary>
-  {: .text-delta }
-- TOC
-{:toc}
-</details>
+:::
 
 ---
 

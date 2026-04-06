@@ -701,6 +701,27 @@
 .prsm-builtin { color: #cf8e6d; }
 
 
+/* Version markers — inline (PrSM 2 부터) text */
+.prsm-version-marker {
+  color: #6aab73;
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+/* Version cards — cppreference-style "since" blocks */
+.prsm-version-card {
+  display: inline-block;
+  margin: 0.4em 0;
+  padding: 0.2em 0.8em;
+  border-left: 3px solid #6aab73;
+  background: rgba(106, 171, 115, 0.08);
+  border-radius: 0 4px 4px 0;
+}
+
+.prsm-version-card .prsm-version-marker {
+  font-size: 0.9em;
+}
+
 .brand-docs__article ul {
   list-style: disc;
   padding-left: 1.25rem;

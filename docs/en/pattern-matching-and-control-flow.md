@@ -60,7 +60,7 @@ when {
 
 ### Pattern bindings (v2)
 
-> Added in v2.0
+> (PrSM 2 부터)
 
 Enum payload bindings extract data from parameterized enum entries:
 
@@ -94,7 +94,7 @@ case EnemyState.Chase _prsm_m8_5:
 
 ### When guards (v2)
 
-> Added in v2.0
+> (PrSM 2 부터)
 
 Guards add a condition after a pattern:
 
@@ -109,7 +109,7 @@ The guard expression is checked after the pattern matches. It generates an `&&` 
 
 ### Destructuring in `val` (v2)
 
-> Added in v2.0
+> (PrSM 2 부터)
 
 Data class instances can be destructured into individual variables:
 
@@ -133,7 +133,7 @@ var speed = _prsm_d.speed;
 
 ### Destructuring in `for` (v2)
 
-> Added in v2.0
+> (PrSM 2 부터)
 
 The same destructuring syntax works in `for` loops:
 

@@ -220,9 +220,13 @@ const CodeBlock = ({ children, className }: { children: string; className?: stri
 
 
 const renderInlineMarkdown = (text: string) => {
-  return text.split(/(`[^`]+`|\*\*[^*]+\*\*)/).map((part, i) => {
+  // Split on inline code, bold, and version markers like (PrSM 2 부터) or (Since PrSM 2)
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*|\(PrSM \d[\d.]* 부터\)|\(Since PrSM \d[\d.]*\))/).map((part, i) => {
     if (part.startsWith('`')) return <code key={i}>{part.slice(1, -1)}</code>;
     if (part.startsWith('**')) return <strong key={i}>{part.slice(2, -2)}</strong>;
+    if (/^\((?:PrSM \d|Since PrSM \d)/.test(part)) {
+      return <span key={i} className="prsm-version-marker">{part}</span>;
+    }
     return part;
   });
 };
@@ -337,7 +341,28 @@ function SimpleMarkdown({ content }: { content: string }) {
       flushList(i);
     }
 
-    // 4. Headings & Paragraphs
+    // 4. Blockquote — version cards
+    if (trimmed.startsWith('> ')) {
+      flushList(i);
+      flushTable(i);
+      const content = trimmed.slice(2);
+      // Version marker blockquotes render as styled cards
+      const isVersionCard = /(\[Since language \d|PrSM \d.*부터|Since PrSM \d|Added in)/.test(content);
+      if (isVersionCard) {
+        elements.push(
+          <div key={i} className="prsm-version-card">
+            <span className="prsm-version-marker">{content.replace(/[\[\]]/g, '')}</span>
+          </div>
+        );
+      } else {
+        elements.push(
+          <blockquote key={i}><p>{renderInlineMarkdown(content)}</p></blockquote>
+        );
+      }
+      return;
+    }
+
+    // 5. Headings & Paragraphs
     if (line.startsWith('# ')) {
       const text = line.slice(2);
       const id = text.toLowerCase().replace(/[^\w]+/g, '-');

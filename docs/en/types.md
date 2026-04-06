@@ -34,19 +34,6 @@ val offset: Vector3 = Vector3.zero
 
 Supported families include `MonoBehaviour`, `ScriptableObject`, `Transform`, `Rigidbody`, `Rigidbody2D`, `Animator`, `AudioSource`, `Camera`, `Canvas`, `Vector2/3/4`, `Quaternion`, `Color`, `Rect`, and most other common Unity types.
 
-## Nullability
-
-Type annotations without `?` are non-nullable by default. The compiler tracks this through field qualifiers and performs null-safety checks.
-
-```prsm
-require rb: Rigidbody      // non-null, resolved in Awake
-optional cam: Camera?      // nullable, may be absent
-```
-
-- `Type` — non-nullable
-- `Type?` — nullable; must be guarded before use
-- `?.` safe-call and `?:` null-coalescing are provided for nullable access
-- `!!` non-null assertion is available as an escape hatch
 
 ## Generic types
 
@@ -82,7 +69,7 @@ Explicit annotations are always valid and sometimes required (e.g., when the ini
 
 ### Generic type inference (v2)
 
-> Added in v2.0
+> (PrSM 2 부터)
 
 v2 introduces limited context-based inference for generic method calls. See [Generic Inference](generic-inference.md) for details.
 

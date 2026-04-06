@@ -6,17 +6,9 @@ nav_order: 1
 
 # PrSM Language Standard
 
-{: .no_toc }
-
+::: warning
 Language 2 --- Working Draft
-{: .label .label-yellow }
-
-<details open markdown="block">
-  <summary>Table of Contents</summary>
-  {: .text-delta }
-- TOC
-{:toc}
-</details>
+:::
 
 ---
 
