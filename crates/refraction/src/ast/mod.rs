@@ -119,6 +119,9 @@ pub enum InterfaceMember {
         name_span: Span,
         params: Vec<Param>,
         return_ty: Option<TypeRef>,
+        /// Default implementation body — `Some(block)` enables a default
+        /// interface method (DIM). `None` is a pure signature.
+        default_body: Option<Block>,
         span: Span,
     },
     Property {
@@ -262,6 +265,15 @@ pub enum Member {
         max_size: u32,
         span: Span,
     },
+    /// `event onDamaged: (Int) => Unit` — multicast delegate (Language 4)
+    Event {
+        visibility: Visibility,
+        name: String,
+        name_span: Span,
+        /// Function type describing the delegate signature.
+        ty: TypeRef,
+        span: Span,
+    },
 }
 
 // ── Statements ───────────────────────────────────────────────────
@@ -375,6 +387,18 @@ pub enum Stmt {
     /// `throw expr` (since Language 4)
     Throw {
         expr: Expr,
+        span: Span,
+    },
+    /// `use val name = expr` (declaration form — disposed at scope exit)
+    /// or `use name = expr { body }` (block form — disposed at block exit).
+    /// Lowered to C# `using` declaration / `using` statement.
+    Use {
+        name: String,
+        name_span: Span,
+        ty: Option<TypeRef>,
+        init: Expr,
+        /// `Some(block)` → block form; `None` → declaration form (`use val ...`)
+        body: Option<Block>,
         span: Span,
     },
 }
@@ -600,6 +624,16 @@ pub enum Expr {
     /// `(a, b, c)` — tuple expression (Language 4)
     Tuple {
         elements: Vec<Expr>,
+        span: Span,
+    },
+    /// `[1, 2, 3]` — list literal (Language 4)
+    ListLit {
+        elements: Vec<Expr>,
+        span: Span,
+    },
+    /// `{"a": 1, "b": 2}` — map literal (Language 4)
+    MapLit {
+        entries: Vec<(Expr, Expr)>,
         span: Span,
     },
 }

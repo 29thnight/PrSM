@@ -291,11 +291,22 @@ impl Parser {
                 } else {
                     None
                 };
+                // v4: optional default body — `func name() { body }` lowers to a
+                // C# default interface method (DIM).
+                let saved = self.pos;
+                self.skip_newlines();
+                let default_body = if self.check(&TokenKind::LBrace) {
+                    Some(self.parse_block()?)
+                } else {
+                    self.pos = saved;
+                    None
+                };
                 members.push(InterfaceMember::Func {
                     name: fn_name,
                     name_span: fn_name_span,
                     params,
                     return_ty,
+                    default_body,
                     span: Span { start: member_start.start, end: self.peek_span().end },
                 });
             } else if self.check(&TokenKind::Val) || self.check(&TokenKind::Var) {
@@ -745,6 +756,11 @@ impl Parser {
         // Collect annotations
         let annotations = self.parse_annotations()?;
 
+        // Contextual `event` keyword (Language 4): `event onDamaged: (Int) => Unit`
+        if self.check_contextual("event") {
+            return self.parse_event_member(Visibility::Public);
+        }
+
         match self.peek().clone() {
             TokenKind::Serialize => self.parse_serialize_field(annotations),
             TokenKind::Require => self.parse_require(),
@@ -762,6 +778,9 @@ impl Parser {
             }
             TokenKind::Public | TokenKind::Private | TokenKind::Protected => {
                 let vis = self.parse_visibility();
+                if self.check_contextual("event") {
+                    return self.parse_event_member(vis);
+                }
                 match self.peek().clone() {
                     TokenKind::Serialize => self.parse_serialize_field_with_vis(annotations, Some(vis)),
                     TokenKind::Func => self.parse_func(vis, false),
@@ -972,6 +991,24 @@ impl Parser {
             item_type,
             capacity,
             max_size,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    /// Parse `event NAME : FuncType` member declaration (Language 4).
+    fn parse_event_member(&mut self, visibility: Visibility) -> Result<Member, ParseError> {
+        let start = self.peek_span();
+        // Consume the contextual `event` identifier.
+        let _ = self.eat_contextual("event");
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&TokenKind::Colon)?;
+        let ty = self.parse_type()?;
+        self.expect_newline_or_eof();
+        Ok(Member::Event {
+            visibility,
+            name,
+            name_span,
+            ty,
             span: Span { start: start.start, end: self.peek_span().end },
         })
     }
@@ -1421,6 +1458,12 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         self.skip_newlines();
         let start = self.peek_span();
+
+        // Contextual `use` keyword (Language 4) — IDisposable resource management.
+        // Two forms: `use val name = expr` (declaration) or `use name = expr { body }` (block).
+        if self.check_contextual("use") {
+            return self.parse_use_stmt();
+        }
 
         match self.peek().clone() {
             TokenKind::Val | TokenKind::Const | TokenKind::Fixed => self.parse_val_stmt(),
@@ -2023,6 +2066,51 @@ impl Parser {
         })
     }
 
+    /// Parse `use val name = expr` (declaration form) or `use name = expr { body }`
+    /// (block form). Both lower to a C# `using` declaration / `using` statement.
+    fn parse_use_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.peek_span();
+        let _ = self.eat_contextual("use");
+
+        // Optional `val` keyword — declaration form binds for the rest of the
+        // enclosing scope (no body block expected).
+        let has_val = self.eat(&TokenKind::Val);
+
+        let (name, name_span) = self.expect_ident()?;
+        let ty = if self.eat(&TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::Eq)?;
+        let init = self.parse_expr()?;
+
+        let body = if has_val {
+            // `use val ...` — declaration form, no body
+            self.expect_newline_or_eof();
+            None
+        } else {
+            // `use ... { ... }` — block form
+            self.skip_newlines();
+            if self.check(&TokenKind::LBrace) {
+                Some(self.parse_block()?)
+            } else {
+                // Tolerate the omitted block: behave as a declaration form.
+                self.expect_newline_or_eof();
+                None
+            }
+        };
+
+        Ok(Stmt::Use {
+            name,
+            name_span,
+            ty,
+            init,
+            body,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
     fn parse_expr_or_assignment_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek_span();
         let expr = self.parse_expr()?;
@@ -2568,9 +2656,86 @@ impl Parser {
                     Ok(expr)
                 }
             }
-            TokenKind::LBrace => self.parse_lambda_expr(),
+            TokenKind::LBrace => self.parse_brace_expr(),
+            TokenKind::LBracket => self.parse_list_literal(),
             _ => Err(self.error(format!("Expected expression, found {:?}", self.peek()))),
         }
+    }
+
+    /// Parse a `[` expression — list literal `[1, 2, 3]` or empty `[]`.
+    fn parse_list_literal(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek_span();
+        self.advance(); // consume '['
+        self.skip_newlines();
+        let mut elements = Vec::new();
+        if !self.check(&TokenKind::RBracket) {
+            loop {
+                self.skip_newlines();
+                if self.check(&TokenKind::RBracket) { break; }
+                elements.push(self.parse_expr()?);
+                self.skip_newlines();
+                if !self.eat(&TokenKind::Comma) { break; }
+            }
+        }
+        self.skip_newlines();
+        self.expect(&TokenKind::RBracket)?;
+        Ok(Expr::ListLit {
+            elements,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    /// Parse a `{` expression — disambiguates between map literal and lambda.
+    /// Map literal: `{key: value, key: value}` (key followed by `:` then value).
+    /// Lambda: `{}`, `{ expr }`, `{ x => body }`, `{ x, y => body }`.
+    fn parse_brace_expr(&mut self) -> Result<Expr, ParseError> {
+        let saved = self.pos;
+        let start = self.peek_span();
+        self.advance(); // consume '{'
+        self.skip_newlines();
+
+        // Empty `{}` → empty lambda (existing behavior). Map literal cannot be
+        // empty without an explicit type annotation; the validation happens at
+        // semantic time, but the lexer/parser treat it as a lambda here so that
+        // existing behavior is preserved.
+        if self.check(&TokenKind::RBrace) {
+            self.pos = saved;
+            return self.parse_lambda_expr();
+        }
+
+        // Speculative parse: try to parse the first expression and check whether
+        // it is followed by `:` (map entry separator). If so, this is a map
+        // literal; otherwise restore and fall through to lambda parsing.
+        let probe_pos = self.pos;
+        let saved_errors = self.errors.len();
+        if let Ok(first_key) = self.parse_expr() {
+            if self.check(&TokenKind::Colon) {
+                // Confirmed map literal.
+                self.advance(); // consume ':'
+                let first_value = self.parse_expr()?;
+                let mut entries = vec![(first_key, first_value)];
+                while self.eat(&TokenKind::Comma) {
+                    self.skip_newlines();
+                    if self.check(&TokenKind::RBrace) { break; }
+                    let key = self.parse_expr()?;
+                    self.expect(&TokenKind::Colon)?;
+                    let value = self.parse_expr()?;
+                    entries.push((key, value));
+                    self.skip_newlines();
+                }
+                self.skip_newlines();
+                self.expect(&TokenKind::RBrace)?;
+                return Ok(Expr::MapLit {
+                    entries,
+                    span: Span { start: start.start, end: self.peek_span().end },
+                });
+            }
+        }
+        // Not a map literal — restore parser state and parse as a lambda.
+        self.pos = saved;
+        self.errors.truncate(saved_errors);
+        let _ = probe_pos;
+        self.parse_lambda_expr()
     }
 
     /// Parse a lambda expression: `{ }`, `{ expr }`, `{ x => expr }`, `{ x, y => body }`
@@ -3079,7 +3244,9 @@ impl Expr {
             | Expr::IntrinsicExpr { span, .. }
             | Expr::SafeCastExpr { span, .. }
             | Expr::ForceCastExpr { span, .. }
-            | Expr::Tuple { span, .. } => *span,
+            | Expr::Tuple { span, .. }
+            | Expr::ListLit { span, .. }
+            | Expr::MapLit { span, .. } => *span,
         }
     }
 }
@@ -3686,6 +3853,210 @@ component PlayerHealth : MonoBehaviour {
                 assert!(members.iter().any(|m| matches!(m, Member::SerializeField { name, .. } if name == "speed")));
             }
             _ => {}
+        }
+    }
+
+    // ── v4 Phase 4 — event, use, collection literals, DIM ─────────
+
+    #[test]
+    fn test_parse_event_member() {
+        let file = parse_ok(r#"component Boss : MonoBehaviour {
+  event onDamaged: (Int) => Unit
+}"#);
+        match file.decl {
+            Decl::Component { members, .. } => {
+                assert!(members.iter().any(|m| matches!(m, Member::Event { name, .. } if name == "onDamaged")));
+            }
+            _ => panic!("expected component"),
+        }
+    }
+
+    #[test]
+    fn test_parse_event_with_visibility() {
+        let file = parse_ok(r#"component Boss : MonoBehaviour {
+  private event onDeath: () => Unit
+}"#);
+        match file.decl {
+            Decl::Component { members, .. } => {
+                let event = members.iter().find_map(|m| match m {
+                    Member::Event { name, visibility, .. } if name == "onDeath" => Some(*visibility),
+                    _ => None,
+                }).expect("event member");
+                assert_eq!(event, Visibility::Private);
+            }
+            _ => panic!("expected component"),
+        }
+    }
+
+    #[test]
+    fn test_parse_use_declaration_form() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    use val s = openFile()
+  }
+}"#;
+        let file = parse_ok(src);
+        // Drill down to find the Use stmt
+        let mut found = false;
+        if let Decl::Component { members, .. } = file.decl {
+            for m in &members {
+                if let Member::Func { body: FuncBody::Block(b), .. } = m {
+                    for s in &b.stmts {
+                        if matches!(s, Stmt::Use { name, body: None, .. } if name == "s") {
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "Use declaration not parsed");
+    }
+
+    #[test]
+    fn test_parse_use_block_form() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    use s = openFile() {
+      log(s)
+    }
+  }
+}"#;
+        let file = parse_ok(src);
+        let mut found = false;
+        if let Decl::Component { members, .. } = file.decl {
+            for m in &members {
+                if let Member::Func { body: FuncBody::Block(b), .. } = m {
+                    for s in &b.stmts {
+                        if matches!(s, Stmt::Use { name, body: Some(_), .. } if name == "s") {
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "Use block form not parsed");
+    }
+
+    #[test]
+    fn test_parse_list_literal() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val xs = [1, 2, 3]
+  }
+}"#;
+        let file = parse_ok(src);
+        let mut found = false;
+        if let Decl::Component { members, .. } = file.decl {
+            for m in &members {
+                if let Member::Func { body: FuncBody::Block(b), .. } = m {
+                    for s in &b.stmts {
+                        if let Stmt::ValDecl { init: Expr::ListLit { elements, .. }, .. } = s {
+                            assert_eq!(elements.len(), 3);
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "List literal not parsed");
+    }
+
+    #[test]
+    fn test_parse_map_literal() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val m = {"a": 1, "b": 2}
+  }
+}"#;
+        let file = parse_ok(src);
+        let mut found = false;
+        if let Decl::Component { members, .. } = file.decl {
+            for m in &members {
+                if let Member::Func { body: FuncBody::Block(b), .. } = m {
+                    for s in &b.stmts {
+                        if let Stmt::ValDecl { init: Expr::MapLit { entries, .. }, .. } = s {
+                            assert_eq!(entries.len(), 2);
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "Map literal not parsed");
+    }
+
+    #[test]
+    fn test_parse_empty_list_literal() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val xs: List<Int> = []
+  }
+}"#;
+        let file = parse_ok(src);
+        let mut found = false;
+        if let Decl::Component { members, .. } = file.decl {
+            for m in &members {
+                if let Member::Func { body: FuncBody::Block(b), .. } = m {
+                    for s in &b.stmts {
+                        if let Stmt::ValDecl { init: Expr::ListLit { elements, .. }, .. } = s {
+                            assert!(elements.is_empty());
+                            found = true;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(found, "Empty list literal not parsed");
+    }
+
+    #[test]
+    fn test_parse_lambda_still_works_after_brace_disambiguation() {
+        // Make sure adding map literal support didn't break lambda parsing.
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val handler = { x => x + 1 }
+  }
+}"#;
+        let file = parse_ok(src);
+        // Just ensure no parse errors occurred (parse_ok asserts that).
+        let _ = file;
+    }
+
+    #[test]
+    fn test_parse_default_interface_method() {
+        let src = r#"interface IMovable {
+  func move() {
+    log("default")
+  }
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Interface { members, .. } = file.decl {
+            let func = members.iter().find_map(|m| match m {
+                InterfaceMember::Func { name, default_body, .. } if name == "move" => {
+                    Some(default_body.is_some())
+                }
+                _ => None,
+            }).expect("interface func");
+            assert!(func, "expected default body");
+        } else {
+            panic!("expected interface");
+        }
+    }
+
+    #[test]
+    fn test_parse_interface_signature_only() {
+        let src = r#"interface IMovable {
+  func move()
+}"#;
+        let file = parse_ok(src);
+        if let Decl::Interface { members, .. } = file.decl {
+            let no_default = members.iter().any(|m| matches!(m,
+                InterfaceMember::Func { name, default_body, .. }
+                if name == "move" && default_body.is_none()
+            ));
+            assert!(no_default, "expected no default body");
+        } else {
+            panic!("expected interface");
         }
     }
 }

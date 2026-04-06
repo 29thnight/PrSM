@@ -41,6 +41,9 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::SerializeField { .. } | Member::Field { .. } => {
                         cs_members.extend(lower_field_member(m));
                     }
+                    Member::Event { .. } => {
+                        cs_members.extend(lower_event_member(m));
+                    }
                     Member::Require { name, ty, .. }
                     | Member::Optional { name, ty, .. }
                     | Member::Child { name, ty, .. }
@@ -273,6 +276,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
             for m in members {
                 match m {
                     Member::Field { .. } => cs_members.extend(lower_field_member(m)),
+                    Member::Event { .. } => cs_members.extend(lower_event_member(m)),
                     Member::Func { is_operator: true, name: op_name, params, return_ty, body, .. } => {
                         cs_members.extend(lower_operator_member(op_name, name, params, return_ty, body));
                     }
@@ -346,10 +350,34 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
             let mut cs_members = Vec::new();
             for member in members {
                 match member {
-                    InterfaceMember::Func { name: fn_name, params, return_ty, .. } => {
+                    InterfaceMember::Func { name: fn_name, params, return_ty, default_body, .. } => {
                         let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or_else(|| "void".into());
                         let ps: String = params.iter().map(|p| format!("{} {}", lower_type(&p.ty), p.name)).collect::<Vec<_>>().join(", ");
-                        cs_members.push(CsMember::RawCode(format!("{} {}({});", ret, fn_name, ps)));
+                        if let Some(block) = default_body {
+                            // v4: Default interface method (DIM). Lower the body
+                            // as plain C# inside the interface declaration. We
+                            // emit the body lines with no leading indentation;
+                            // the surrounding RawCode emitter pads each line by
+                            // the member indent level, so the body ends up
+                            // aligned with the interface members.
+                            let body_stmts: Vec<CsStmt> = block.stmts.iter().map(lower_stmt).collect();
+                            let mut body_text = String::new();
+                            for s in &body_stmts {
+                                crate::codegen::emitter::emit_stmt_to_string(&mut body_text, s, 0);
+                            }
+                            let mut lines = vec![format!("{} {}({})", ret, fn_name, ps), "{".to_string()];
+                            for line in body_text.trim_end().split('\n') {
+                                if line.is_empty() {
+                                    lines.push(String::new());
+                                } else {
+                                    lines.push(format!("    {}", line));
+                                }
+                            }
+                            lines.push("}".to_string());
+                            cs_members.push(CsMember::RawCode(lines.join("\n")));
+                        } else {
+                            cs_members.push(CsMember::RawCode(format!("{} {}({});", ret, fn_name, ps)));
+                        }
                     }
                     InterfaceMember::Property { name: prop_name, ty, mutable, .. } => {
                         let cs_ty = lower_type(ty);
@@ -835,6 +863,45 @@ fn lower_parameterized_enum_extensions(name: &str, params: &[EnumParam], entries
 /// Check if annotations contain @field
 fn has_field_annotation(annotations: &[Annotation]) -> bool {
     annotations.iter().any(|a| a.name == "field")
+}
+
+/// Lower an `event NAME : (Args) => Unit` member into a C# `event Action<...>` field.
+fn lower_event_member(m: &Member) -> Vec<CsMember> {
+    let Member::Event { visibility, name, ty, .. } = m else { return vec![]; };
+    let vis = lower_visibility(*visibility);
+    let action_ty = event_delegate_type(ty);
+    vec![CsMember::RawCode(format!(
+        "{} event {} {};",
+        vis, action_ty, name
+    ))]
+}
+
+/// Compute the C# delegate type for an event from its function type ref.
+/// `(Int) => Unit` → `System.Action<int>`; `() => Unit` → `System.Action`.
+fn event_delegate_type(ty: &TypeRef) -> String {
+    if let TypeRef::Function { param_types, return_type, .. } = ty {
+        let is_void = matches!(
+            return_type.as_ref(),
+            TypeRef::Simple { name, .. } if name == "Unit" || name == "Void"
+        );
+        if is_void {
+            if param_types.is_empty() {
+                "System.Action".to_string()
+            } else {
+                let args: Vec<String> = param_types.iter().map(lower_type).collect();
+                format!("System.Action<{}>", args.join(", "))
+            }
+        } else {
+            let mut args: Vec<String> = param_types.iter().map(lower_type).collect();
+            args.push(lower_type(return_type));
+            format!("System.Func<{}>", args.join(", "))
+        }
+    } else {
+        // Fallback: render the type as-is. Lets the user supply a custom
+        // delegate type by name even though the spec only mentions function
+        // types.
+        lower_type(ty)
+    }
 }
 
 fn lower_field_member(m: &Member) -> Vec<CsMember> {
@@ -1571,7 +1638,8 @@ fn stmt_span(stmt: &Stmt) -> Span {
         | Stmt::Break { span, .. }
         | Stmt::Continue { span, .. }
         | Stmt::Try { span, .. }
-        | Stmt::Throw { span, .. } => *span,
+        | Stmt::Throw { span, .. }
+        | Stmt::Use { span, .. } => *span,
     }
 }
 
@@ -1603,7 +1671,9 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::IntrinsicExpr { span, .. }
         | Expr::SafeCastExpr { span, .. }
         | Expr::ForceCastExpr { span, .. }
-        | Expr::Tuple { span, .. } => *span,
+        | Expr::Tuple { span, .. }
+        | Expr::ListLit { span, .. }
+        | Expr::MapLit { span, .. } => *span,
     }
 }
 
@@ -1621,7 +1691,8 @@ fn member_span(member: &Member) -> Span {
         | Member::IntrinsicFunc { span, .. }
         | Member::IntrinsicCoroutine { span, .. }
         | Member::Pool { span, .. }
-        | Member::Property { span, .. } => *span,
+        | Member::Property { span, .. }
+        | Member::Event { span, .. } => *span,
     }
 }
 
@@ -2026,6 +2097,31 @@ fn lower_stmt_with_context(
             let expr_str = lower_expr_with_expected_type(expr, None, callable_signatures);
             CsStmt::Throw(format!("new {}", expr_str), source_span)
         }
+        Stmt::Use { name, ty, init, body, .. } => {
+            let cs_ty = ty.as_ref().map(|t| lower_type(t)).unwrap_or("var".into());
+            let init_str = lower_expr_with_expected_type(init, ty.as_ref(), callable_signatures);
+            let decl_line = format!("using {} {} = {}", cs_ty, name, init_str);
+            if let Some(block) = body {
+                // Block form → emit as a Raw block:
+                //   using (var name = init)
+                //   {
+                //       <body>
+                //   }
+                let body_stmts: Vec<CsStmt> = block
+                    .stmts
+                    .iter()
+                    .map(|s| lower_stmt_with_context(s, callable_signatures, expected_return_ty))
+                    .collect();
+                CsStmt::UseBlock {
+                    decl: decl_line,
+                    body: body_stmts,
+                    source_span,
+                }
+            } else {
+                // Declaration form → emit as `using var name = init;`
+                CsStmt::Raw(format!("{};", decl_line), source_span)
+            }
+        }
     }
 }
 
@@ -2216,6 +2312,15 @@ fn cs_stmt_to_lines(stmt: &CsStmt, indent: usize) -> Vec<String> {
             lines
         }
         CsStmt::Throw(expr, _) => vec![format!("{}throw {};", pad, expr)],
+        CsStmt::UseBlock { decl, body, .. } => {
+            let inner = decl.strip_prefix("using ").unwrap_or(decl);
+            let mut lines = vec![format!("{}using ({})", pad, inner), format!("{}{{", pad)];
+            for nested in body {
+                lines.extend(cs_stmt_to_lines(nested, indent + 1));
+            }
+            lines.push(format!("{}}}", pad));
+            lines
+        }
     }
 }
 
@@ -2490,6 +2595,97 @@ fn lower_expr_with_expected_type(
                 .collect();
             format!("({})", parts.join(", "))
         }
+        Expr::ListLit { elements, .. } => {
+            // Determine element type. If the surrounding context provides a
+            // generic List<T> hint, use T. Otherwise infer from the first
+            // element. For an empty list with no expected type, fall back to
+            // `object` (the semantic analyzer also emits an E107 diagnostic).
+            let elem_ty = list_elem_type_from_expected(expected_type)
+                .or_else(|| {
+                    elements.first().map(|first| infer_literal_type(first).to_string())
+                })
+                .unwrap_or_else(|| "object".to_string());
+            if elements.is_empty() {
+                format!("new System.Collections.Generic.List<{}>()", elem_ty)
+            } else {
+                let parts: Vec<String> = elements
+                    .iter()
+                    .map(|e| lower_expr_with_expected_type(e, None, callable_signatures))
+                    .collect();
+                format!(
+                    "new System.Collections.Generic.List<{}> {{ {} }}",
+                    elem_ty,
+                    parts.join(", ")
+                )
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            let (key_ty, value_ty) = map_kv_types_from_expected(expected_type)
+                .unwrap_or_else(|| {
+                    let k = entries
+                        .first()
+                        .map(|(k, _)| infer_literal_type(k).to_string())
+                        .unwrap_or_else(|| "object".to_string());
+                    let v = entries
+                        .first()
+                        .map(|(_, v)| infer_literal_type(v).to_string())
+                        .unwrap_or_else(|| "object".to_string());
+                    (k, v)
+                });
+            if entries.is_empty() {
+                format!(
+                    "new System.Collections.Generic.Dictionary<{}, {}>()",
+                    key_ty, value_ty
+                )
+            } else {
+                let parts: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| {
+                        let ks = lower_expr_with_expected_type(k, None, callable_signatures);
+                        let vs = lower_expr_with_expected_type(v, None, callable_signatures);
+                        format!("[{}] = {}", ks, vs)
+                    })
+                    .collect();
+                format!(
+                    "new System.Collections.Generic.Dictionary<{}, {}> {{ {} }}",
+                    key_ty,
+                    value_ty,
+                    parts.join(", ")
+                )
+            }
+        }
+    }
+}
+
+/// Heuristic: infer a C# type name for an expression literal.
+fn infer_literal_type(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::IntLit(_, _) => "int",
+        Expr::FloatLit(_, _) => "float",
+        Expr::DurationLit(_, _) => "float",
+        Expr::StringLit(_, _) | Expr::StringInterp { .. } => "string",
+        Expr::BoolLit(_, _) => "bool",
+        _ => "object",
+    }
+}
+
+/// If the expected type is `List<T>` (or its C# equivalent), return T's name.
+fn list_elem_type_from_expected(expected: Option<&TypeRef>) -> Option<String> {
+    let TypeRef::Generic { name, type_args, .. } = expected? else { return None; };
+    if (name == "List" || name == "MutableList" || name == "IList") && type_args.len() == 1 {
+        Some(lower_type(&type_args[0]))
+    } else {
+        None
+    }
+}
+
+/// If the expected type is `Map<K, V>` (or its C# equivalent), return (K, V).
+fn map_kv_types_from_expected(expected: Option<&TypeRef>) -> Option<(String, String)> {
+    let TypeRef::Generic { name, type_args, .. } = expected? else { return None; };
+    if (name == "Map" || name == "MutableMap" || name == "Dictionary") && type_args.len() == 2 {
+        Some((lower_type(&type_args[0]), lower_type(&type_args[1])))
+    } else {
+        None
     }
 }
 

@@ -1765,6 +1765,9 @@ fn collect_used_namespaces_for_member(member: &Member, used_namespaces: &mut Has
                 collect_used_namespaces_for_block(&setter.body, used_namespaces);
             }
         }
+        Member::Event { ty, .. } => {
+            collect_used_namespaces_for_type_ref(ty, used_namespaces);
+        }
     }
 }
 
@@ -1899,6 +1902,15 @@ fn collect_used_namespaces_for_stmt(stmt: &Stmt, used_namespaces: &mut HashSet<S
         }
         Stmt::Throw { expr, .. } => {
             collect_used_namespaces_for_expr(expr, used_namespaces);
+        }
+        Stmt::Use { ty, init, body, .. } => {
+            if let Some(ty) = ty {
+                collect_used_namespaces_for_type_ref(ty, used_namespaces);
+            }
+            collect_used_namespaces_for_expr(init, used_namespaces);
+            if let Some(body) = body {
+                collect_used_namespaces_for_block(body, used_namespaces);
+            }
         }
     }
 }
@@ -2065,6 +2077,21 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
                 collect_used_namespaces_for_expr(e, used_namespaces);
             }
         }
+        Expr::ListLit { elements, .. } => {
+            // The implicit `List<T>` lives in System.Collections.Generic.
+            used_namespaces.insert("System.Collections.Generic".to_string());
+            for e in elements {
+                collect_used_namespaces_for_expr(e, used_namespaces);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            // The implicit `Dictionary<K, V>` lives in System.Collections.Generic.
+            used_namespaces.insert("System.Collections.Generic".to_string());
+            for (k, v) in entries {
+                collect_used_namespaces_for_expr(k, used_namespaces);
+                collect_used_namespaces_for_expr(v, used_namespaces);
+            }
+        }
     }
 }
 
@@ -2186,7 +2213,8 @@ fn member_contains_intrinsic_code(member: &Member) -> bool {
         | Member::Child { .. }
         | Member::Parent { .. }
         | Member::Pool { .. }
-        | Member::Property { .. } => false,
+        | Member::Property { .. }
+        | Member::Event { .. } => false,
     }
 }
 
@@ -2248,6 +2276,10 @@ fn stmt_contains_intrinsic_code(stmt: &Stmt) -> bool {
                 || finally_block.as_ref().is_some_and(block_contains_intrinsic_code)
         }
         Stmt::Throw { expr, .. } => expr_contains_intrinsic_code(expr),
+        Stmt::Use { init, body, .. } => {
+            expr_contains_intrinsic_code(init)
+                || body.as_ref().is_some_and(block_contains_intrinsic_code)
+        }
     }
 }
 
@@ -2343,6 +2375,10 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
             expr_contains_intrinsic_code(expr)
         }
         Expr::Tuple { elements, .. } => elements.iter().any(expr_contains_intrinsic_code),
+        Expr::ListLit { elements, .. } => elements.iter().any(expr_contains_intrinsic_code),
+        Expr::MapLit { entries, .. } => entries.iter().any(|(k, v)| {
+            expr_contains_intrinsic_code(k) || expr_contains_intrinsic_code(v)
+        }),
         Expr::IntLit(_, _)
         | Expr::FloatLit(_, _)
         | Expr::DurationLit(_, _)
@@ -2691,6 +2727,24 @@ fn collect_stmt_explicit_type_arg_actions(
         Stmt::Throw { expr, .. } => {
             collect_expr_explicit_type_arg_actions(expr, None, callable_signatures, selection_span, actions);
         }
+        Stmt::Use { ty, init, body, .. } => {
+            collect_expr_explicit_type_arg_actions(
+                init,
+                ty.as_ref(),
+                callable_signatures,
+                selection_span,
+                actions,
+            );
+            if let Some(body) = body {
+                collect_block_explicit_type_arg_actions(
+                    body,
+                    callable_signatures,
+                    expected_return_ty,
+                    selection_span,
+                    actions,
+                );
+            }
+        }
     }
 }
 
@@ -2895,6 +2949,17 @@ fn collect_expr_explicit_type_arg_actions(
         Expr::Tuple { elements, .. } => {
             for e in elements {
                 collect_expr_explicit_type_arg_actions(e, None, callable_signatures, selection_span, actions);
+            }
+        }
+        Expr::ListLit { elements, .. } => {
+            for e in elements {
+                collect_expr_explicit_type_arg_actions(e, None, callable_signatures, selection_span, actions);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_expr_explicit_type_arg_actions(k, None, callable_signatures, selection_span, actions);
+                collect_expr_explicit_type_arg_actions(v, None, callable_signatures, selection_span, actions);
             }
         }
     }

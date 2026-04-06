@@ -739,6 +739,9 @@ fn summarize_member_type_references(path: &Path, decl_name: &str, members: &[Mem
                     collect_block_type_references(path, &container_name, &setter.body, &mut references);
                 }
             }
+            Member::Event { name, ty, .. } => {
+                collect_type_references(path, &format!("{}.{}", decl_name, name), ty, &mut references);
+            }
         }
     }
 
@@ -850,6 +853,15 @@ fn collect_stmt_type_references(
         }
         Stmt::Throw { expr, .. } => {
             collect_expr_type_references(path, container_name, expr, references);
+        }
+        Stmt::Use { ty, init, body, .. } => {
+            if let Some(ty) = ty {
+                collect_type_references(path, container_name, ty, references);
+            }
+            collect_expr_type_references(path, container_name, init, references);
+            if let Some(body) = body {
+                collect_block_type_references(path, container_name, body, references);
+            }
         }
     }
 }
@@ -1017,6 +1029,17 @@ fn collect_expr_type_references(
         Expr::Tuple { elements, .. } => {
             for e in elements {
                 collect_expr_type_references(path, container_name, e, references);
+            }
+        }
+        Expr::ListLit { elements, .. } => {
+            for e in elements {
+                collect_expr_type_references(path, container_name, e, references);
+            }
+        }
+        Expr::MapLit { entries, .. } => {
+            for (k, v) in entries {
+                collect_expr_type_references(path, container_name, k, references);
+                collect_expr_type_references(path, container_name, v, references);
             }
         }
     }
@@ -1283,6 +1306,25 @@ fn summarize_members(path: &Path, container_name: &str, members: &[Member]) -> V
                     capacity,
                     max_size
                 ),
+                span: *name_span,
+            },
+            Member::Event {
+                visibility,
+                name,
+                name_span,
+                ty,
+                ..
+            } => MemberSummary {
+                name: name.clone(),
+                kind: MemberKind::Field,
+                signature: format!(
+                    "{}event {}: {}",
+                    visibility_prefix(Some(*visibility)),
+                    name,
+                    format_type_ref(ty)
+                )
+                .trim()
+                .to_string(),
                 span: *name_span,
             },
             Member::Property {

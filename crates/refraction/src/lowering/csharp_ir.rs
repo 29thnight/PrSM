@@ -123,6 +123,15 @@ pub enum CsStmt {
         source_span: Option<Span>,
     },
     Throw(String, Option<Span>),
+    /// `use stream = openFile() { body }` → `using (var stream = openFile()) { body }`
+    UseBlock {
+        /// The declaration line, e.g. `using var stream = openFile()`.
+        /// Already includes the `using` keyword and trailing init expression.
+        /// The emitter will wrap this in a using statement form: `using (...)`.
+        decl: String,
+        body: Vec<CsStmt>,
+        source_span: Option<Span>,
+    },
 }
 
 #[derive(Debug, Clone)]

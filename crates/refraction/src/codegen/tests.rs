@@ -896,4 +896,284 @@ hello world
         assert!(output.contains("(int, string)"), "tuple return type");
         assert!(output.contains("(42, \"answer\")"), "tuple expression in return");
     }
+
+    // ── v4 Phase 4 — event, use, collection literals, DIM ─────────
+
+    #[test]
+    fn test_event_member_basic() {
+        let src = r#"component Boss : MonoBehaviour {
+  event onDamaged: (Int) => Unit
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public event System.Action<int> onDamaged;"),
+            "event declaration: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_event_member_no_args() {
+        let src = r#"component Boss : MonoBehaviour {
+  event onDeath: () => Unit
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public event System.Action onDeath;"),
+            "event with no args: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_event_member_invocation() {
+        let src = r#"component Boss : MonoBehaviour {
+  event onHealthChanged: (Int) => Unit
+  func takeDamage(amount: Int) {
+    onHealthChanged?.invoke(amount)
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public event System.Action<int> onHealthChanged;"),
+            "event field: {}",
+            output
+        );
+        // Safe-call lowering for `?.invoke(...)` uses the Unity-safe null
+        // check pattern: `if (event != null) event.Invoke(...)`.
+        assert!(
+            output.contains("onHealthChanged.Invoke(amount)"),
+            "event invocation: {}",
+            output
+        );
+        assert!(
+            output.contains("onHealthChanged != null"),
+            "event invocation null check: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_event_member_subscription() {
+        let src = r#"component Boss : MonoBehaviour {
+  private event onHit: (Int) => Unit
+  func register(handler: (Int) => Unit) {
+    onHit += handler
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("private event System.Action<int> onHit;"),
+            "private event: {}",
+            output
+        );
+        assert!(
+            output.contains("onHit += handler"),
+            "event += subscription: {}",
+            output
+        );
+    }
+
+    // ── use expression ───────────────────────────────────────────
+
+    #[test]
+    fn test_use_declaration_form() {
+        let src = r#"component Foo : MonoBehaviour {
+  func read() {
+    use val stream = openFile()
+    log("done")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("using var stream = openFile()"),
+            "use declaration form: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_use_block_form() {
+        let src = r#"component Foo : MonoBehaviour {
+  func read() {
+    use stream = openFile() {
+      log("inside use")
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("using (var stream = openFile())"),
+            "use block form opens using statement: {}",
+            output
+        );
+        assert!(
+            output.contains("Debug.Log(\"inside use\")"),
+            "use block body: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_use_with_explicit_type() {
+        let src = r#"component Foo : MonoBehaviour {
+  func read() {
+    use val s: FileStream = openStream()
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("using FileStream s = openStream()"),
+            "use with explicit type: {}",
+            output
+        );
+    }
+
+    // ── Collection literals ──────────────────────────────────────
+
+    #[test]
+    fn test_list_literal_inferred() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val numbers = [1, 2, 3]
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("new System.Collections.Generic.List<int> { 1, 2, 3 }"),
+            "list literal with inferred int element type: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_list_literal_with_type_annotation() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val xs: List<Int> = []
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("new System.Collections.Generic.List<int>()"),
+            "empty list with explicit annotation: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_list_literal_strings() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val names = ["Alice", "Bob"]
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("new System.Collections.Generic.List<string> { \"Alice\", \"Bob\" }"),
+            "list literal of strings: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_map_literal_inferred() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val lookup = {"hp": 100, "mp": 50}
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("new System.Collections.Generic.Dictionary<string, int>"),
+            "map literal types: {}",
+            output
+        );
+        assert!(
+            output.contains("[\"hp\"] = 100"),
+            "map literal first entry: {}",
+            output
+        );
+        assert!(
+            output.contains("[\"mp\"] = 50"),
+            "map literal second entry: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_empty_list_without_type_errors() {
+        // E107 is reported by the semantic analyzer; here we just verify the
+        // compiler does not crash and emits some output for a literal that
+        // does have a type annotation downstream.
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val xs: List<String> = []
+  }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("new System.Collections.Generic.List<string>"));
+    }
+
+    // ── Default interface methods ────────────────────────────────
+
+    #[test]
+    fn test_default_interface_method() {
+        let src = r#"interface IMovable {
+  func move() {
+    log("default move")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public interface IMovable"),
+            "interface decl: {}",
+            output
+        );
+        assert!(
+            output.contains("void move()"),
+            "method header: {}",
+            output
+        );
+        assert!(
+            output.contains("Debug.Log(\"default move\")"),
+            "default body: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_interface_signature_only_no_default() {
+        let src = r#"interface IDamageable {
+  func takeDamage(amount: Int)
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("void takeDamage(int amount);"),
+            "abstract interface method: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_interface_mixed_default_and_signature() {
+        let src = r#"interface IThing {
+  func hello()
+  func greet(): String {
+    return "hello"
+  }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("void hello();"), "abstract method: {}", output);
+        assert!(
+            output.contains("string greet()"),
+            "default method header: {}",
+            output
+        );
+        assert!(
+            output.contains("return \"hello\""),
+            "default body: {}",
+            output
+        );
+    }
 }

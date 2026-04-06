@@ -343,7 +343,8 @@ fn statement_source_span(statement: &CsStmt) -> Option<Span> {
         | CsStmt::Switch { source_span, .. }
         | CsStmt::For { source_span, .. }
         | CsStmt::ForEach { source_span, .. }
-        | CsStmt::While { source_span, .. } => *source_span,
+        | CsStmt::While { source_span, .. }
+        | CsStmt::UseBlock { source_span, .. } => *source_span,
         CsStmt::Expr(_, source_span)
         | CsStmt::Return(_, source_span)
         | CsStmt::YieldReturn(_, source_span)

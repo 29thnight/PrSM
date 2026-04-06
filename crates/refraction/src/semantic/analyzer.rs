@@ -775,6 +775,27 @@ impl Analyzer {
                     definition_id,
                 });
             }
+            Member::Event {
+                name,
+                name_span,
+                ty,
+                ..
+            } => {
+                // event field is a delegate variable; resolved as External and
+                // registered in scope so `name += handler` and `name(args)` work.
+                let btype = self.resolve_typeref(ty);
+                let definition_id = self.record_member_definition(
+                    name,
+                    HirDefinitionKind::Field,
+                    btype.clone(),
+                    true,
+                    *name_span,
+                );
+                self.scopes.define(Symbol {
+                    name: name.clone(), ty: btype, kind: SymbolKind::Field, mutable: true,
+                    definition_id,
+                });
+            }
         }
     }
 
@@ -885,6 +906,7 @@ impl Analyzer {
                     }
                     dt
                 } else {
+                    self.check_collection_literal_unannotated(init);
                     self.analyze_expr(init)
                 };
                 let definition_id = self.record_nested_definition(
@@ -918,6 +940,7 @@ impl Analyzer {
                     }
                     dt
                 } else if let Some(init_expr) = init {
+                    self.check_collection_literal_unannotated(init_expr);
                     self.analyze_expr(init_expr)
                 } else {
                     self.diag.error("E022", "Variable without type annotation must have an initializer", *span);
@@ -1151,6 +1174,38 @@ impl Analyzer {
             }
             Stmt::Throw { expr, .. } => {
                 self.analyze_expr(expr);
+            }
+            Stmt::Use { name, name_span, ty, init, body, .. } => {
+                // The bound name is in scope for the body (block form) or for
+                // the rest of the enclosing scope (declaration form).
+                let declared_ty = if let Some(t) = ty {
+                    let dt = self.resolve_typeref(t);
+                    self.analyze_expr_with_expected(init, Some(&dt));
+                    dt
+                } else {
+                    self.analyze_expr(init)
+                };
+                let definition_id = self.record_nested_definition(
+                    name,
+                    HirDefinitionKind::Local,
+                    declared_ty.clone(),
+                    false,
+                    *name_span,
+                );
+                if let Some(block) = body {
+                    self.scopes.push_scope();
+                    self.scopes.define(Symbol {
+                        name: name.clone(), ty: declared_ty, kind: SymbolKind::Local, mutable: false,
+                        definition_id,
+                    });
+                    self.analyze_block(block);
+                    self.scopes.pop_scope();
+                } else {
+                    self.scopes.define(Symbol {
+                        name: name.clone(), ty: declared_ty, kind: SymbolKind::Local, mutable: false,
+                        definition_id,
+                    });
+                }
             }
         }
     }
@@ -1420,6 +1475,28 @@ impl Analyzer {
                 }
                 PrismType::External("tuple".into())
             }
+            Expr::ListLit { elements, span } => {
+                if elements.is_empty() {
+                    // Empty literal — only valid with an explicit type annotation
+                    // somewhere in the surrounding context. Without that
+                    // context we cannot infer; semantic emits a diagnostic
+                    // unless the analyzer is currently using analyze_expr_with_expected.
+                    // We do not error here unconditionally — defer to
+                    // analyze_expr_with_expected for context-aware checks.
+                    let _ = span;
+                }
+                for e in elements {
+                    self.analyze_expr(e);
+                }
+                PrismType::External("list".into())
+            }
+            Expr::MapLit { entries, .. } => {
+                for (k, v) in entries {
+                    self.analyze_expr(k);
+                    self.analyze_expr(v);
+                }
+                PrismType::External("map".into())
+            }
         }
     }
 
@@ -1445,6 +1522,30 @@ impl Analyzer {
         }
 
         analyzed
+    }
+
+    /// Walk an expression tree and report v4 collection-literal diagnostics
+    /// (E107: empty literal without type) for any nested empty literal that
+    /// has no contextual type. This is a best-effort check used by val/var
+    /// statements that lack an explicit type annotation.
+    fn check_collection_literal_unannotated(&mut self, expr: &Expr) {
+        match expr {
+            Expr::ListLit { elements, span } if elements.is_empty() => {
+                self.diag.error(
+                    "E107",
+                    "Empty list literal '[]' requires an explicit type annotation",
+                    *span,
+                );
+            }
+            Expr::MapLit { entries, span } if entries.is_empty() => {
+                self.diag.error(
+                    "E107",
+                    "Empty map literal '{}' requires an explicit type annotation",
+                    *span,
+                );
+            }
+            _ => {}
+        }
     }
 
     // ── Validation helpers ────────────────────────────────────────
@@ -2245,6 +2346,60 @@ component PlayerHealth : MonoBehaviour {
     }
 }"#;
         let diags = errors(src);
+        assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    // === v4 Phase 4 — collection literals (E107) ===
+
+    #[test]
+    fn test_empty_list_without_type_annotation_errors() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  func f() {\n    val xs = []\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E107"),
+            "expected E107: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_empty_list_with_type_annotation_ok() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  func f() {\n    val xs: List<Int> = []\n  }\n}",
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "E107"),
+            "did not expect E107: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_list_literal_with_elements_ok() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  func f() {\n    val xs = [1, 2, 3]\n  }\n}",
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "E107"),
+            "did not expect E107 for non-empty list: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_event_member_no_errors() {
+        let diags = errors(
+            "component Boss : MonoBehaviour {\n  event onDeath: () => Unit\n}",
+        );
+        assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
+    }
+
+    #[test]
+    fn test_use_stmt_block_no_errors() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  func f() {\n    use s = openFile() {\n      log(s)\n    }\n  }\n}",
+        );
         assert!(diags.is_empty(), "Unexpected errors: {:?}", diags);
     }
 }

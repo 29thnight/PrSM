@@ -134,9 +134,24 @@ fn emit_member(out: &mut String, member: &CsMember, indent: usize, _is_enum: boo
             out.push_str(&format!("{}}}\n", pad));
         }
         CsMember::RawCode(code) => {
-            out.push_str(&format!("{}{}\n", pad, code));
+            // Pad every line of the raw block by the member indent so multi-line
+            // raw members (e.g. default interface methods) align with siblings.
+            for line in code.split('\n') {
+                if line.is_empty() {
+                    out.push('\n');
+                } else {
+                    out.push_str(&format!("{}{}\n", pad, line));
+                }
+            }
         }
     }
+}
+
+/// Public wrapper for emitting a single statement to a string buffer.
+/// Used by the lowering pass when it needs to embed C# inside `RawCode`
+/// (e.g. default interface method bodies).
+pub fn emit_stmt_to_string(out: &mut String, stmt: &CsStmt, indent: usize) {
+    emit_stmt(out, stmt, indent);
 }
 
 fn emit_stmt(out: &mut String, stmt: &CsStmt, indent: usize) {
@@ -267,6 +282,18 @@ fn emit_stmt(out: &mut String, stmt: &CsStmt, indent: usize) {
         }
         CsStmt::Throw(expr, _) => {
             out.push_str(&format!("{}throw {};\n", pad, expr));
+        }
+        CsStmt::UseBlock { decl, body, .. } => {
+            // Decl is of the form "using var name = init"; convert to a using
+            // statement: `using (var name = init)`.
+            // Strip the leading `using ` so we can wrap it in a using statement.
+            let inner = decl.strip_prefix("using ").unwrap_or(decl);
+            out.push_str(&format!("{}using ({})\n", pad, inner));
+            out.push_str(&format!("{}{{\n", pad));
+            for s in body {
+                emit_stmt(out, s, indent + 1);
+            }
+            out.push_str(&format!("{}}}\n", pad));
         }
     }
 }
