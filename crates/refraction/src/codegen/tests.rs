@@ -779,4 +779,121 @@ hello world
         let output = compile(src);
         assert!(output.contains("??="), "?:= should lower to ??=");
     }
+
+    // ── Language 4 Phase 2: Type System Extensions ──────────────
+
+    #[test]
+    fn test_safe_cast() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test(obj: Object) {
+    val enemy = obj as Enemy?
+  }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("obj as Enemy"), "safe cast should lower to C# 'as'");
+    }
+
+    #[test]
+    fn test_force_cast() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test(obj: Object) {
+    val boss = obj as! Boss
+  }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("((Boss)obj)"), "force cast should lower to C# explicit cast");
+    }
+
+    #[test]
+    fn test_conversion_method_to_float() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val x = 42.toFloat()
+  }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("((float)42)"), "toFloat() should lower to (float) cast");
+    }
+
+    #[test]
+    fn test_conversion_method_to_string() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val x = 100.toString()
+  }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("100.ToString()"), "toString() should lower to .ToString()");
+    }
+
+    #[test]
+    fn test_abstract_class() {
+        let src = r#"abstract class Weapon {
+  abstract func attack()
+  open func reload() { }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("public abstract class Weapon"), "abstract class modifier");
+        assert!(output.contains("public abstract void attack()"), "abstract func signature");
+        assert!(output.contains("public virtual void reload()"), "open func becomes virtual");
+    }
+
+    #[test]
+    fn test_sealed_class() {
+        let src = "sealed class Shape { }";
+        let output = compile(src);
+        assert!(output.contains("public sealed class Shape"), "sealed class modifier");
+    }
+
+    #[test]
+    fn test_override_func() {
+        let src = r#"class Sword : Weapon {
+  override func attack() { }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("public override void attack()"), "override func");
+    }
+
+    #[test]
+    fn test_struct_basic() {
+        let src = "struct DamageInfo(amount: Int, type: DamageType)";
+        let output = compile(src);
+        assert!(output.contains("public struct DamageInfo"), "struct declaration");
+        assert!(output.contains("public int amount;"), "struct field");
+        assert!(output.contains("public DamageType type;"), "struct field type");
+        assert!(output.contains("this.amount = amount;"), "struct constructor body");
+        assert!(output.contains("this.type = type;"), "struct constructor body");
+    }
+
+    #[test]
+    fn test_struct_with_body() {
+        let src = r#"struct Color32(r: Byte, g: Byte, b: Byte, a: Byte) {
+  static val white: Color32 = Color32(255, 255, 255, 255)
+}"#;
+        let output = compile(src);
+        assert!(output.contains("public struct Color32"), "struct declaration");
+        assert!(output.contains("public byte r;"), "struct field");
+        assert!(output.contains("public static readonly"), "static val in struct");
+    }
+
+    #[test]
+    fn test_tuple_expression() {
+        let src = r#"component Foo : MonoBehaviour {
+  func test() {
+    val pair = (42, "hello")
+  }
+}"#;
+        let output = compile(src);
+        assert!(output.contains("(42, \"hello\")"), "tuple expression");
+    }
+
+    #[test]
+    fn test_tuple_type_in_func_return() {
+        let src = r#"class Foo {
+  func getResult(): (Int, String) = (42, "answer")
+}"#;
+        let output = compile(src);
+        assert!(output.contains("(int, string)"), "tuple return type");
+        assert!(output.contains("(42, \"answer\")"), "tuple expression in return");
+    }
 }

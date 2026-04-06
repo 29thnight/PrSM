@@ -39,7 +39,8 @@ fn emit_class(out: &mut String, class: &CsClass, indent: usize) {
     // Class header
     let is_enum = class.modifiers.contains("enum");
     let is_interface = class.modifiers.contains("interface");
-    let keyword = if is_enum || is_interface { "" } else { " class" };
+    let is_struct = class.modifiers.contains("struct");
+    let keyword = if is_enum || is_interface || is_struct { "" } else { " class" };
     let mut header = format!("{}{}{} {}", pad, class.modifiers, keyword, class.name);
     if let Some(base) = &class.base_class {
         header.push_str(&format!(" : {}", base));

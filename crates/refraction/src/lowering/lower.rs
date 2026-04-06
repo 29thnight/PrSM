@@ -261,7 +261,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                 vec![],
             )
         }
-        Decl::Class { name, type_params, where_clauses, super_class, interfaces, members, .. } => {
+        Decl::Class { name, is_abstract, is_sealed, type_params, where_clauses, super_class, interfaces, members, .. } => {
             let mut cs_members = Vec::new();
             let callable_signatures = collect_callable_signatures(members);
             for m in members {
@@ -286,10 +286,17 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
             } else {
                 format!("{}<{}>", name, type_params.join(", "))
             };
+            let modifiers = if *is_abstract {
+                "public abstract".into()
+            } else if *is_sealed {
+                "public sealed".into()
+            } else {
+                "public".into()
+            };
             (
                 CsClass {
                     attributes: vec![],
-                    modifiers: "public".into(),
+                    modifiers,
                     name: cs_name,
                     base_class: super_class.clone(),
                     interfaces: interfaces.clone(),
@@ -431,6 +438,9 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                 vec![],
             )
         }
+        Decl::Struct { name, fields, members, .. } => {
+            (lower_struct(name, fields, members), vec![])
+        }
     }
 }
 
@@ -458,6 +468,70 @@ fn lower_data_class(name: &str, fields: &[Param]) -> CsClass {
     CsClass {
         attributes: vec!["[System.Serializable]".into()],
         modifiers: "public".into(),
+        name: name.into(),
+        base_class: None,
+        interfaces: vec![],
+        where_clauses: vec![],
+        members: cs_members,
+    }
+}
+
+fn lower_struct(name: &str, fields: &[Param], members: &[Member]) -> CsClass {
+    let mut cs_members = Vec::new();
+    let callable_signatures = collect_callable_signatures(members);
+
+    // Public fields
+    for field in fields {
+        cs_members.push(CsMember::Field {
+            attributes: vec![],
+            modifiers: "public".into(),
+            ty: lower_type(&field.ty),
+            name: field.name.clone(),
+            init: None,
+        });
+    }
+
+    // Constructor
+    let ctor_params: Vec<CsParam> = fields
+        .iter()
+        .map(|f| CsParam {
+            ty: lower_type(&f.ty),
+            name: f.name.clone(),
+            default: None,
+        })
+        .collect();
+    let ctor_body: Vec<CsStmt> = fields
+        .iter()
+        .map(|f| CsStmt::Assignment {
+            target: format!("this.{}", f.name),
+            op: "=".into(),
+            value: f.name.clone(),
+            source_span: None,
+        })
+        .collect();
+    cs_members.push(CsMember::Method {
+        attributes: vec![],
+        modifiers: "public".into(),
+        return_ty: String::new(), // constructor
+        name: name.into(),
+        params: ctor_params,
+        where_clauses: vec![],
+        body: ctor_body,
+        source_span: None,
+    });
+
+    // Lower optional body members (static fields, funcs)
+    for m in members {
+        match m {
+            Member::Field { .. } => cs_members.extend(lower_field_member(m)),
+            Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
+            _ => {}
+        }
+    }
+
+    CsClass {
+        attributes: vec![],
+        modifiers: "public struct".into(),
         name: name.into(),
         base_class: None,
         interfaces: vec![],
@@ -1211,7 +1285,7 @@ fn lifecycle_method_name(kind: LifecycleKind) -> &'static str {
 
 fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableSignature>) -> CsMember {
     match m {
-        Member::Func { visibility, is_static, is_override, name, type_params, where_clauses, params, return_ty, body, .. } => {
+        Member::Func { visibility, is_static, is_override, is_abstract, is_open, name, type_params, where_clauses, params, return_ty, body, .. } => {
             let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
             let ps: Vec<CsParam> = params.iter().map(|p| CsParam {
                 ty: lower_type(&p.ty), name: p.name.clone(), default: None,
@@ -1221,8 +1295,24 @@ fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableS
             if *is_static {
                 mods = format!("{} static", mods);
             }
-            if *is_override {
+            if *is_abstract {
+                mods = format!("{} abstract", mods);
+            } else if *is_open {
+                mods = format!("{} virtual", mods);
+            } else if *is_override {
                 mods = format!("{} override", mods);
+            }
+
+            // Abstract functions emit signature only (no body)
+            if *is_abstract {
+                let cs_name = lower_func_name_with_generics(name, type_params);
+                return CsMember::RawCode(format!(
+                    "{} {} {}({});",
+                    mods,
+                    ret,
+                    cs_name,
+                    ps.iter().map(|p| format!("{} {}", p.ty, p.name)).collect::<Vec<_>>().join(", ")
+                ));
             }
 
             let cs_body = match body {
@@ -1317,7 +1407,7 @@ fn lower_intrinsic_coroutine(name: &str, params: &[Param], code: &str, span: Spa
 /// component-level `ComponentCtx`.
 fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
     match m {
-        Member::Func { visibility, is_static, is_override, name, type_params, where_clauses, params, return_ty, body, .. } => {
+        Member::Func { visibility, is_static, is_override, is_abstract, is_open, name, type_params, where_clauses, params, return_ty, body, .. } => {
             let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
             let ps: Vec<CsParam> = params.iter().map(|p| CsParam {
                 ty: lower_type(&p.ty), name: p.name.clone(), default: None,
@@ -1327,8 +1417,24 @@ fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
             if *is_static {
                 mods = format!("{} static", mods);
             }
-            if *is_override {
+            if *is_abstract {
+                mods = format!("{} abstract", mods);
+            } else if *is_open {
+                mods = format!("{} virtual", mods);
+            } else if *is_override {
                 mods = format!("{} override", mods);
+            }
+
+            // Abstract functions emit signature only (no body)
+            if *is_abstract {
+                let cs_name = lower_func_name_with_generics(name, type_params);
+                return CsMember::RawCode(format!(
+                    "{} {} {}({});",
+                    mods,
+                    ret,
+                    cs_name,
+                    ps.iter().map(|p| format!("{} {}", p.ty, p.name)).collect::<Vec<_>>().join(", ")
+                ));
             }
 
             let cs_body = match body {
@@ -1473,7 +1579,10 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::Range { span, .. }
         | Expr::Is { span, .. }
         | Expr::Lambda { span, .. }
-        | Expr::IntrinsicExpr { span, .. } => *span,
+        | Expr::IntrinsicExpr { span, .. }
+        | Expr::SafeCastExpr { span, .. }
+        | Expr::ForceCastExpr { span, .. }
+        | Expr::Tuple { span, .. } => *span,
     }
 }
 
@@ -2220,6 +2329,12 @@ fn lower_expr_with_expected_type(
                     // Check for sugar: input.axis → Input.GetAxis, etc.
                     if let Some(mapped) = map_method_sugar(&recv_str, name) {
                         format!("{}{}({})", mapped, ta_str, args_str.join(", "))
+                    } else if args_str.is_empty() {
+                        if let Some(conversion) = map_conversion_method(&recv_str, name) {
+                            conversion
+                        } else {
+                            format!("{}.{}{}({})", recv_str, pascal_case(name), ta_str, args_str.join(", "))
+                        }
                     } else {
                         // PascalCase for C# method calls
                         format!("{}.{}{}({})", recv_str, pascal_case(name), ta_str, args_str.join(", "))
@@ -2332,6 +2447,27 @@ fn lower_expr_with_expected_type(
             "/* lambda */".into()
         }
         Expr::IntrinsicExpr { code, .. } => code.clone(),
+        Expr::SafeCastExpr { expr, target_type, .. } => {
+            format!(
+                "{} as {}",
+                lower_expr_with_expected_type(expr, None, callable_signatures),
+                lower_type(target_type).trim_end_matches('?'),
+            )
+        }
+        Expr::ForceCastExpr { expr, target_type, .. } => {
+            format!(
+                "(({}){})",
+                lower_type(target_type),
+                lower_expr_with_expected_type(expr, None, callable_signatures),
+            )
+        }
+        Expr::Tuple { elements, .. } => {
+            let parts: Vec<String> = elements
+                .iter()
+                .map(|e| lower_expr_with_expected_type(e, None, callable_signatures))
+                .collect();
+            format!("({})", parts.join(", "))
+        }
     }
 }
 
@@ -2427,6 +2563,11 @@ fn strip_nullable_type(ty: &TypeRef) -> TypeRef {
             nullable: false,
             span: *span,
         },
+        TypeRef::Tuple { types, span, .. } => TypeRef::Tuple {
+            types: types.clone(),
+            nullable: false,
+            span: *span,
+        },
     }
 }
 
@@ -2498,6 +2639,11 @@ fn lower_type(ty: &TypeRef) -> String {
             let base = format!("{}.{}", qualifier, name);
             if *nullable { format!("{}?", base) } else { base }
         }
+        TypeRef::Tuple { types, nullable, .. } => {
+            let inner: Vec<String> = types.iter().map(|t| lower_type(t)).collect();
+            let base = format!("({})", inner.join(", "));
+            if *nullable { format!("{}?", base) } else { base }
+        }
     }
 }
 
@@ -2549,6 +2695,19 @@ fn map_method_sugar(receiver: &str, method: &str) -> Option<String> {
         ("Input", "getButton") | ("input", "getButton") => Some("Input.GetButton".into()),
         ("Input", "getButtonDown") | ("input", "getButtonDown") => Some("Input.GetButtonDown".into()),
         ("quat", "euler") => Some("Quaternion.Euler".into()),
+        _ => None,
+    }
+}
+
+/// Conversion method sugar: `x.toFloat()` -> `(float)x`, `x.toInt()` -> `(int)x`, etc.
+fn map_conversion_method(receiver_str: &str, method: &str) -> Option<String> {
+    match method {
+        "toInt" => Some(format!("((int){})", receiver_str)),
+        "toFloat" => Some(format!("((float){})", receiver_str)),
+        "toDouble" => Some(format!("((double){})", receiver_str)),
+        "toLong" => Some(format!("((long){})", receiver_str)),
+        "toByte" => Some(format!("((byte){})", receiver_str)),
+        "toString" => Some(format!("{}.ToString()", receiver_str)),
         _ => None,
     }
 }

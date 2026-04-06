@@ -154,9 +154,18 @@ pub enum TokenKind {
 
     // === Keywords: modifiers ===
     Static,
+    Abstract,
+    Sealed,
+    Open,
 
     // === Keywords: type alias ===
     TypeAlias,
+
+    // === Keywords: casting ===
+    As,
+
+    // === Keywords: value types ===
+    Struct,
 
     // === Keywords: other ===
     Using,
@@ -283,7 +292,12 @@ impl TokenKind {
                 | TokenKind::Finally
                 | TokenKind::Throw
                 | TokenKind::Static
+                | TokenKind::Abstract
+                | TokenKind::Sealed
+                | TokenKind::Open
                 | TokenKind::TypeAlias
+                | TokenKind::As
+                | TokenKind::Struct
                 | TokenKind::Using
                 | TokenKind::Null
                 | TokenKind::This
@@ -361,7 +375,12 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
         "finally" => Some(TokenKind::Finally),
         "throw" => Some(TokenKind::Throw),
         "static" => Some(TokenKind::Static),
+        "abstract" => Some(TokenKind::Abstract),
+        "sealed" => Some(TokenKind::Sealed),
+        "open" => Some(TokenKind::Open),
         "typealias" => Some(TokenKind::TypeAlias),
+        "as" => Some(TokenKind::As),
+        "struct" => Some(TokenKind::Struct),
         "using" => Some(TokenKind::Using),
         "null" => Some(TokenKind::Null),
         "this" => Some(TokenKind::This),

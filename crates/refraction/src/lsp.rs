@@ -1664,6 +1664,12 @@ fn collect_used_namespaces_for_decl(decl: &Decl, used_namespaces: &mut HashSet<S
         Decl::DataClass { fields, .. } | Decl::Attribute { fields, .. } => {
             collect_used_namespaces_for_params(fields, used_namespaces);
         }
+        Decl::Struct { fields, members, .. } => {
+            collect_used_namespaces_for_params(fields, used_namespaces);
+            for member in members {
+                collect_used_namespaces_for_member(member, used_namespaces);
+            }
+        }
         Decl::Interface { .. } => {}
         Decl::TypeAlias { target, .. } => {
             collect_used_namespaces_for_type_ref(target, used_namespaces);
@@ -2026,6 +2032,19 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
         }
         Expr::Lambda { body, .. } => collect_used_namespaces_for_block(body, used_namespaces),
         Expr::IntrinsicExpr { ty, .. } => collect_used_namespaces_for_type_ref(ty, used_namespaces),
+        Expr::SafeCastExpr { expr, target_type, .. } => {
+            collect_used_namespaces_for_expr(expr, used_namespaces);
+            collect_used_namespaces_for_type_ref(target_type, used_namespaces);
+        }
+        Expr::ForceCastExpr { expr, target_type, .. } => {
+            collect_used_namespaces_for_expr(expr, used_namespaces);
+            collect_used_namespaces_for_type_ref(target_type, used_namespaces);
+        }
+        Expr::Tuple { elements, .. } => {
+            for e in elements {
+                collect_used_namespaces_for_expr(e, used_namespaces);
+            }
+        }
     }
 }
 
@@ -2088,6 +2107,11 @@ fn collect_used_namespaces_for_type_ref(ty: &TypeRef, used_namespaces: &mut Hash
             }
         }
         TypeRef::Qualified { .. } => {}
+        TypeRef::Tuple { types, .. } => {
+            for t in types {
+                collect_used_namespaces_for_type_ref(t, used_namespaces);
+            }
+        }
     }
 }
 
@@ -2112,6 +2136,7 @@ fn decl_contains_intrinsic_code(decl: &Decl) -> bool {
         Decl::Component { members, .. }
         | Decl::Asset { members, .. }
         | Decl::Class { members, .. } => members.iter().any(member_contains_intrinsic_code),
+        Decl::Struct { members, .. } => members.iter().any(member_contains_intrinsic_code),
         Decl::DataClass { .. } | Decl::Enum { .. } | Decl::Attribute { .. } | Decl::Interface { .. } | Decl::TypeAlias { .. } => false,
     }
 }
@@ -2283,6 +2308,10 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
         }
         Expr::Is { expr, .. } => expr_contains_intrinsic_code(expr),
         Expr::Lambda { body, .. } => block_contains_intrinsic_code(body),
+        Expr::SafeCastExpr { expr, .. } | Expr::ForceCastExpr { expr, .. } => {
+            expr_contains_intrinsic_code(expr)
+        }
+        Expr::Tuple { elements, .. } => elements.iter().any(expr_contains_intrinsic_code),
         Expr::IntLit(_, _)
         | Expr::FloatLit(_, _)
         | Expr::DurationLit(_, _)
@@ -2344,6 +2373,7 @@ fn decl_members(decl: &Decl) -> Option<&[Member]> {
         Decl::Component { members, .. }
         | Decl::Asset { members, .. }
         | Decl::Class { members, .. } => Some(members.as_slice()),
+        Decl::Struct { members, .. } => Some(members.as_slice()),
         Decl::DataClass { .. } | Decl::Enum { .. } | Decl::Attribute { .. } | Decl::Interface { .. } | Decl::TypeAlias { .. } => None,
     }
 }
@@ -2357,7 +2387,8 @@ fn decl_start_position(decl: &Decl) -> Position {
         | Decl::Enum { span, .. }
         | Decl::Attribute { span, .. }
         | Decl::Interface { span, .. }
-        | Decl::TypeAlias { span, .. } => span.start,
+        | Decl::TypeAlias { span, .. }
+        | Decl::Struct { span, .. } => span.start,
     }
 }
 
@@ -2820,6 +2851,14 @@ fn collect_expr_explicit_type_arg_actions(
         Expr::Lambda { body, .. } => {
             collect_block_explicit_type_arg_actions(body, callable_signatures, None, selection_span, actions);
         }
+        Expr::SafeCastExpr { expr, .. } | Expr::ForceCastExpr { expr, .. } => {
+            collect_expr_explicit_type_arg_actions(expr, None, callable_signatures, selection_span, actions);
+        }
+        Expr::Tuple { elements, .. } => {
+            for e in elements {
+                collect_expr_explicit_type_arg_actions(e, None, callable_signatures, selection_span, actions);
+            }
+        }
     }
 }
 
@@ -2902,6 +2941,11 @@ fn strip_nullable_type_ref(ty: &TypeRef) -> TypeRef {
             nullable: false,
             span: *span,
         },
+        TypeRef::Tuple { types, span, .. } => TypeRef::Tuple {
+            types: types.clone(),
+            nullable: false,
+            span: *span,
+        },
     }
 }
 
@@ -2931,6 +2975,10 @@ fn format_type_ref_source(ty: &TypeRef) -> String {
             nullable,
             ..
         } => format_nullable_type_ref_source(format!("{}.{}", qualifier, name), *nullable),
+        TypeRef::Tuple { types, nullable, .. } => {
+            let inner: Vec<String> = types.iter().map(format_type_ref_source).collect();
+            format_nullable_type_ref_source(format!("({})", inner.join(", ")), *nullable)
+        }
     }
 }
 

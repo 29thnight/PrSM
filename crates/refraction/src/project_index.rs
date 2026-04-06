@@ -521,6 +521,19 @@ fn summarize_decl(path: &Path, decl: &Decl) -> (DeclarationSummary, Vec<IndexedS
                 *name_span,
             )
         }
+        Decl::Struct { name, name_span, fields, .. } => {
+            summarize_named_decl(
+                path,
+                name,
+                DeclarationKind::DataClass,
+                None,
+                Vec::new(),
+                format!("struct {}({})", name, format_params(fields)),
+                summarize_param_members(path, name, fields),
+                summarize_param_type_references(path, name, fields),
+                *name_span,
+            )
+        }
     }
 }
 
@@ -951,6 +964,19 @@ fn collect_expr_type_references(
         }
         Expr::Lambda { body, .. } => collect_block_type_references(path, container_name, body, references),
         Expr::IntrinsicExpr { ty, .. } => collect_type_references(path, container_name, ty, references),
+        Expr::SafeCastExpr { expr, target_type, .. } => {
+            collect_expr_type_references(path, container_name, expr, references);
+            collect_type_references(path, container_name, target_type, references);
+        }
+        Expr::ForceCastExpr { expr, target_type, .. } => {
+            collect_expr_type_references(path, container_name, expr, references);
+            collect_type_references(path, container_name, target_type, references);
+        }
+        Expr::Tuple { elements, .. } => {
+            for e in elements {
+                collect_expr_type_references(path, container_name, e, references);
+            }
+        }
     }
 }
 
@@ -1002,6 +1028,11 @@ fn collect_type_references(
                 &format!("{}.{}", qualifier, name),
                 *span,
             ));
+        }
+        TypeRef::Tuple { types, .. } => {
+            for t in types {
+                collect_type_references(path, container_name, t, references);
+            }
         }
     }
 }
@@ -1285,6 +1316,11 @@ fn type_ref_signature(ty: &TypeRef) -> String {
             let base = format!("{}.{}", qualifier, name);
             if *nullable { format!("{}?", base) } else { base }
         }
+        TypeRef::Tuple { types, nullable, .. } => {
+            let inner: Vec<String> = types.iter().map(type_ref_signature).collect();
+            let base = format!("({})", inner.join(", "));
+            if *nullable { format!("{}?", base) } else { base }
+        }
     }
 }
 
@@ -1346,6 +1382,10 @@ fn format_type_ref(ty: &TypeRef) -> String {
             nullable,
             ..
         } => format_nullable(format!("{}.{}", qualifier, name), *nullable),
+        TypeRef::Tuple { types, nullable, .. } => {
+            let inner: Vec<String> = types.iter().map(format_type_ref).collect();
+            format_nullable(format!("({})", inner.join(", ")), *nullable)
+        }
     }
 }
 

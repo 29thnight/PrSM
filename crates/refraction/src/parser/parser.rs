@@ -198,12 +198,29 @@ impl Parser {
             }
             TokenKind::Asset => self.parse_asset(),
             TokenKind::Data => self.parse_data_class(),
-            TokenKind::Class => self.parse_class(),
+            TokenKind::Class => self.parse_class_with_modifiers(false, false),
+            TokenKind::Abstract => {
+                self.advance(); // consume 'abstract'
+                self.skip_newlines();
+                if !self.check(&TokenKind::Class) {
+                    return Err(self.error("'abstract' can only be used before 'class'".into()));
+                }
+                self.parse_class_with_modifiers(true, false)
+            }
+            TokenKind::Sealed => {
+                self.advance(); // consume 'sealed'
+                self.skip_newlines();
+                if !self.check(&TokenKind::Class) {
+                    return Err(self.error("'sealed' can only be used before 'class'".into()));
+                }
+                self.parse_class_with_modifiers(false, true)
+            }
             TokenKind::Enum => self.parse_enum(),
             TokenKind::Attribute => self.parse_attribute_decl(annotations),
             TokenKind::Interface => self.parse_interface(),
             TokenKind::TypeAlias => self.parse_type_alias(),
-            _ => Err(self.error(format!("Expected declaration (component, singleton, asset, class, enum, attribute, interface, typealias), found {:?}", self.peek()))),
+            TokenKind::Struct => self.parse_struct(),
+            _ => Err(self.error(format!("Expected declaration (component, singleton, asset, class, enum, attribute, interface, typealias, struct), found {:?}", self.peek()))),
         }
     }
 
@@ -310,6 +327,45 @@ impl Parser {
         })
     }
 
+    fn parse_struct(&mut self) -> Result<Decl, ParseError> {
+        let start = self.peek_span();
+        self.advance(); // consume 'struct'
+        let (name, name_span) = self.expect_ident()?;
+        self.expect(&TokenKind::LParen)?;
+        let fields = if self.check(&TokenKind::RParen) {
+            Vec::new()
+        } else {
+            self.parse_param_list()?
+        };
+        self.expect(&TokenKind::RParen)?;
+
+        // Optional body block with members
+        let members = if self.check(&TokenKind::LBrace) || {
+            // Check if next non-newline is LBrace
+            let saved = self.pos;
+            self.skip_newlines();
+            let has_brace = self.check(&TokenKind::LBrace);
+            if !has_brace { self.pos = saved; }
+            has_brace
+        } {
+            self.expect(&TokenKind::LBrace)?;
+            let ms = self.parse_members()?;
+            self.expect(&TokenKind::RBrace)?;
+            ms
+        } else {
+            self.expect_newline_or_eof();
+            vec![]
+        };
+
+        Ok(Decl::Struct {
+            name,
+            name_span,
+            fields,
+            members,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
     fn parse_component_decl(&mut self, is_singleton: bool) -> Result<Decl, ParseError> {
         let start = self.peek_span();
         self.advance(); // consume 'component'
@@ -360,7 +416,7 @@ impl Parser {
         })
     }
 
-    fn parse_class(&mut self) -> Result<Decl, ParseError> {
+    fn parse_class_with_modifiers(&mut self, is_abstract: bool, is_sealed: bool) -> Result<Decl, ParseError> {
         let start = self.peek_span();
         self.advance(); // consume 'class'
 
@@ -396,6 +452,8 @@ impl Parser {
         Ok(Decl::Class {
             name,
             name_span,
+            is_abstract,
+            is_sealed,
             type_params,
             where_clauses,
             super_class,
@@ -705,6 +763,16 @@ impl Parser {
                     _ => Err(self.error(format!("Expected 'func', 'val', or 'var' after 'static', found {:?}", self.peek()))),
                 }
             }
+            TokenKind::Abstract => {
+                self.advance(); // consume 'abstract'
+                self.expect(&TokenKind::Func)?;
+                self.parse_func_inner_ext(Visibility::Public, false, false, true, false)
+            }
+            TokenKind::Open => {
+                self.advance(); // consume 'open'
+                self.expect(&TokenKind::Func)?;
+                self.parse_func_inner_ext(Visibility::Public, false, false, false, true)
+            }
             TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field(Visibility::Public),
             // Lifecycle blocks
             TokenKind::Awake | TokenKind::Update | TokenKind::FixedUpdate
@@ -896,6 +964,10 @@ impl Parser {
     }
 
     fn parse_func_inner(&mut self, vis: Visibility, is_static: bool, is_override: bool) -> Result<Member, ParseError> {
+        self.parse_func_inner_ext(vis, is_static, is_override, false, false)
+    }
+
+    fn parse_func_inner_ext(&mut self, vis: Visibility, is_static: bool, is_override: bool, is_abstract: bool, is_open: bool) -> Result<Member, ParseError> {
         let start = self.peek_span();
         let (name, name_span) = self.expect_ident()?;
 
@@ -919,7 +991,11 @@ impl Parser {
         // Optional where clauses before the body
         let where_clauses = self.parse_where_clauses()?;
 
-        let body = if self.eat(&TokenKind::Eq) {
+        // Abstract functions have no body — just a signature
+        let body = if is_abstract {
+            self.expect_newline_or_eof();
+            FuncBody::Block(Block { stmts: vec![], span: self.peek_span() })
+        } else if self.eat(&TokenKind::Eq) {
             // Expression body
             let expr = self.parse_expr()?;
             self.expect_newline_or_eof();
@@ -933,6 +1009,8 @@ impl Parser {
             visibility: vis,
             is_static,
             is_override,
+            is_abstract,
+            is_open,
             name,
             name_span,
             type_params,
@@ -1931,6 +2009,24 @@ impl Parser {
                     left = Expr::Is { expr: Box::new(left), ty, span };
                     continue;
                 }
+                TokenKind::As => {
+                    let start = left.span();
+                    self.advance(); // consume 'as'
+                    // Check for force cast: as! Type
+                    if self.check(&TokenKind::Bang) {
+                        self.advance(); // consume '!'
+                        let ty = self.parse_type()?;
+                        let span = Span { start: start.start, end: self.peek_span().end };
+                        left = Expr::ForceCastExpr { expr: Box::new(left), target_type: ty, span };
+                    } else {
+                        // Safe cast: as Type?
+                        let ty = self.parse_type()?;
+                        // The type should already be nullable from parse_type consuming '?'
+                        let span = Span { start: start.start, end: self.peek_span().end };
+                        left = Expr::SafeCastExpr { expr: Box::new(left), target_type: ty, span };
+                    }
+                    continue;
+                }
                 TokenKind::In => {
                     let start = left.span();
                     self.advance();
@@ -2268,8 +2364,20 @@ impl Parser {
             TokenKind::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;
-                self.expect(&TokenKind::RParen)?;
-                Ok(expr)
+                // Check if this is a tuple: (expr, expr, ...)
+                if self.check(&TokenKind::Comma) {
+                    let mut elements = vec![expr];
+                    while self.eat(&TokenKind::Comma) {
+                        if self.check(&TokenKind::RParen) { break; }
+                        elements.push(self.parse_expr()?);
+                    }
+                    self.expect(&TokenKind::RParen)?;
+                    let end = self.peek_span();
+                    Ok(Expr::Tuple { elements, span: Span { start: span.start, end: end.end } })
+                } else {
+                    self.expect(&TokenKind::RParen)?;
+                    Ok(expr)
+                }
             }
             _ => Err(self.error(format!("Expected expression, found {:?}", self.peek()))),
         }
@@ -2319,6 +2427,31 @@ impl Parser {
 
     fn parse_type(&mut self) -> Result<TypeRef, ParseError> {
         let start = self.peek_span();
+
+        // Tuple type: (Int, String)
+        if self.check(&TokenKind::LParen) {
+            self.advance(); // consume '('
+            let first = self.parse_type()?;
+            if self.check(&TokenKind::Comma) {
+                let mut types = vec![first];
+                while self.eat(&TokenKind::Comma) {
+                    if self.check(&TokenKind::RParen) { break; }
+                    types.push(self.parse_type()?);
+                }
+                self.expect(&TokenKind::RParen)?;
+                let nullable = self.eat(&TokenKind::Question);
+                return Ok(TypeRef::Tuple {
+                    types,
+                    nullable,
+                    span: Span { start: start.start, end: self.peek_span().end },
+                });
+            } else {
+                // Just a parenthesized type — treat as the inner type
+                self.expect(&TokenKind::RParen)?;
+                return Ok(first);
+            }
+        }
+
         let (name, _) = self.expect_ident()?;
 
         // Check for qualified: Name.SubName
@@ -2595,7 +2728,10 @@ impl Expr {
             | Expr::IndexAccess { span, .. } | Expr::IfExpr { span, .. }
             | Expr::WhenExpr { span, .. } | Expr::Range { span, .. }
             | Expr::Is { span, .. } | Expr::Lambda { span, .. }
-            | Expr::IntrinsicExpr { span, .. } => *span,
+            | Expr::IntrinsicExpr { span, .. }
+            | Expr::SafeCastExpr { span, .. }
+            | Expr::ForceCastExpr { span, .. }
+            | Expr::Tuple { span, .. } => *span,
         }
     }
 }

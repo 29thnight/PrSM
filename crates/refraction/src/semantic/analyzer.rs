@@ -261,6 +261,24 @@ impl Analyzer {
                     definition_id,
                 });
             }
+            Decl::Struct { name, name_span, .. } => {
+                let ty = PrismType::Class(name.clone());
+                let definition_id = self.record_definition(
+                    name.clone(),
+                    name.clone(),
+                    HirDefinitionKind::Type,
+                    ty.clone(),
+                    false,
+                    *name_span,
+                );
+                self.scopes.define(Symbol {
+                    name: name.clone(),
+                    ty,
+                    kind: SymbolKind::Type,
+                    mutable: false,
+                    definition_id,
+                });
+            }
         }
     }
 
@@ -463,6 +481,28 @@ impl Analyzer {
             }
             Decl::TypeAlias { .. } => {
                 // Type aliases are resolved during registration; nothing to analyze.
+            }
+            Decl::Struct { name, fields, members, span, .. } => {
+                self.current_decl_name = Some(name.clone());
+                if fields.is_empty() {
+                    self.diag.warning("W005", "Struct has no fields", *span);
+                }
+                for field in fields {
+                    let ty = self.resolve_typeref(&field.ty);
+                    let _ = self.record_member_definition(
+                        &field.name,
+                        HirDefinitionKind::Field,
+                        ty,
+                        false,
+                        field.name_span,
+                    );
+                }
+                if !members.is_empty() {
+                    self.scopes.push_scope();
+                    self.analyze_members(members);
+                    self.scopes.pop_scope();
+                }
+                self.current_decl_name = None;
             }
         }
     }
@@ -1334,6 +1374,21 @@ impl Analyzer {
                 PrismType::External("lambda".into())
             }
             Expr::IntrinsicExpr { .. } => PrismType::External("var".into()),
+            Expr::SafeCastExpr { expr, target_type, .. } => {
+                self.analyze_expr(expr);
+                let ty = self.resolve_typeref(target_type);
+                PrismType::Nullable(Box::new(ty))
+            }
+            Expr::ForceCastExpr { expr, target_type, .. } => {
+                self.analyze_expr(expr);
+                self.resolve_typeref(target_type)
+            }
+            Expr::Tuple { elements, .. } => {
+                for e in elements {
+                    self.analyze_expr(e);
+                }
+                PrismType::External("tuple".into())
+            }
         }
     }
 
@@ -1425,6 +1480,11 @@ impl Analyzer {
             TypeRef::Qualified { qualifier, name, nullable, .. } => {
                 let full = format!("{}.{}", qualifier, name);
                 let base = PrismType::External(full);
+                if *nullable { base.make_nullable() } else { base }
+            }
+            TypeRef::Tuple { types, nullable, .. } => {
+                let _inner: Vec<PrismType> = types.iter().map(|t| self.resolve_typeref(t)).collect();
+                let base = PrismType::External("tuple".into());
                 if *nullable { base.make_nullable() } else { base }
             }
         }

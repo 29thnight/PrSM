@@ -47,6 +47,8 @@ pub enum Decl {
     Class {
         name: String,
         name_span: Span,
+        is_abstract: bool,
+        is_sealed: bool,
         type_params: Vec<String>,
         where_clauses: Vec<WhereClause>,
         super_class: Option<String>,
@@ -91,6 +93,14 @@ pub enum Decl {
         name: String,
         name_span: Span,
         target: TypeRef,
+        span: Span,
+    },
+    /// `struct Name(fields) { optional members }` (since Language 4)
+    Struct {
+        name: String,
+        name_span: Span,
+        fields: Vec<Param>,
+        members: Vec<Member>,
         span: Span,
     },
 }
@@ -187,6 +197,8 @@ pub enum Member {
         visibility: Visibility,
         is_static: bool,
         is_override: bool,
+        is_abstract: bool,
+        is_open: bool,
         name: String,
         name_span: Span,
         type_params: Vec<String>,
@@ -541,6 +553,23 @@ pub enum Expr {
         code: String,
         span: Span,
     },
+    /// `expr as Type?` — safe cast returning null on failure (Language 4)
+    SafeCastExpr {
+        expr: Box<Expr>,
+        target_type: TypeRef,
+        span: Span,
+    },
+    /// `expr as! Type` — force cast throwing on failure (Language 4)
+    ForceCastExpr {
+        expr: Box<Expr>,
+        target_type: TypeRef,
+        span: Span,
+    },
+    /// `(a, b, c)` — tuple expression (Language 4)
+    Tuple {
+        elements: Vec<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -573,6 +602,12 @@ pub enum TypeRef {
     Qualified {
         qualifier: String,
         name: String,
+        nullable: bool,
+        span: Span,
+    },
+    /// `(Int, String)` — tuple type (Language 4)
+    Tuple {
+        types: Vec<TypeRef>,
         nullable: bool,
         span: Span,
     },
