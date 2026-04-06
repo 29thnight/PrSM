@@ -1,4 +1,4 @@
-use crate::ast::{Block, Decl, ElseBranch, Expr, File, FuncBody, Member, Stmt, StringPart, TypeRef, UsingDecl, WaitForm, WhenBody, WhenPattern};
+use crate::ast::{Annotation, Arg, Block, Decl, ElseBranch, Expr, File, FuncBody, Member, Param, Stmt, StringPart, TypeRef, WaitForm, WhenBody, WhenBranch, WhenPattern};
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::driver;
 use crate::hir::{HirDefinition, HirDefinitionKind};
@@ -1444,7 +1444,7 @@ fn collect_explicit_type_arg_actions_json(source: &str, uri: &str, selection_spa
 }
 
 fn collect_organize_usings_action_for_source(source: &str) -> Option<OrganizeUsingsCodeAction> {
-    let file = parse_prsm_file(source);
+    let (file, has_parse_errors) = parse_prsm_file(source);
     let first_using = file.usings.first()?;
     let using_block_range = Span {
         start: first_using.span.start,
@@ -1455,7 +1455,8 @@ fn collect_organize_usings_action_for_source(source: &str) -> Option<OrganizeUsi
         return None;
     }
 
-    let new_text = organized_usings_text(&file.usings, detect_line_ending(source));
+    let prune_unused = !has_parse_errors && !file_contains_intrinsic_code(&file);
+    let new_text = organized_usings_text(&file, detect_line_ending(source), prune_unused);
     if current_using_text == new_text {
         return None;
     }
@@ -1470,7 +1471,7 @@ fn collect_explicit_type_arg_actions_for_source(
     source: &str,
     selection_span: Span,
 ) -> Vec<ExplicitTypeArgCodeAction> {
-    let file = parse_prsm_file(source);
+    let (file, _) = parse_prsm_file(source);
     let Some(members) = decl_members(&file.decl) else {
         return Vec::new();
     };
@@ -1503,18 +1504,28 @@ fn collect_explicit_type_arg_actions_for_source(
     deduped
 }
 
-fn parse_prsm_file(source: &str) -> File {
+fn parse_prsm_file(source: &str) -> (File, bool) {
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     let mut parser = Parser::new(tokens);
-    parser.parse_file()
+    let file = parser.parse_file();
+    let has_errors = !parser.errors().is_empty();
+    (file, has_errors)
 }
 
-fn organized_usings_text(usings: &[UsingDecl], line_ending: &str) -> String {
-    let mut using_paths = usings
+fn organized_usings_text(file: &File, line_ending: &str, prune_unused: bool) -> String {
+    let used_namespaces = if prune_unused {
+        used_namespaces_for_file(file)
+    } else {
+        HashSet::new()
+    };
+
+    let mut using_paths = file
+        .usings
         .iter()
         .map(|using| using.path.trim().to_string())
         .filter(|using| !using.is_empty())
+        .filter(|using| !prune_unused || should_keep_using_path(using, &used_namespaces))
         .collect::<Vec<_>>();
     using_paths.sort();
     using_paths.dedup();
@@ -1531,6 +1542,662 @@ fn organized_usings_text(usings: &[UsingDecl], line_ending: &str) -> String {
     text.push_str(line_ending);
     text.push_str(line_ending);
     text
+}
+
+fn should_keep_using_path(path: &str, used_namespaces: &HashSet<String>) -> bool {
+    !supports_unused_using_cleanup(path) || used_namespaces.contains(path)
+}
+
+fn supports_unused_using_cleanup(path: &str) -> bool {
+    matches!(
+        path,
+        "UnityEngine"
+            | "UnityEngine.Events"
+            | "UnityEngine.InputSystem"
+            | "UnityEngine.SceneManagement"
+            | "UnityEngine.UI"
+    )
+}
+
+fn used_namespaces_for_file(file: &File) -> HashSet<String> {
+    let mut used_namespaces = HashSet::new();
+    collect_used_namespaces_for_decl(&file.decl, &mut used_namespaces);
+    used_namespaces
+}
+
+fn collect_used_namespaces_for_decl(decl: &Decl, used_namespaces: &mut HashSet<String>) {
+    match decl {
+        Decl::Component {
+            base_class,
+            interfaces,
+            members,
+            ..
+        } => {
+            mark_namespace_for_known_type_name(base_class, used_namespaces);
+            for interface in interfaces {
+                mark_namespace_for_known_type_name(interface, used_namespaces);
+            }
+            for member in members {
+                collect_used_namespaces_for_member(member, used_namespaces);
+            }
+        }
+        Decl::Asset {
+            base_class,
+            members,
+            ..
+        } => {
+            mark_namespace_for_known_type_name(base_class, used_namespaces);
+            for member in members {
+                collect_used_namespaces_for_member(member, used_namespaces);
+            }
+        }
+        Decl::Class {
+            super_class,
+            interfaces,
+            members,
+            ..
+        } => {
+            if let Some(super_class) = super_class {
+                mark_namespace_for_known_type_name(super_class, used_namespaces);
+            }
+            for interface in interfaces {
+                mark_namespace_for_known_type_name(interface, used_namespaces);
+            }
+            for member in members {
+                collect_used_namespaces_for_member(member, used_namespaces);
+            }
+        }
+        Decl::DataClass { fields, .. } | Decl::Attribute { fields, .. } => {
+            collect_used_namespaces_for_params(fields, used_namespaces);
+        }
+        Decl::Enum { params, entries, .. } => {
+            for param in params {
+                collect_used_namespaces_for_type_ref(&param.ty, used_namespaces);
+            }
+            for entry in entries {
+                for arg in &entry.args {
+                    collect_used_namespaces_for_expr(arg, used_namespaces);
+                }
+            }
+        }
+    }
+}
+
+fn collect_used_namespaces_for_member(member: &Member, used_namespaces: &mut HashSet<String>) {
+    match member {
+        Member::SerializeField {
+            annotations,
+            ty,
+            init,
+            ..
+        } => {
+            collect_used_namespaces_for_annotations(annotations, used_namespaces);
+            collect_used_namespaces_for_type_ref(ty, used_namespaces);
+            if let Some(init) = init {
+                collect_used_namespaces_for_expr(init, used_namespaces);
+            }
+        }
+        Member::Field { ty, init, .. } => {
+            if let Some(ty) = ty {
+                collect_used_namespaces_for_type_ref(ty, used_namespaces);
+            }
+            if let Some(init) = init {
+                collect_used_namespaces_for_expr(init, used_namespaces);
+            }
+        }
+        Member::Require { ty, .. }
+        | Member::Optional { ty, .. }
+        | Member::Child { ty, .. }
+        | Member::Parent { ty, .. } => collect_used_namespaces_for_type_ref(ty, used_namespaces),
+        Member::Func {
+            params,
+            return_ty,
+            body,
+            ..
+        } => {
+            collect_used_namespaces_for_params(params, used_namespaces);
+            if let Some(return_ty) = return_ty {
+                collect_used_namespaces_for_type_ref(return_ty, used_namespaces);
+            }
+            match body {
+                FuncBody::Block(block) => collect_used_namespaces_for_block(block, used_namespaces),
+                FuncBody::ExprBody(expr) => collect_used_namespaces_for_expr(expr, used_namespaces),
+            }
+        }
+        Member::Coroutine { params, body, .. } | Member::Lifecycle { params, body, .. } => {
+            collect_used_namespaces_for_params(params, used_namespaces);
+            collect_used_namespaces_for_block(body, used_namespaces);
+        }
+        Member::IntrinsicFunc {
+            params,
+            return_ty,
+            ..
+        } => {
+            collect_used_namespaces_for_params(params, used_namespaces);
+            if let Some(return_ty) = return_ty {
+                collect_used_namespaces_for_type_ref(return_ty, used_namespaces);
+            }
+        }
+        Member::IntrinsicCoroutine { params, .. } => {
+            collect_used_namespaces_for_params(params, used_namespaces);
+        }
+    }
+}
+
+fn collect_used_namespaces_for_annotations(
+    annotations: &[Annotation],
+    used_namespaces: &mut HashSet<String>,
+) {
+    for annotation in annotations {
+        mark_namespace_for_known_type_name(&annotation.name, used_namespaces);
+        for arg in &annotation.args {
+            collect_used_namespaces_for_expr(arg, used_namespaces);
+        }
+    }
+}
+
+fn collect_used_namespaces_for_params(params: &[Param], used_namespaces: &mut HashSet<String>) {
+    for param in params {
+        collect_used_namespaces_for_type_ref(&param.ty, used_namespaces);
+        if let Some(default) = &param.default {
+            collect_used_namespaces_for_expr(default, used_namespaces);
+        }
+    }
+}
+
+fn collect_used_namespaces_for_block(block: &Block, used_namespaces: &mut HashSet<String>) {
+    for stmt in &block.stmts {
+        collect_used_namespaces_for_stmt(stmt, used_namespaces);
+    }
+}
+
+fn collect_used_namespaces_for_stmt(stmt: &Stmt, used_namespaces: &mut HashSet<String>) {
+    match stmt {
+        Stmt::ValDecl { ty, init, .. } => {
+            if let Some(ty) = ty {
+                collect_used_namespaces_for_type_ref(ty, used_namespaces);
+            }
+            collect_used_namespaces_for_expr(init, used_namespaces);
+        }
+        Stmt::VarDecl { ty, init, .. } => {
+            if let Some(ty) = ty {
+                collect_used_namespaces_for_type_ref(ty, used_namespaces);
+            }
+            if let Some(init) = init {
+                collect_used_namespaces_for_expr(init, used_namespaces);
+            }
+        }
+        Stmt::Assignment { target, value, .. } => {
+            collect_used_namespaces_for_expr(target, used_namespaces);
+            collect_used_namespaces_for_expr(value, used_namespaces);
+        }
+        Stmt::Expr { expr, .. } => collect_used_namespaces_for_expr(expr, used_namespaces),
+        Stmt::If {
+            cond,
+            then_block,
+            else_branch,
+            ..
+        } => {
+            collect_used_namespaces_for_expr(cond, used_namespaces);
+            collect_used_namespaces_for_block(then_block, used_namespaces);
+            if let Some(else_branch) = else_branch {
+                match else_branch {
+                    ElseBranch::ElseBlock(block) => {
+                        collect_used_namespaces_for_block(block, used_namespaces)
+                    }
+                    ElseBranch::ElseIf(stmt) => collect_used_namespaces_for_stmt(stmt, used_namespaces),
+                }
+            }
+        }
+        Stmt::When { subject, branches, .. } => {
+            if let Some(subject) = subject {
+                collect_used_namespaces_for_expr(subject, used_namespaces);
+            }
+            for branch in branches {
+                collect_used_namespaces_for_when_branch(branch, used_namespaces);
+            }
+        }
+        Stmt::For {
+            for_pattern,
+            iterable,
+            body,
+            ..
+        } => {
+            if let Some(for_pattern) = for_pattern {
+                mark_namespace_for_known_type_name(&for_pattern.type_name, used_namespaces);
+            }
+            collect_used_namespaces_for_expr(iterable, used_namespaces);
+            collect_used_namespaces_for_block(body, used_namespaces);
+        }
+        Stmt::DestructureVal { pattern, init, .. } => {
+            mark_namespace_for_known_type_name(&pattern.type_name, used_namespaces);
+            collect_used_namespaces_for_expr(init, used_namespaces);
+        }
+        Stmt::While { cond, body, .. } => {
+            collect_used_namespaces_for_expr(cond, used_namespaces);
+            collect_used_namespaces_for_block(body, used_namespaces);
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(value) = value {
+                collect_used_namespaces_for_expr(value, used_namespaces);
+            }
+        }
+        Stmt::Wait { form, .. } => match form {
+            WaitForm::Duration(expr) | WaitForm::Until(expr) | WaitForm::While(expr) => {
+                collect_used_namespaces_for_expr(expr, used_namespaces)
+            }
+            WaitForm::NextFrame | WaitForm::FixedFrame => {}
+        },
+        Stmt::Start { call, .. } => collect_used_namespaces_for_expr(call, used_namespaces),
+        Stmt::Stop { target, .. } => collect_used_namespaces_for_expr(target, used_namespaces),
+        Stmt::Listen {
+            event,
+            body,
+            ..
+        } => {
+            collect_used_namespaces_for_expr(event, used_namespaces);
+            collect_used_namespaces_for_block(body, used_namespaces);
+        }
+        Stmt::StopAll { .. }
+        | Stmt::Unlisten { .. }
+        | Stmt::IntrinsicBlock { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
+    }
+}
+
+fn collect_used_namespaces_for_when_branch(
+    branch: &WhenBranch,
+    used_namespaces: &mut HashSet<String>,
+) {
+    match &branch.pattern {
+        WhenPattern::Expression(expr) => collect_used_namespaces_for_expr(expr, used_namespaces),
+        WhenPattern::Is(ty) => collect_used_namespaces_for_type_ref(ty, used_namespaces),
+        WhenPattern::Else => {}
+        WhenPattern::Binding { path, .. } => {
+            if let Some(type_name) = path.first() {
+                mark_namespace_for_known_type_name(type_name, used_namespaces);
+            }
+        }
+    }
+
+    if let Some(guard) = &branch.guard {
+        collect_used_namespaces_for_expr(guard, used_namespaces);
+    }
+
+    match &branch.body {
+        WhenBody::Block(block) => collect_used_namespaces_for_block(block, used_namespaces),
+        WhenBody::Expr(expr) => collect_used_namespaces_for_expr(expr, used_namespaces),
+    }
+}
+
+fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<String>) {
+    match expr {
+        Expr::IntLit(_, _)
+        | Expr::FloatLit(_, _)
+        | Expr::DurationLit(_, _)
+        | Expr::StringLit(_, _)
+        | Expr::BoolLit(_, _)
+        | Expr::Null(_)
+        | Expr::Ident(_, _)
+        | Expr::This(_) => {}
+        Expr::StringInterp { parts, .. } => {
+            for part in parts {
+                if let StringPart::Expr(expr) = part {
+                    collect_used_namespaces_for_expr(expr, used_namespaces);
+                }
+            }
+        }
+        Expr::Binary { left, right, .. } | Expr::Elvis { left, right, .. } => {
+            collect_used_namespaces_for_expr(left, used_namespaces);
+            collect_used_namespaces_for_expr(right, used_namespaces);
+        }
+        Expr::Unary { operand, .. } | Expr::NonNullAssert { expr: operand, .. } => {
+            collect_used_namespaces_for_expr(operand, used_namespaces);
+        }
+        Expr::MemberAccess { receiver, name, .. } | Expr::SafeCall { receiver, name, .. } => {
+            collect_used_namespaces_for_expr(receiver, used_namespaces);
+            collect_used_namespaces_for_receiver(receiver, Some(name), used_namespaces);
+        }
+        Expr::SafeMethodCall {
+            receiver,
+            name,
+            type_args,
+            args,
+            ..
+        } => {
+            collect_used_namespaces_for_expr(receiver, used_namespaces);
+            collect_used_namespaces_for_receiver(receiver, Some(name), used_namespaces);
+            for type_arg in type_args {
+                collect_used_namespaces_for_type_ref(type_arg, used_namespaces);
+            }
+            collect_used_namespaces_for_args(args, used_namespaces);
+        }
+        Expr::Call {
+            receiver,
+            name,
+            type_args,
+            args,
+            ..
+        } => {
+            if let Some(receiver) = receiver {
+                collect_used_namespaces_for_expr(receiver, used_namespaces);
+                collect_used_namespaces_for_receiver(receiver, Some(name), used_namespaces);
+            } else {
+                collect_used_namespaces_for_free_call(name, used_namespaces);
+            }
+            for type_arg in type_args {
+                collect_used_namespaces_for_type_ref(type_arg, used_namespaces);
+            }
+            collect_used_namespaces_for_args(args, used_namespaces);
+        }
+        Expr::IndexAccess {
+            receiver,
+            index,
+            ..
+        } => {
+            collect_used_namespaces_for_expr(receiver, used_namespaces);
+            collect_used_namespaces_for_expr(index, used_namespaces);
+        }
+        Expr::IfExpr {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_used_namespaces_for_expr(cond, used_namespaces);
+            collect_used_namespaces_for_block(then_block, used_namespaces);
+            collect_used_namespaces_for_block(else_block, used_namespaces);
+        }
+        Expr::WhenExpr {
+            subject,
+            branches,
+            ..
+        } => {
+            if let Some(subject) = subject {
+                collect_used_namespaces_for_expr(subject, used_namespaces);
+            }
+            for branch in branches {
+                collect_used_namespaces_for_when_branch(branch, used_namespaces);
+            }
+        }
+        Expr::Range {
+            start,
+            end,
+            step,
+            ..
+        } => {
+            collect_used_namespaces_for_expr(start, used_namespaces);
+            collect_used_namespaces_for_expr(end, used_namespaces);
+            if let Some(step) = step {
+                collect_used_namespaces_for_expr(step, used_namespaces);
+            }
+        }
+        Expr::Is { expr, ty, .. } => {
+            collect_used_namespaces_for_expr(expr, used_namespaces);
+            collect_used_namespaces_for_type_ref(ty, used_namespaces);
+        }
+        Expr::Lambda { body, .. } => collect_used_namespaces_for_block(body, used_namespaces),
+        Expr::IntrinsicExpr { ty, .. } => collect_used_namespaces_for_type_ref(ty, used_namespaces),
+    }
+}
+
+fn collect_used_namespaces_for_args(args: &[Arg], used_namespaces: &mut HashSet<String>) {
+    for arg in args {
+        collect_used_namespaces_for_expr(&arg.value, used_namespaces);
+    }
+}
+
+fn collect_used_namespaces_for_receiver(
+    receiver: &Expr,
+    member_name: Option<&str>,
+    used_namespaces: &mut HashSet<String>,
+) {
+    let Expr::Ident(name, _) = receiver else {
+        return;
+    };
+
+    if name.eq_ignore_ascii_case("input") {
+        if member_name.is_some_and(|member_name| member_name.eq_ignore_ascii_case("action")) {
+            used_namespaces.insert("UnityEngine.InputSystem".to_string());
+        } else {
+            mark_namespace_for_known_type_name("Input", used_namespaces);
+        }
+        return;
+    }
+
+    if name.eq_ignore_ascii_case("quat") {
+        mark_namespace_for_known_type_name("Quaternion", used_namespaces);
+        return;
+    }
+
+    mark_namespace_for_known_type_name(name, used_namespaces);
+}
+
+fn collect_used_namespaces_for_free_call(name: &str, used_namespaces: &mut HashSet<String>) {
+    match name {
+        "vec2" => mark_namespace_for_known_type_name("Vector2", used_namespaces),
+        "vec3" => mark_namespace_for_known_type_name("Vector3", used_namespaces),
+        "color" => mark_namespace_for_known_type_name("Color", used_namespaces),
+        "Destroy" => mark_namespace_for_known_type_name("Object", used_namespaces),
+        "log" | "warn" | "error" | "print" => {
+            mark_namespace_for_known_type_name("Debug", used_namespaces)
+        }
+        _ => {}
+    }
+}
+
+fn collect_used_namespaces_for_type_ref(ty: &TypeRef, used_namespaces: &mut HashSet<String>) {
+    match ty {
+        TypeRef::Simple { name, .. } => mark_namespace_for_known_type_name(name, used_namespaces),
+        TypeRef::Generic {
+            name,
+            type_args,
+            ..
+        } => {
+            mark_namespace_for_known_type_name(name, used_namespaces);
+            for type_arg in type_args {
+                collect_used_namespaces_for_type_ref(type_arg, used_namespaces);
+            }
+        }
+        TypeRef::Qualified { .. } => {}
+    }
+}
+
+fn mark_namespace_for_known_type_name(type_name: &str, used_namespaces: &mut HashSet<String>) {
+    let trimmed = type_name.trim().trim_end_matches('?');
+    if trimmed.is_empty() || trimmed.contains('.') || trimmed.contains('<') {
+        return;
+    }
+
+    let display_name = display_type_name(trimmed);
+    if let Some(namespace) = lsp_support::core_type_namespace(&display_name) {
+        used_namespaces.insert(namespace.to_string());
+    }
+}
+
+fn file_contains_intrinsic_code(file: &File) -> bool {
+    decl_contains_intrinsic_code(&file.decl)
+}
+
+fn decl_contains_intrinsic_code(decl: &Decl) -> bool {
+    match decl {
+        Decl::Component { members, .. }
+        | Decl::Asset { members, .. }
+        | Decl::Class { members, .. } => members.iter().any(member_contains_intrinsic_code),
+        Decl::DataClass { .. } | Decl::Enum { .. } | Decl::Attribute { .. } => false,
+    }
+}
+
+fn member_contains_intrinsic_code(member: &Member) -> bool {
+    match member {
+        Member::IntrinsicFunc { .. } | Member::IntrinsicCoroutine { .. } => true,
+        Member::Func { body, .. } => match body {
+            FuncBody::Block(block) => block_contains_intrinsic_code(block),
+            FuncBody::ExprBody(expr) => expr_contains_intrinsic_code(expr),
+        },
+        Member::Coroutine { body, .. } | Member::Lifecycle { body, .. } => {
+            block_contains_intrinsic_code(body)
+        }
+        Member::SerializeField { init, .. } | Member::Field { init, .. } => {
+            init.as_ref().is_some_and(expr_contains_intrinsic_code)
+        }
+        Member::Require { .. }
+        | Member::Optional { .. }
+        | Member::Child { .. }
+        | Member::Parent { .. } => false,
+    }
+}
+
+fn block_contains_intrinsic_code(block: &Block) -> bool {
+    block.stmts.iter().any(stmt_contains_intrinsic_code)
+}
+
+fn stmt_contains_intrinsic_code(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::IntrinsicBlock { .. } => true,
+        Stmt::ValDecl { init, .. } => expr_contains_intrinsic_code(init),
+        Stmt::VarDecl { init, .. } => init.as_ref().is_some_and(expr_contains_intrinsic_code),
+        Stmt::Assignment { target, value, .. } => {
+            expr_contains_intrinsic_code(target) || expr_contains_intrinsic_code(value)
+        }
+        Stmt::Expr { expr, .. }
+        | Stmt::Start { call: expr, .. }
+        | Stmt::Stop { target: expr, .. } => expr_contains_intrinsic_code(expr),
+        Stmt::If {
+            cond,
+            then_block,
+            else_branch,
+            ..
+        } => {
+            expr_contains_intrinsic_code(cond)
+                || block_contains_intrinsic_code(then_block)
+                || else_branch.as_ref().is_some_and(else_branch_contains_intrinsic_code)
+        }
+        Stmt::When { subject, branches, .. } => {
+            subject.as_ref().is_some_and(expr_contains_intrinsic_code)
+                || branches.iter().any(when_branch_contains_intrinsic_code)
+        }
+        Stmt::For { iterable, body, .. } => {
+            expr_contains_intrinsic_code(iterable) || block_contains_intrinsic_code(body)
+        }
+        Stmt::DestructureVal { init, .. } => expr_contains_intrinsic_code(init),
+        Stmt::While { cond, body, .. } => {
+            expr_contains_intrinsic_code(cond) || block_contains_intrinsic_code(body)
+        }
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(expr_contains_intrinsic_code),
+        Stmt::Wait { form, .. } => match form {
+            WaitForm::Duration(expr) | WaitForm::Until(expr) | WaitForm::While(expr) => {
+                expr_contains_intrinsic_code(expr)
+            }
+            WaitForm::NextFrame | WaitForm::FixedFrame => false,
+        },
+        Stmt::Listen {
+            event,
+            body,
+            ..
+        } => expr_contains_intrinsic_code(event) || block_contains_intrinsic_code(body),
+        Stmt::StopAll { .. }
+        | Stmt::Unlisten { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => false,
+    }
+}
+
+fn else_branch_contains_intrinsic_code(else_branch: &ElseBranch) -> bool {
+    match else_branch {
+        ElseBranch::ElseBlock(block) => block_contains_intrinsic_code(block),
+        ElseBranch::ElseIf(stmt) => stmt_contains_intrinsic_code(stmt),
+    }
+}
+
+fn when_branch_contains_intrinsic_code(branch: &WhenBranch) -> bool {
+    branch.guard.as_ref().is_some_and(expr_contains_intrinsic_code)
+        || matches!(&branch.pattern, WhenPattern::Expression(expr) if expr_contains_intrinsic_code(expr))
+        || match &branch.body {
+            WhenBody::Block(block) => block_contains_intrinsic_code(block),
+            WhenBody::Expr(expr) => expr_contains_intrinsic_code(expr),
+        }
+}
+
+fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
+    match expr {
+        Expr::IntrinsicExpr { .. } => true,
+        Expr::StringInterp { parts, .. } => parts.iter().any(|part| match part {
+            StringPart::Literal(_) => false,
+            StringPart::Expr(expr) => expr_contains_intrinsic_code(expr),
+        }),
+        Expr::Binary { left, right, .. } | Expr::Elvis { left, right, .. } => {
+            expr_contains_intrinsic_code(left) || expr_contains_intrinsic_code(right)
+        }
+        Expr::Unary { operand, .. } | Expr::NonNullAssert { expr: operand, .. } => {
+            expr_contains_intrinsic_code(operand)
+        }
+        Expr::MemberAccess { receiver, .. } | Expr::SafeCall { receiver, .. } => {
+            expr_contains_intrinsic_code(receiver)
+        }
+        Expr::SafeMethodCall {
+            receiver,
+            args,
+            ..
+        }
+        | Expr::Call {
+            receiver: Some(receiver),
+            args,
+            ..
+        } => {
+            expr_contains_intrinsic_code(receiver)
+                || args.iter().any(|arg| expr_contains_intrinsic_code(&arg.value))
+        }
+        Expr::Call {
+            receiver: None,
+            args,
+            ..
+        } => args.iter().any(|arg| expr_contains_intrinsic_code(&arg.value)),
+        Expr::IndexAccess {
+            receiver,
+            index,
+            ..
+        } => expr_contains_intrinsic_code(receiver) || expr_contains_intrinsic_code(index),
+        Expr::IfExpr {
+            cond,
+            then_block,
+            else_block,
+            ..
+        } => {
+            expr_contains_intrinsic_code(cond)
+                || block_contains_intrinsic_code(then_block)
+                || block_contains_intrinsic_code(else_block)
+        }
+        Expr::WhenExpr {
+            subject,
+            branches,
+            ..
+        } => {
+            subject.as_ref().is_some_and(|subject| expr_contains_intrinsic_code(subject))
+                || branches.iter().any(when_branch_contains_intrinsic_code)
+        }
+        Expr::Range {
+            start,
+            end,
+            step,
+            ..
+        } => {
+            expr_contains_intrinsic_code(start)
+                || expr_contains_intrinsic_code(end)
+                || step.as_ref().is_some_and(|step| expr_contains_intrinsic_code(step))
+        }
+        Expr::Is { expr, .. } => expr_contains_intrinsic_code(expr),
+        Expr::Lambda { body, .. } => block_contains_intrinsic_code(body),
+        Expr::IntLit(_, _)
+        | Expr::FloatLit(_, _)
+        | Expr::DurationLit(_, _)
+        | Expr::StringLit(_, _)
+        | Expr::BoolLit(_, _)
+        | Expr::Null(_)
+        | Expr::Ident(_, _)
+        | Expr::This(_) => false,
+    }
 }
 
 fn detect_line_ending(source: &str) -> &'static str {
@@ -3193,6 +3860,64 @@ component Player : MonoBehaviour {
         )
         .expect("organize imports action should exist");
 
+        assert_eq!(action.new_text, "using UnityEngine\n\n");
+    }
+
+    #[test]
+    fn lsp_code_actions_keep_used_unity_type_namespaces() {
+        let action = collect_organize_usings_action_for_source(
+            r#"using UnityEngine.Events
+using UnityEngine.UI
+using UnityEngine
+component Player : MonoBehaviour {
+    func bind(button: Button) {
+    }
+}"#,
+        )
+        .expect("organize imports action should exist");
+
+        assert_eq!(
+            action.new_text,
+            "using UnityEngine\nusing UnityEngine.UI\n\n"
+        );
+    }
+
+    #[test]
+    fn lsp_code_actions_keep_input_system_for_input_action_sugar() {
+        let action = collect_organize_usings_action_for_source(
+            r#"using UnityEngine.InputSystem
+using UnityEngine.UI
+using UnityEngine
+component Player : MonoBehaviour {
+    update {
+        if input.action("Jump").pressed {
+        }
+    }
+}"#,
+        )
+        .expect("organize imports action should exist");
+
+        assert_eq!(
+            action.new_text,
+            "using UnityEngine\nusing UnityEngine.InputSystem\n\n"
+        );
+    }
+
+    #[test]
+    fn lsp_code_actions_skip_unused_pruning_when_intrinsic_code_is_present() {
+        let action = collect_organize_usings_action_for_source(
+            r#"using UnityEngine.UI
+using UnityEngine
+component Player : MonoBehaviour {
+    func bind() {
+        intrinsic {
+            Debug.Log("raw");
+        }
+    }
+}"#,
+        )
+        .expect("organize imports action should exist");
+
         assert_eq!(
             action.new_text,
             "using UnityEngine\nusing UnityEngine.UI\n\n"
@@ -3206,6 +3931,8 @@ component Player : MonoBehaviour {
 using UnityEngine.UI
 
 component Player : MonoBehaviour {
+    func bind(button: Button) {
+    }
 }"#,
         );
 
