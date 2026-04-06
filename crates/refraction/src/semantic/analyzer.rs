@@ -265,6 +265,9 @@ impl Analyzer {
                 self.scopes.push_scope();
                 self.analyze_members(members);
                 self.check_duplicate_lifecycles(members);
+                // SOLID analysis warnings (Language 3)
+                self.check_solid_warnings(name, members, decl);
+
                 self.scopes.pop_scope();
                 self.current_decl_name = None;
                 self.decl_ctx = DeclContext::None;
@@ -1650,6 +1653,65 @@ impl Analyzer {
         arity
     }
 
+    /// SOLID principle warnings for components (Language 3).
+    fn check_solid_warnings(&mut self, name: &str, members: &[Member], decl: &Decl) {
+        let decl_span = match decl {
+            Decl::Component { span, .. } => *span,
+            _ => return,
+        };
+
+        // W010: Too many public methods (Single Responsibility)
+        let public_method_count = members.iter().filter(|m| matches!(m,
+            Member::Func { visibility, .. } if *visibility != Visibility::Private
+        )).count() + members.iter().filter(|m| matches!(m, Member::Lifecycle { .. })).count();
+
+        if public_method_count > 8 {
+            self.diag.warning(
+                "W010",
+                format!("Component '{}' has {} public methods. Consider splitting responsibilities.", name, public_method_count),
+                decl_span,
+            );
+        }
+
+        // W011: Too many dependencies (Dependency Inversion)
+        let dep_count = members.iter().filter(|m| matches!(m,
+            Member::Require { .. } | Member::Optional { .. } | Member::Child { .. } | Member::Parent { .. }
+        )).count();
+
+        if dep_count > 6 {
+            self.diag.warning(
+                "W011",
+                format!("Component '{}' has {} dependency fields. Consider reducing dependencies.", name, dep_count),
+                decl_span,
+            );
+        }
+
+        // W012: Method too long
+        for m in members {
+            match m {
+                Member::Func { name: fn_name, body: FuncBody::Block(block), .. } => {
+                    if block.stmts.len() > 50 {
+                        self.diag.warning(
+                            "W012",
+                            format!("Method '{}' has {} statements. Consider extracting helper methods.", fn_name, block.stmts.len()),
+                            block.span,
+                        );
+                    }
+                }
+                Member::Lifecycle { kind, body, .. } => {
+                    if body.stmts.len() > 50 {
+                        self.diag.warning(
+                            "W012",
+                            format!("Lifecycle '{:?}' has {} statements. Consider extracting helper methods.", kind, body.stmts.len()),
+                            body.span,
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn record_listen_site(
         &mut self,
         lifetime: ListenLifetime,
@@ -1878,6 +1940,22 @@ mod tests {
         // the analyzer to track that. Let's check...
         // Actually x will be Int from the literal. !! on Int should warn.
         assert!(diags.iter().any(|d| d.code == "W001"));
+    }
+
+    // === W010: SOLID — too many public methods ===
+
+    #[test]
+    fn test_solid_too_many_methods() {
+        let src = "component Bloated : MonoBehaviour {\n  func a() {}\n  func b() {}\n  func c() {}\n  func d() {}\n  func e() {}\n  func f() {}\n  func g() {}\n  func h() {}\n  func i() {}\n}";
+        let diags = warnings(src);
+        assert!(diags.iter().any(|d| d.code == "W010"), "expected W010 for too many public methods, got: {:?}", diags);
+    }
+
+    #[test]
+    fn test_solid_few_methods_no_warning() {
+        let src = "component Small : MonoBehaviour {\n  func a() {}\n  func b() {}\n}";
+        let diags = warnings(src);
+        assert!(!diags.iter().any(|d| d.code == "W010"), "should NOT warn with only 2 methods");
     }
 
     // === Full sample analysis ===

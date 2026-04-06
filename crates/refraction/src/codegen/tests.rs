@@ -621,4 +621,14 @@ component PlayerHealth : MonoBehaviour {
         assert!(output.contains("[SerializeField]"), "should still emit user serialize fields");
         assert!(output.contains("private float _volume = 1.0f;"), "should still emit user field");
     }
+
+    // ── v3 optimizer: single-binding destructure inline ───────────
+
+    #[test]
+    fn test_single_binding_destructure_inlined() {
+        let src = "component Foo : MonoBehaviour {\n  func f() {\n    val Stats(hp) = getStats()\n  }\n}";
+        let output = compile(src);
+        assert!(output.contains("getStats().hp"), "single binding should inline without temp variable");
+        assert!(!output.contains("_prsm_d"), "should NOT have temp variable for single binding");
+    }
 }

@@ -2971,11 +2971,17 @@ fn lower_destructure_val(
     source_span: Option<Span>,
 ) -> CsStmt {
     let init_str = lower_expr(init);
+
+    // Optimization: single binding → inline without temp variable.
+    if pattern.bindings.len() == 1 {
+        let name = &pattern.bindings[0];
+        return CsStmt::Raw(format!("var {} = {}.{};", name, init_str, name), source_span);
+    }
+
+    // Multiple bindings: use temp variable to avoid evaluating init multiple times.
     let tmp = "_prsm_d";
-    // Emit as a Raw block: tmp declaration + individual bindings.
     let mut lines = vec![format!("var {} = {};", tmp, init_str)];
     for name in &pattern.bindings {
-        // Prefer field-name access (data class public fields are lowered with their names).
         lines.push(format!("var {} = {}.{};", name, tmp, name));
     }
     CsStmt::Raw(lines.join("\n"), source_span)
