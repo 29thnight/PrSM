@@ -701,6 +701,17 @@
 .prsm-builtin { color: #cf8e6d; }
 
 
+/* Links in article */
+.brand-docs__article a {
+  color: #56a8f5;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.brand-docs__article a:hover {
+  color: #7cbcf8;
+}
+
 /* Heading section dividers */
 .brand-docs__heading-rule {
   border: none;
