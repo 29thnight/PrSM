@@ -290,5 +290,97 @@ namespace Prism.Editor
             string indent = rawLine.Substring(0, rawLine.Length - trimmed.Length);
             return indent + "include = [" + string.Join(", ", patterns.Select(pattern => "\"" + pattern + "\"")) + "]";
         }
+
+        /// <summary>
+        /// Build a complete .prsmproject TOML string from structured settings.
+        /// </summary>
+        internal static string BuildTomlContent(
+            string name, string prsmVersion,
+            string langVersion, string[] features,
+            string compilerPath, string outputDir,
+            string[] includes, string[] excludes,
+            bool autoCompile, bool generateMeta, bool pascalCase,
+            bool solidWarnings, int maxMethods, int maxDeps, int maxLength)
+        {
+            var sb = new System.Text.StringBuilder();
+
+            sb.AppendLine("[project]");
+            sb.AppendLine($"name = \"{name}\"");
+            sb.AppendLine($"prsm_version = \"{prsmVersion}\"");
+            sb.AppendLine();
+
+            sb.AppendLine("[language]");
+            sb.AppendLine($"version = \"{langVersion}\"");
+            if (features != null && features.Length > 0)
+            {
+                sb.AppendLine("features = [" + string.Join(", ", features.Select(f => $"\"{f}\"")) + "]");
+            }
+            else
+            {
+                sb.AppendLine("features = []");
+            }
+            sb.AppendLine();
+
+            sb.AppendLine("[compiler]");
+            sb.AppendLine($"prism_path = \"{compilerPath}\"");
+            sb.AppendLine($"output_dir = \"{outputDir}\"");
+            sb.AppendLine();
+
+            sb.AppendLine("[source]");
+            sb.AppendLine("include = [" + string.Join(", ", (includes ?? new[] { "Assets/**/*.prsm" }).Select(s => $"\"{s}\"")) + "]");
+            sb.AppendLine("exclude = [" + string.Join(", ", (excludes ?? Array.Empty<string>()).Select(s => $"\"{s}\"")) + "]");
+            sb.AppendLine();
+
+            sb.AppendLine("[features]");
+            sb.AppendLine($"auto_compile_on_save = {(autoCompile ? "true" : "false")}");
+            sb.AppendLine($"generate_meta_files = {(generateMeta ? "true" : "false")}");
+            sb.AppendLine($"pascal_case_methods = {(pascalCase ? "true" : "false")}");
+            sb.AppendLine();
+
+            sb.AppendLine("[analysis]");
+            sb.AppendLine($"solid_warnings = {(solidWarnings ? "true" : "false")}");
+            sb.AppendLine($"max_public_methods = {maxMethods}");
+            sb.AppendLine($"max_dependencies = {maxDeps}");
+            sb.AppendLine($"max_method_length = {maxLength}");
+
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Parse a TOML boolean value. Returns defaultValue if key not found.
+        /// </summary>
+        internal static bool ParseTomlBool(string content, string key, string section, bool defaultValue)
+        {
+            string value = ParseTomlValue(content, key, section);
+            if (value == null) return defaultValue;
+            return value.Trim().Equals("true", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Parse a TOML integer value. Returns defaultValue if key not found.
+        /// </summary>
+        internal static int ParseTomlInt(string content, string key, string section, int defaultValue)
+        {
+            string value = ParseTomlValue(content, key, section);
+            if (value == null) return defaultValue;
+            return int.TryParse(value.Trim(), out int result) ? result : defaultValue;
+        }
+
+        /// <summary>
+        /// Parse a TOML array of strings. Returns empty array if key not found.
+        /// </summary>
+        internal static string[] ParseTomlStringArray(string content, string key, string section)
+        {
+            string raw = ParseTomlValue(content, key, section);
+            if (string.IsNullOrWhiteSpace(raw)) return Array.Empty<string>();
+            // Strip outer brackets if present
+            raw = raw.Trim();
+            if (raw.StartsWith("[")) raw = raw.Substring(1);
+            if (raw.EndsWith("]")) raw = raw.Substring(0, raw.Length - 1);
+            return raw.Split(',')
+                .Select(s => s.Trim().Trim('"'))
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToArray();
+        }
     }
 }
