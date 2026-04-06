@@ -740,6 +740,9 @@ fn collect_stmt_type_references(
             collect_expr_type_references(path, container_name, event, references);
             collect_block_type_references(path, container_name, body, references);
         }
+        Stmt::DestructureVal { init, .. } => {
+            collect_expr_type_references(path, container_name, init, references);
+        }
         Stmt::StopAll { .. } | Stmt::IntrinsicBlock { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Unlisten { .. } => {}
     }
 }
@@ -765,6 +768,7 @@ fn collect_when_branch_type_references(
     match &branch.pattern {
         WhenPattern::Expression(expr) => collect_expr_type_references(path, container_name, expr, references),
         WhenPattern::Is(ty) => collect_type_references(path, container_name, ty, references),
+        WhenPattern::Binding { .. } => {} // no type references to collect from binding names
         WhenPattern::Else => {}
     }
 

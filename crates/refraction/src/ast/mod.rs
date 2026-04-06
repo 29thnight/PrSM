@@ -220,8 +220,16 @@ pub enum Stmt {
     For {
         var_name: String,
         name_span: Span,
+        /// v2: optional destructuring pattern — `for EnemySpawn(x, y) in ...`
+        for_pattern: Option<DestructurePattern>,
         iterable: Expr,
         body: Block,
+        span: Span,
+    },
+    /// v2: `val PlayerStats(hp, speed) = stats` — data-class / enum-payload destructuring
+    DestructureVal {
+        pattern: DestructurePattern,
+        init: Expr,
         span: Span,
     },
     While {
@@ -282,6 +290,8 @@ pub enum ElseBranch {
 #[derive(Debug, Clone)]
 pub struct WhenBranch {
     pub pattern: WhenPattern,
+    /// v2: optional guard condition — `EnemyState.Stunned(d) if d > 0.0 => …`
+    pub guard: Option<Expr>,
     pub body: WhenBody,
     pub span: Span,
 }
@@ -291,6 +301,24 @@ pub enum WhenPattern {
     Expression(Expr),
     Is(TypeRef),
     Else,
+    /// v2: `EnemyState.Chase(target)` — member access path + optional binding names
+    Binding {
+        /// Fully-qualified enum path, e.g. ["EnemyState", "Chase"]
+        path: Vec<String>,
+        /// Bound variable names from payload, e.g. ["target"]
+        bindings: Vec<String>,
+        span: Span,
+    },
+}
+
+/// v2: destructuring pattern for val/for statements.
+#[derive(Debug, Clone)]
+pub struct DestructurePattern {
+    /// Type name, e.g. "PlayerStats"
+    pub type_name: String,
+    /// Bound variable names
+    pub bindings: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

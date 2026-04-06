@@ -8,6 +8,13 @@ pub struct ParseError {
     pub span: Span,
 }
 
+/// Intermediate result returned by `try_parse_binding_pattern`.
+struct BindingPatternResult {
+    path: Vec<String>,
+    bindings: Vec<String>,
+    span: Span,
+}
+
 /// Recursive descent parser for PrSM.
 pub struct Parser {
     tokens: Vec<Token>,
@@ -904,6 +911,25 @@ impl Parser {
     fn parse_val_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek_span();
         self.advance(); // consume 'val'
+
+        // v2: `val TypeName(a, b) = expr` — destructuring declaration.
+        // Attempt speculative binding-pattern parse BEFORE consuming the name.
+        if let Some(bp) = self.try_parse_binding_pattern()? {
+            self.expect(&TokenKind::Eq)?;
+            let init = self.parse_expr()?;
+            self.expect_newline_or_eof();
+            let pattern = DestructurePattern {
+                type_name: bp.path.join("."),
+                bindings: bp.bindings,
+                span: bp.span,
+            };
+            return Ok(Stmt::DestructureVal {
+                pattern,
+                init,
+                span: Span { start: start.start, end: self.peek_span().end },
+            });
+        }
+
         let (name, name_span) = self.expect_ident()?;
         let ty = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type()?)
@@ -1011,14 +1037,32 @@ impl Parser {
     fn parse_when_branch(&mut self) -> Result<WhenBranch, ParseError> {
         let start = self.peek_span();
 
+        // v2: detect binding pattern `TypeName.Variant(bindings)` or `TypeName(bindings)`.
+        // Heuristic: Identifier followed by '.' or '(' that is NOT a general call expression used
+        // as a condition.  We try a speculative parse: if next token is Identifier and after
+        // skipping any '.Identifier' chain we find '(' followed by identifier list followed by ')',
+        // treat it as a Binding pattern.  Otherwise fall through to the Expression path.
         let pattern = if self.eat(&TokenKind::Else) {
             WhenPattern::Else
         } else if self.eat(&TokenKind::Is) {
             let ty = self.parse_type()?;
             WhenPattern::Is(ty)
+        } else if let Some(bp) = self.try_parse_binding_pattern()? {
+            WhenPattern::Binding {
+                path: bp.path,
+                bindings: bp.bindings,
+                span: bp.span,
+            }
         } else {
             let expr = self.parse_expr()?;
             WhenPattern::Expression(expr)
+        };
+
+        // v2: optional guard `if <cond>`
+        let guard = if self.eat(&TokenKind::If) {
+            Some(self.parse_expr()?)
+        } else {
+            None
         };
 
         self.expect(&TokenKind::FatArrow)?;
@@ -1033,15 +1077,104 @@ impl Parser {
 
         Ok(WhenBranch {
             pattern,
+            guard,
             body,
             span: Span { start: start.start, end: self.peek_span().end },
         })
     }
 
+    /// Speculatively parse a v2 binding pattern: `TypeName.Variant(a, b)` or `TypeName(a, b)`.
+    /// Returns `None` WITHOUT consuming tokens if it does not match.
+    fn try_parse_binding_pattern(&mut self) -> Result<Option<BindingPatternResult>, ParseError> {
+        // We need at least: Identifier ('.' Identifier)* '(' (Identifier (',' Identifier)*)? ')'
+        // Use a saved position to backtrack if the pattern doesn't match.
+        let saved = self.pos;
+
+        let mut path = Vec::new();
+        // First segment must be Identifier
+        if let TokenKind::Identifier(name) = self.peek().clone() {
+            path.push(name);
+            self.advance();
+        } else {
+            self.pos = saved;
+            return Ok(None);
+        }
+        let pat_start = self.tokens[saved].span;
+
+        // Additional '.Identifier' segments
+        while self.check(&TokenKind::Dot) {
+            let dot_pos = self.pos;
+            self.advance(); // consume '.'
+            if let TokenKind::Identifier(seg) = self.peek().clone() {
+                path.push(seg);
+                self.advance();
+            } else {
+                // Not a valid continuation — backtrack
+                self.pos = dot_pos;
+                break;
+            }
+        }
+
+        // Must be followed by '('
+        if !self.check(&TokenKind::LParen) {
+            self.pos = saved;
+            return Ok(None);
+        }
+        self.advance(); // consume '('
+
+        // Parse comma-separated identifier bindings
+        let mut bindings = Vec::new();
+        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+            self.skip_newlines();
+            if let TokenKind::Identifier(b) = self.peek().clone() {
+                bindings.push(b);
+                self.advance();
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            } else {
+                // Not all pure identifiers — not a binding pattern, backtrack
+                self.pos = saved;
+                return Ok(None);
+            }
+        }
+
+        if !self.eat(&TokenKind::RParen) {
+            self.pos = saved;
+            return Ok(None);
+        }
+
+        // path must have at least 1 segment; bindings may be empty (unit payload)
+        if path.is_empty() {
+            self.pos = saved;
+            return Ok(None);
+        }
+
+        let span = Span { start: pat_start.start, end: self.peek_span().end };
+        Ok(Some(BindingPatternResult { path, bindings, span }))
+    }
+
     fn parse_for_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek_span();
         self.advance(); // consume 'for'
-        let (var_name, name_span) = self.expect_ident()?;
+
+        // v2: optional destructuring pattern `for TypeName(a, b) in ...`
+        // Try speculative binding pattern parse first.
+        let for_pat = self.try_parse_binding_pattern()?;
+        let (var_name, name_span, for_pattern) = if let Some(bp) = for_pat {
+            // For a binding pattern `TypeName(a, b)`, use the first path segment as the loop
+            // iteration variable name with a generated name; the pattern carries the bindings.
+            let first = bp.path.first().cloned().unwrap_or_else(|| "_".to_string());
+            (first, bp.span, Some(DestructurePattern {
+                type_name: bp.path.join("."),
+                bindings: bp.bindings,
+                span: bp.span,
+            }))
+        } else {
+            let (n, s) = self.expect_ident()?;
+            (n, s, None)
+        };
+
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expr()?;
         self.skip_newlines();
@@ -1049,6 +1182,7 @@ impl Parser {
         Ok(Stmt::For {
             var_name,
             name_span,
+            for_pattern,
             iterable,
             body,
             span: Span { start: start.start, end: self.peek_span().end },

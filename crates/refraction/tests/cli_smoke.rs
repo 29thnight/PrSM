@@ -2716,4 +2716,114 @@ exclude = []
     let _ = fs::remove_dir_all(root);
 }
 
+// ── Item #6: v2 pattern matching & destructuring ──────────────────────────────
+
+#[test]
+fn v2_when_enum_payload_binding_pattern() {
+    let root = unique_temp_dir("prism_when_binding_smoke");
+    write_file(
+        &root.join("Enemy.prsm"),
+        r#"component Enemy : MonoBehaviour {
+    val state: EnemyState = EnemyState.Idle
+
+    func tick(): Unit {
+        when state {
+            EnemyState.Chase(target) => Debug.Log(target)
+            EnemyState.Idle => Debug.Log("idle")
+            else => {}
+        }
+    }
+}
+"#,
+    );
+
+    let output = Command::new(prism())
+        .args(["compile", root.join("Enemy.prsm").to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["errors"], 0, "expected 0 errors; got {}", json["errors"]);
+
+    let cs = fs::read_to_string(root.join("Enemy.cs")).unwrap();
+    // Binding pattern must emit a typed case variable
+    assert!(cs.contains("case EnemyState.Chase"), "missing binding case:\n{cs}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn v2_when_guard_condition() {
+    let root = unique_temp_dir("prism_when_guard_smoke");
+    write_file(
+        &root.join("Guard.prsm"),
+        r#"component Guard : MonoBehaviour {
+    val hp: Int = 100
+
+    func check(): Unit {
+        when {
+            hp > 50 if hp < 100 => Debug.Log("injured")
+            hp > 0 => Debug.Log("alive")
+            else => Debug.Log("dead")
+        }
+    }
+}
+"#,
+    );
+
+    let output = Command::new(prism())
+        .args(["compile", root.join("Guard.prsm").to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["errors"], 0, "expected 0 errors; got {}", json["errors"]);
+
+    let cs = fs::read_to_string(root.join("Guard.cs")).unwrap();
+    // Guard is folded into the condition with &&
+    assert!(cs.contains("&&"), "missing && guard:\n{cs}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn v2_val_destructure_binding() {
+    let root = unique_temp_dir("prism_val_destructure_smoke");
+    write_file(
+        &root.join("Destruct.prsm"),
+        r#"component Destruct : MonoBehaviour {
+    func run(): Unit {
+        val stats = PlayerStats(10, 5)
+        val PlayerStats(hp, speed) = stats
+        Debug.Log(hp)
+    }
+}
+"#,
+    );
+
+    let output = Command::new(prism())
+        .args(["compile", root.join("Destruct.prsm").to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["errors"], 0, "expected 0 errors; got {}", json["errors"]);
+
+    let cs = fs::read_to_string(root.join("Destruct.cs")).unwrap();
+    // Destructure must declare individual binding vars
+    assert!(cs.contains("var hp"), "missing 'var hp':\n{cs}");
+    assert!(cs.contains("var speed"), "missing 'var speed':\n{cs}");
+
+    let _ = fs::remove_dir_all(root);
+}
+
 

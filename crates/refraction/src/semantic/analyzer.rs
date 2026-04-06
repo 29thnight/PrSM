@@ -820,7 +820,7 @@ impl Analyzer {
                 name_span,
                 iterable,
                 body,
-                span: _,
+                ..
             } => {
                 let iter_ty = self.analyze_expr(iterable);
                 self.scopes.push_scope();
@@ -844,6 +844,9 @@ impl Analyzer {
                 self.analyze_block(body);
                 self.loop_depth -= 1;
                 self.scopes.pop_scope();
+            }
+            Stmt::DestructureVal { init, .. } => {
+                self.analyze_expr(init);
             }
             Stmt::While { cond, body, .. } => {
                 self.analyze_expr(cond);
