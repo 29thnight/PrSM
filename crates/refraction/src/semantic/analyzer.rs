@@ -616,7 +616,7 @@ impl Analyzer {
 
     fn analyze_member_body(&mut self, member: &Member) {
         match member {
-            Member::Func { name, params, body, .. } => {
+            Member::Func { name, params, body, return_ty, .. } => {
                 self.body_ctx = BodyContext::Function;
                 self.current_member_name = Some(name.clone());
                 self.scopes.push_scope();
@@ -636,7 +636,10 @@ impl Analyzer {
                 }
                 match body {
                     FuncBody::Block(block) => self.analyze_block(block),
-                    FuncBody::ExprBody(expr) => { self.analyze_expr(expr); }
+                    FuncBody::ExprBody(expr) => {
+                        let expected_return_ty = return_ty.as_ref().map(|ty| self.resolve_typeref(ty));
+                        self.analyze_expr_with_expected(expr, expected_return_ty.as_ref());
+                    }
                 }
                 self.scopes.pop_scope();
                 self.current_member_name = None;
@@ -707,9 +710,9 @@ impl Analyzer {
                 init,
                 span,
             } => {
-                let init_ty = self.analyze_expr(init);
                 let declared_ty = if let Some(t) = ty {
                     let dt = self.resolve_typeref(t);
+                    let init_ty = self.analyze_expr_with_expected(init, Some(&dt));
                     // Check type compatibility
                     if !init_ty.is_assignable_to(&dt) && !init_ty.is_error() {
                         self.diag.error("E020",
@@ -718,7 +721,7 @@ impl Analyzer {
                     }
                     dt
                 } else {
-                    init_ty
+                    self.analyze_expr(init)
                 };
                 let definition_id = self.record_nested_definition(
                     name,
@@ -742,7 +745,7 @@ impl Analyzer {
                 let declared_ty = if let Some(t) = ty {
                     let dt = self.resolve_typeref(t);
                     if let Some(init_expr) = init {
-                        let init_ty = self.analyze_expr(init_expr);
+                        let init_ty = self.analyze_expr_with_expected(init_expr, Some(&dt));
                         if !init_ty.is_assignable_to(&dt) && !init_ty.is_error() {
                             self.diag.error("E020",
                                 format!("Type mismatch. Expected '{}', found '{}'", dt.display_name(), init_ty.display_name()),
@@ -1163,6 +1166,30 @@ impl Analyzer {
         }
     }
 
+    fn analyze_expr_with_expected(
+        &mut self,
+        expr: &Expr,
+        expected_type: Option<&PrismType>,
+    ) -> PrismType {
+        let analyzed = self.analyze_expr(expr);
+
+        if analyzed.is_error() {
+            return analyzed;
+        }
+
+        let Some(expected_type) = expected_type else {
+            return analyzed;
+        };
+
+        if let Expr::Call { receiver, name, type_args, .. } = expr {
+            if type_args.is_empty() && supports_expected_type_inference_call(receiver.as_deref(), name) {
+                return expected_type.non_null().clone();
+            }
+        }
+
+        analyzed
+    }
+
     // ── Validation helpers ────────────────────────────────────────
 
     fn check_duplicate_lifecycles(&mut self, members: &[Member]) {
@@ -1403,6 +1430,16 @@ impl Analyzer {
             file_path,
             span,
         });
+    }
+}
+
+fn supports_expected_type_inference_call(receiver: Option<&Expr>, name: &str) -> bool {
+    match receiver {
+        None => matches!(name, "get" | "require" | "find" | "child" | "parent" | "loadJson"),
+        Some(_) => matches!(
+            name,
+            "getComponent" | "getComponentInChildren" | "getComponentInParent" | "findFirstObjectByType"
+        ),
     }
 }
 

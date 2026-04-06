@@ -2975,4 +2975,108 @@ fn v2_new_input_system_feature_gate_error() {
     let _ = fs::remove_dir_all(root);
 }
 
+// ── Item #8: v2 generic call type inference ─────────────────────────────────
+
+#[test]
+fn v2_generic_inference_from_variable_type() {
+    let root = unique_temp_dir("prism_generic_infer_val_smoke");
+    let source = root.join("InferVal.prsm");
+    write_file(
+        &source,
+        r#"component InferVal : MonoBehaviour {
+    start {
+        val health: Health? = child()
+    }
+}
+"#,
+    );
+
+    let output = Command::new(prism())
+        .args(["compile", source.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["errors"], 0, "expected 0 errors; got {}", json["errors"]);
+
+    let cs = fs::read_to_string(root.join("InferVal.cs")).unwrap();
+    assert!(
+        cs.contains("GetComponentInChildren<Health>()"),
+        "expected nullable lhs inference to strip ? and infer Health:\n{cs}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn v2_generic_inference_from_return_type() {
+    let root = unique_temp_dir("prism_generic_infer_return_smoke");
+    let source = root.join("InferReturn.prsm");
+    write_file(
+        &source,
+        r#"component InferReturn : MonoBehaviour {
+    func getRb(): Rigidbody = get()
+}
+"#,
+    );
+
+    let output = Command::new(prism())
+        .args(["compile", source.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["errors"], 0, "expected 0 errors; got {}", json["errors"]);
+
+    let cs = fs::read_to_string(root.join("InferReturn.cs")).unwrap();
+    assert!(
+        cs.contains("return GetComponent<Rigidbody>();"),
+        "expected return type inference to emit GetComponent<Rigidbody>:\n{cs}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn v2_generic_inference_from_argument_type() {
+    let root = unique_temp_dir("prism_generic_infer_arg_smoke");
+    let source = root.join("InferArg.prsm");
+    write_file(
+        &source,
+        r#"component InferArg : MonoBehaviour {
+    func useRb(rb: Rigidbody): Unit {}
+
+    start {
+        useRb(get())
+    }
+}
+"#,
+    );
+
+    let output = Command::new(prism())
+        .args(["compile", source.to_str().unwrap(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "compile failed:\n{}", String::from_utf8_lossy(&output.stderr));
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["errors"], 0, "expected 0 errors; got {}", json["errors"]);
+
+    let cs = fs::read_to_string(root.join("InferArg.cs")).unwrap();
+    assert!(
+        cs.contains("useRb(GetComponent<Rigidbody>())"),
+        "expected argument type inference to emit GetComponent<Rigidbody> inside call:\n{cs}"
+    );
+
+    let _ = fs::remove_dir_all(root);
+}
+
 

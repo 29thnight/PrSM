@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::lexer::token::Span;
 use super::csharp_ir::*;
+use std::collections::HashMap;
 
 /// Lower a PrSM file to C# IR.
 pub fn lower_file(file: &File) -> CsFile {
@@ -30,6 +31,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
     match decl {
         Decl::Component { name, base_class, interfaces, members, .. } => {
             let mut cs_members = Vec::new();
+            let callable_signatures = collect_callable_signatures(members);
             let (require_fields, optional_fields, child_fields, parent_fields, user_awake) =
                 collect_component_init(members);
 
@@ -72,22 +74,22 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
             {
                 cs_members.push(lower_awake(
                     name, &require_fields, &optional_fields,
-                    &child_fields, &parent_fields, user_awake,
+                    &child_fields, &parent_fields, user_awake, &callable_signatures,
                 ));
             }
 
             // Lower remaining members — use ComponentCtx to collect listen subscriptions.
-            let mut listen_ctx = ComponentCtx::new();
+            let mut listen_ctx = ComponentCtx::new(callable_signatures.clone());
             for m in members {
                 match m {
                     Member::Lifecycle { kind, params, body, .. } if *kind != LifecycleKind::Awake => {
                         cs_members.push(lower_lifecycle_with_ctx(*kind, params, body, &mut listen_ctx));
                     }
                     Member::Func { .. } => {
-                        cs_members.push(lower_func_member(m));
+                        cs_members.push(lower_func_member(m, &callable_signatures));
                     }
                     Member::Coroutine { name: cname, params, body, .. } => {
-                        cs_members.push(lower_coroutine(cname, params, body));
+                        cs_members.push(lower_coroutine(cname, params, body, &callable_signatures));
                     }
                     Member::IntrinsicFunc { visibility, name: fname, params, return_ty, code, span, .. } => {
                         cs_members.push(lower_intrinsic_func(*visibility, fname, params, return_ty.as_ref(), code, *span));
@@ -153,13 +155,14 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
         }
         Decl::Asset { name, base_class, members, .. } => {
             let mut cs_members = Vec::new();
+            let callable_signatures = collect_callable_signatures(members);
             for m in members {
                 match m {
                     Member::SerializeField { .. } | Member::Field { .. } => {
                         cs_members.extend(lower_field_member(m));
                     }
                     Member::Func { .. } => {
-                        cs_members.push(lower_func_member(m));
+                        cs_members.push(lower_func_member(m, &callable_signatures));
                     }
                     Member::IntrinsicFunc { visibility, name: fname, params, return_ty, code, span, .. } => {
                         cs_members.push(lower_intrinsic_func(*visibility, fname, params, return_ty.as_ref(), code, *span));
@@ -187,10 +190,11 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
         }
         Decl::Class { name, super_class, interfaces, members, .. } => {
             let mut cs_members = Vec::new();
+            let callable_signatures = collect_callable_signatures(members);
             for m in members {
                 match m {
                     Member::Field { .. } => cs_members.extend(lower_field_member(m)),
-                    Member::Func { .. } => cs_members.push(lower_func_member(m)),
+                    Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
                     Member::IntrinsicFunc { visibility, name: fname, params, return_ty, code, span, .. } => {
                         cs_members.push(lower_intrinsic_func(*visibility, fname, params, return_ty.as_ref(), code, *span));
                     }
@@ -759,6 +763,55 @@ fn collect_component_init(members: &[Member]) -> (Vec<FieldInfo>, Vec<FieldInfo>
     (require, optional, child, parent, user_awake)
 }
 
+#[derive(Debug, Clone)]
+struct CallableSignature {
+    params: Vec<TypeRef>,
+}
+
+fn collect_callable_signatures(members: &[Member]) -> HashMap<String, CallableSignature> {
+    let mut signatures = HashMap::new();
+
+    for member in members {
+        match member {
+            Member::Func { name, params, .. } => {
+                signatures.insert(
+                    name.clone(),
+                    CallableSignature {
+                        params: params.iter().map(|param| param.ty.clone()).collect(),
+                    },
+                );
+            }
+            Member::Coroutine { name, params, .. } => {
+                signatures.insert(
+                    name.clone(),
+                    CallableSignature {
+                        params: params.iter().map(|param| param.ty.clone()).collect(),
+                    },
+                );
+            }
+            Member::IntrinsicFunc { name, params, .. } => {
+                signatures.insert(
+                    name.clone(),
+                    CallableSignature {
+                        params: params.iter().map(|param| param.ty.clone()).collect(),
+                    },
+                );
+            }
+            Member::IntrinsicCoroutine { name, params, .. } => {
+                signatures.insert(
+                    name.clone(),
+                    CallableSignature {
+                        params: params.iter().map(|param| param.ty.clone()).collect(),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+
+    signatures
+}
+
 fn lower_awake(
     component_name: &str,
     require: &[FieldInfo],
@@ -766,6 +819,7 @@ fn lower_awake(
     child: &[FieldInfo],
     parent: &[FieldInfo],
     user_awake: Option<&Block>,
+    callable_signatures: &HashMap<String, CallableSignature>,
 ) -> CsMember {
     let mut body = Vec::new();
 
@@ -854,7 +908,7 @@ fn lower_awake(
     // User awake block
     if let Some(awake_block) = user_awake {
         for stmt in &awake_block.stmts {
-            body.push(lower_stmt(stmt));
+            body.push(lower_stmt_with_context(stmt, Some(callable_signatures), None));
         }
     }
 
@@ -903,7 +957,7 @@ fn lower_lifecycle_with_ctx(
         name: p.name.clone(),
         default: None,
     }).collect();
-    let body = lower_stmts_with_ctx(&body_block.stmts, ctx);
+    let body = lower_stmts_with_ctx(&body_block.stmts, ctx, None);
     CsMember::Method {
         attributes: vec![],
         modifiers: "private".into(),
@@ -936,7 +990,7 @@ fn lifecycle_method_name(kind: LifecycleKind) -> &'static str {
 
 // ── Function lowering ───────────────────────────────────────────
 
-fn lower_func_member(m: &Member) -> CsMember {
+fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableSignature>) -> CsMember {
     match m {
         Member::Func { visibility, is_override, name, params, return_ty, body, .. } => {
             let ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
@@ -951,10 +1005,16 @@ fn lower_func_member(m: &Member) -> CsMember {
 
             let cs_body = match body {
                 FuncBody::Block(block) => {
-                    block.stmts.iter().map(|s| lower_stmt(s)).collect()
+                    block.stmts
+                        .iter()
+                        .map(|stmt| lower_stmt_with_context(stmt, Some(callable_signatures), return_ty.as_ref()))
+                        .collect()
                 }
                 FuncBody::ExprBody(expr) => {
-                    vec![CsStmt::Return(Some(lower_expr(expr)), Some(expr_span(expr)))]
+                    vec![CsStmt::Return(
+                        Some(lower_expr_with_expected_type(expr, return_ty.as_ref(), Some(callable_signatures))),
+                        Some(expr_span(expr)),
+                    )]
                 }
             };
 
@@ -1024,12 +1084,21 @@ fn lower_intrinsic_coroutine(name: &str, params: &[Param], code: &str, span: Spa
 
 // ── Coroutine lowering ──────────────────────────────────────────
 
-fn lower_coroutine(name: &str, params: &[Param], body: &Block) -> CsMember {
+fn lower_coroutine(
+    name: &str,
+    params: &[Param],
+    body: &Block,
+    callable_signatures: &HashMap<String, CallableSignature>,
+) -> CsMember {
     let ps: Vec<CsParam> = params.iter().map(|p| CsParam {
         ty: lower_type(&p.ty), name: p.name.clone(), default: None,
     }).collect();
 
-    let cs_body: Vec<CsStmt> = body.stmts.iter().map(|s| lower_stmt(s)).collect();
+    let cs_body: Vec<CsStmt> = body
+        .stmts
+        .iter()
+        .map(|stmt| lower_stmt_with_context(stmt, Some(callable_signatures), None))
+        .collect();
 
     CsMember::Method {
         attributes: vec![],
@@ -1114,15 +1183,31 @@ fn member_span(member: &Member) -> Span {
 }
 
 fn lower_stmt(stmt: &Stmt) -> CsStmt {
+    lower_stmt_with_context(stmt, None, None)
+}
+
+fn lower_stmt_with_context(
+    stmt: &Stmt,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+    expected_return_ty: Option<&TypeRef>,
+) -> CsStmt {
     let source_span = Some(stmt_span(stmt));
     match stmt {
         Stmt::ValDecl { name, ty, init, .. } => {
             let cs_ty = ty.as_ref().map(|t| lower_type(t)).unwrap_or("var".into());
-            CsStmt::VarDecl { ty: cs_ty, name: name.clone(), init: lower_expr(init), source_span }
+            CsStmt::VarDecl {
+                ty: cs_ty,
+                name: name.clone(),
+                init: lower_expr_with_expected_type(init, ty.as_ref(), callable_signatures),
+                source_span,
+            }
         }
         Stmt::VarDecl { name, ty, init, .. } => {
             let cs_ty = ty.as_ref().map(|t| lower_type(t)).unwrap_or("var".into());
-            let init_str = init.as_ref().map(|e| lower_expr(e)).unwrap_or("default".into());
+            let init_str = init
+                .as_ref()
+                .map(|expr| lower_expr_with_expected_type(expr, ty.as_ref(), callable_signatures))
+                .unwrap_or("default".into());
             CsStmt::VarDecl { ty: cs_ty, name: name.clone(), init: init_str, source_span }
         }
         Stmt::Assignment { target, op, value, .. } => {
@@ -1135,9 +1220,9 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
                 AssignOp::ModAssign => "%=",
             };
             CsStmt::Assignment {
-                target: lower_expr(target),
+                target: lower_expr_with_expected_type(target, None, callable_signatures),
                 op: op_str.into(),
-                value: lower_expr(value),
+                value: lower_expr_with_expected_type(value, None, callable_signatures),
                 source_span,
             }
         }
@@ -1145,13 +1230,9 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
             // Special handling for SafeMethodCall in statement context
             // Use Unity-safe null check: if (x != null) x.Method()
             if let Expr::SafeMethodCall { receiver, name, type_args, args, .. } = expr {
-                let recv = lower_expr(receiver);
-                let args_str: Vec<String> = args.iter().map(|a| lower_expr(&a.value)).collect();
-                let ta_str = if type_args.is_empty() {
-                    String::new()
-                } else {
-                    format!("<{}>", type_args.iter().map(|t| lower_type(t)).collect::<Vec<_>>().join(", "))
-                };
+                let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
+                let args_str = lower_call_args(Some(receiver.as_ref()), name, args, callable_signatures);
+                let ta_str = lower_call_type_args(Some(receiver.as_ref()), name, type_args, None);
                 let method = pascal_case(name);
                 return CsStmt::If {
                     cond: format!("{} != null", recv),
@@ -1160,20 +1241,28 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
                     source_span,
                 };
             }
-            CsStmt::Expr(lower_expr(expr), source_span)
+            CsStmt::Expr(lower_expr_with_expected_type(expr, None, callable_signatures), source_span)
         }
         Stmt::If { cond, then_block, else_branch, .. } => {
             let else_body = else_branch.as_ref().map(|eb| match eb {
                 ElseBranch::ElseBlock(block) => {
-                    block.stmts.iter().map(|s| lower_stmt(s)).collect()
+                    block
+                        .stmts
+                        .iter()
+                        .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
+                        .collect()
                 }
                 ElseBranch::ElseIf(if_stmt) => {
-                    vec![lower_stmt(if_stmt)]
+                    vec![lower_stmt_with_context(if_stmt, callable_signatures, expected_return_ty)]
                 }
             });
             CsStmt::If {
-                cond: lower_expr(cond),
-                then_body: then_block.stmts.iter().map(|s| lower_stmt(s)).collect(),
+                cond: lower_expr_with_expected_type(cond, None, callable_signatures),
+                then_body: then_block
+                    .stmts
+                    .iter()
+                    .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
+                    .collect(),
                 else_body,
                 source_span,
             }
@@ -1184,7 +1273,7 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
                 for b in branches {
                     let mut prefix_stmts: Vec<CsStmt> = Vec::new();
                     let pattern = match &b.pattern {
-                        WhenPattern::Expression(expr) => format!("case {}:", lower_expr(expr)),
+                        WhenPattern::Expression(expr) => format!("case {}:", lower_expr_with_expected_type(expr, None, callable_signatures)),
                         WhenPattern::Is(ty) => format!("case {} _:", lower_type(ty)),
                         WhenPattern::Else => "default:".into(),
                         WhenPattern::Binding { path, bindings, .. } => {
@@ -1203,9 +1292,16 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
                             format!("case {} {}:", type_name, tmp)
                         }
                     };
-                    let mut body: Vec<CsStmt> = match &b.body {
-                        WhenBody::Block(bl) => bl.stmts.iter().map(|s| lower_stmt(s)).collect(),
-                        WhenBody::Expr(e) => vec![CsStmt::Expr(lower_expr(e), Some(expr_span(e)))],
+                    let body: Vec<CsStmt> = match &b.body {
+                        WhenBody::Block(bl) => bl
+                            .stmts
+                            .iter()
+                            .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
+                            .collect(),
+                        WhenBody::Expr(e) => vec![CsStmt::Expr(
+                            lower_expr_with_expected_type(e, None, callable_signatures),
+                            Some(expr_span(e)),
+                        )],
                     };
                     prefix_stmts.extend(body);
                     let mut body = prefix_stmts;
@@ -1218,17 +1314,24 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
                 let mut result: Option<CsStmt> = None;
                 for b in branches.iter().rev() {
                     let body: Vec<CsStmt> = match &b.body {
-                        WhenBody::Block(bl) => bl.stmts.iter().map(|s| lower_stmt(s)).collect(),
-                        WhenBody::Expr(e) => vec![CsStmt::Expr(lower_expr(e), Some(expr_span(e)))],
+                        WhenBody::Block(bl) => bl
+                            .stmts
+                            .iter()
+                            .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
+                            .collect(),
+                        WhenBody::Expr(e) => vec![CsStmt::Expr(
+                            lower_expr_with_expected_type(e, None, callable_signatures),
+                            Some(expr_span(e)),
+                        )],
                     };
                     match &b.pattern {
                         WhenPattern::Else => {
                             result = Some(CsStmt::Block(body, Some(b.span)));
                         }
                         WhenPattern::Expression(cond) => {
-                            let cond_str = lower_expr(cond);
+                            let cond_str = lower_expr_with_expected_type(cond, None, callable_signatures);
                             let guard_cond = if let Some(g) = &b.guard {
-                                format!("{} && {}", cond_str, lower_expr(g))
+                                format!("{} && {}", cond_str, lower_expr_with_expected_type(g, None, callable_signatures))
                             } else {
                                 cond_str
                             };
@@ -1276,14 +1379,14 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
             // Check if iterable is a range expression
             if let Expr::Range { start, end, inclusive, step, .. } = iterable {
                 let start_str = lower_expr(start);
-                let end_str = lower_expr(end);
+                let end_str = lower_expr_with_expected_type(end, None, callable_signatures);
                 let cond = if *inclusive {
                     format!("{} <= {}", var_name, end_str)
                 } else {
                     format!("{} < {}", var_name, end_str)
                 };
                 let incr = if let Some(s) = step {
-                    format!("{} += {}", var_name, lower_expr(s))
+                    format!("{} += {}", var_name, lower_expr_with_expected_type(s, None, callable_signatures))
                 } else {
                     format!("{}++", var_name)
                 };
@@ -1291,33 +1394,50 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
                     init: format!("int {} = {}", var_name, start_str),
                     cond,
                     incr,
-                    body: body.stmts.iter().map(|s| lower_stmt(s)).collect(),
+                    body: body
+                        .stmts
+                        .iter()
+                        .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
+                        .collect(),
                     source_span,
                 }
             } else {
                 CsStmt::ForEach {
                     ty: "var".into(),
                     name: var_name.clone(),
-                    iterable: lower_expr(iterable),
-                    body: body.stmts.iter().map(|s| lower_stmt(s)).collect(),
+                    iterable: lower_expr_with_expected_type(iterable, None, callable_signatures),
+                    body: body
+                        .stmts
+                        .iter()
+                        .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
+                        .collect(),
                     source_span,
                 }
             }
         }
         Stmt::While { cond, body, .. } => {
             CsStmt::While {
-                cond: lower_expr(cond),
-                body: body.stmts.iter().map(|s| lower_stmt(s)).collect(),
+                cond: lower_expr_with_expected_type(cond, None, callable_signatures),
+                body: body
+                    .stmts
+                    .iter()
+                    .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
+                    .collect(),
                 source_span,
             }
         }
         Stmt::Return { value, .. } => {
-            CsStmt::Return(value.as_ref().map(|e| lower_expr(e)), source_span)
+            CsStmt::Return(
+                value
+                    .as_ref()
+                    .map(|expr| lower_expr_with_expected_type(expr, expected_return_ty, callable_signatures)),
+                source_span,
+            )
         }
         Stmt::Wait { form, .. } => {
             match form {
                 WaitForm::Duration(expr) => {
-                    let val = lower_expr(expr);
+                    let val = lower_expr_with_expected_type(expr, None, callable_signatures);
                     CsStmt::YieldReturn(format!("new WaitForSeconds({})", val), source_span)
                 }
                 WaitForm::NextFrame => {
@@ -1327,24 +1447,45 @@ fn lower_stmt(stmt: &Stmt) -> CsStmt {
                     CsStmt::YieldReturn("new WaitForFixedUpdate()".into(), source_span)
                 }
                 WaitForm::Until(cond) => {
-                    CsStmt::YieldReturn(format!("new WaitUntil(() => {})", lower_expr(cond)), source_span)
+                    CsStmt::YieldReturn(
+                        format!("new WaitUntil(() => {})", lower_expr_with_expected_type(cond, None, callable_signatures)),
+                        source_span,
+                    )
                 }
                 WaitForm::While(cond) => {
-                    CsStmt::YieldReturn(format!("new WaitWhile(() => {})", lower_expr(cond)), source_span)
+                    CsStmt::YieldReturn(
+                        format!("new WaitWhile(() => {})", lower_expr_with_expected_type(cond, None, callable_signatures)),
+                        source_span,
+                    )
                 }
             }
         }
         Stmt::Start { call, .. } => {
-            CsStmt::Expr(format!("StartCoroutine({})", lower_expr(call)), source_span)
+            CsStmt::Expr(
+                format!("StartCoroutine({})", lower_expr_with_expected_type(call, None, callable_signatures)),
+                source_span,
+            )
         }
         Stmt::Stop { target, .. } => {
-            CsStmt::Expr(format!("StopCoroutine({})", lower_expr(target)), source_span)
+            CsStmt::Expr(
+                format!("StopCoroutine({})", lower_expr_with_expected_type(target, None, callable_signatures)),
+                source_span,
+            )
         }
         Stmt::StopAll { .. } => {
             CsStmt::Expr("StopAllCoroutines()".into(), source_span)
         }
         Stmt::Listen { event, params, body, lifetime, bound_name, .. } => {
-            lower_listen_stmt(event, params, body, lifetime, bound_name.as_deref(), source_span, None)
+            lower_listen_stmt(
+                event,
+                params,
+                body,
+                lifetime,
+                bound_name.as_deref(),
+                source_span,
+                None,
+                callable_signatures,
+            )
         }
         Stmt::Unlisten { token, .. } => {
             // Without surrounding context we cannot resolve the token.
@@ -1374,22 +1515,51 @@ fn stmt_to_inline(stmt: &CsStmt) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn lower_value_block_expr(block: &Block, context: &str) -> String {
+    lower_value_block_expr_with_expected(block, context, None, None)
+}
+
+fn lower_value_block_expr_with_expected(
+    block: &Block,
+    context: &str,
+    expected_type: Option<&TypeRef>,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> String {
     if block.stmts.len() == 1 {
         match &block.stmts[0] {
-            Stmt::Expr { expr, .. } => return lower_expr(expr),
-            Stmt::Return { value: Some(expr), .. } => return lower_expr(expr),
+            Stmt::Expr { expr, .. } => return lower_expr_with_expected_type(expr, expected_type, callable_signatures),
+            Stmt::Return { value: Some(expr), .. } => {
+                return lower_expr_with_expected_type(expr, expected_type, callable_signatures)
+            }
             _ => {}
         }
     }
 
     let mut lines = vec!["__prsm_expr(() =>".to_string(), "{".to_string()];
-    lines.extend(lower_value_block_lines(block, 1, context));
+    lines.extend(lower_value_block_lines_with_expected(
+        block,
+        1,
+        context,
+        expected_type,
+        callable_signatures,
+    ));
     lines.push("})".to_string());
     lines.join("\n")
 }
 
+#[allow(dead_code)]
 fn lower_value_block_lines(block: &Block, indent: usize, context: &str) -> Vec<String> {
+    lower_value_block_lines_with_expected(block, indent, context, None, None)
+}
+
+fn lower_value_block_lines_with_expected(
+    block: &Block,
+    indent: usize,
+    context: &str,
+    expected_type: Option<&TypeRef>,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> Vec<String> {
     let mut lines = Vec::new();
     if block.stmts.is_empty() {
         lines.push(format!("{}throw new System.InvalidOperationException(\"PrSM {} branch must produce a value\");", indent_str(indent), context));
@@ -1398,15 +1568,29 @@ fn lower_value_block_lines(block: &Block, indent: usize, context: &str) -> Vec<S
 
     let last_index = block.stmts.len() - 1;
     for stmt in &block.stmts[..last_index] {
-        lines.extend(cs_stmt_to_lines(&lower_stmt(stmt), indent));
+        lines.extend(cs_stmt_to_lines(
+            &lower_stmt_with_context(stmt, callable_signatures, expected_type),
+            indent,
+        ));
     }
 
     match &block.stmts[last_index] {
-        Stmt::Expr { expr, .. } => lines.push(format!("{}return {};", indent_str(indent), lower_expr(expr))),
-        Stmt::Return { value: Some(expr), .. } => lines.push(format!("{}return {};", indent_str(indent), lower_expr(expr))),
+        Stmt::Expr { expr, .. } => lines.push(format!(
+            "{}return {};",
+            indent_str(indent),
+            lower_expr_with_expected_type(expr, expected_type, callable_signatures)
+        )),
+        Stmt::Return { value: Some(expr), .. } => lines.push(format!(
+            "{}return {};",
+            indent_str(indent),
+            lower_expr_with_expected_type(expr, expected_type, callable_signatures)
+        )),
         Stmt::Return { value: None, .. } => lines.push(format!("{}return default;", indent_str(indent))),
         other => {
-            lines.extend(cs_stmt_to_lines(&lower_stmt(other), indent));
+            lines.extend(cs_stmt_to_lines(
+                &lower_stmt_with_context(other, callable_signatures, expected_type),
+                indent,
+            ));
             lines.push(format!("{}throw new System.InvalidOperationException(\"PrSM {} branch must end with a value\");", indent_str(indent), context));
         }
     }
@@ -1494,6 +1678,14 @@ fn indent_str(indent: usize) -> String {
 // ── Expression lowering ─────────────────────────────────────────
 
 fn lower_expr(expr: &Expr) -> String {
+    lower_expr_with_expected_type(expr, None, None)
+}
+
+fn lower_expr_with_expected_type(
+    expr: &Expr,
+    expected_type: Option<&TypeRef>,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> String {
     match expr {
         Expr::IntLit(n, _) => n.to_string(),
         Expr::FloatLit(n, _) => format_float(*n),
@@ -1506,7 +1698,7 @@ fn lower_expr(expr: &Expr) -> String {
                     StringPart::Literal(s) => result.push_str(s),
                     StringPart::Expr(e) => {
                         result.push('{');
-                        result.push_str(&lower_expr(e));
+                        result.push_str(&lower_expr_with_expected_type(e, None, callable_signatures));
                         result.push('}');
                     }
                 }
@@ -1527,12 +1719,17 @@ fn lower_expr(expr: &Expr) -> String {
                 BinOp::LtEq => "<=", BinOp::GtEq => ">=",
                 BinOp::And => "&&", BinOp::Or => "||",
             };
-            format!("{} {} {}", lower_expr(left), op_str, lower_expr(right))
+            format!(
+                "{} {} {}",
+                lower_expr_with_expected_type(left, None, callable_signatures),
+                op_str,
+                lower_expr_with_expected_type(right, None, callable_signatures),
+            )
         }
         Expr::Unary { op, operand, .. } => {
             match op {
-                UnaryOp::Negate => format!("-({})", lower_expr(operand)),
-                UnaryOp::Not => format!("!({})", lower_expr(operand)),
+                UnaryOp::Negate => format!("-({})", lower_expr_with_expected_type(operand, None, callable_signatures)),
+                UnaryOp::Not => format!("!({})", lower_expr_with_expected_type(operand, None, callable_signatures)),
             }
         }
         Expr::MemberAccess { receiver, name, .. } => {
@@ -1540,7 +1737,7 @@ fn lower_expr(expr: &Expr) -> String {
             if let Some(cs) = try_lower_new_input_member(receiver, name) {
                 return cs;
             }
-            let recv = lower_expr(receiver);
+            let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
             // Legacy input + other sugar mappings
             match (recv.as_str(), name.as_str()) {
                 ("input", "axis") => "Input.GetAxis".into(),
@@ -1556,37 +1753,33 @@ fn lower_expr(expr: &Expr) -> String {
             }
         }
         Expr::SafeCall { receiver, name, .. } => {
-            let recv = lower_expr(receiver);
+            let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
             format!("({} != null ? {}.{} : null)", recv, recv, pascal_case(name))
         }
         Expr::SafeMethodCall { receiver, name, type_args, args, .. } => {
             // SafeMethodCall in expression context — use null-conditional operator
-            let recv = lower_expr(receiver);
-            let args_str: Vec<String> = args.iter().map(|a| lower_expr(&a.value)).collect();
-            let ta_str = if type_args.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", type_args.iter().map(|t| lower_type(t)).collect::<Vec<_>>().join(", "))
-            };
+            let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
+            let args_str = lower_call_args(Some(receiver.as_ref()), name, args, callable_signatures);
+            let ta_str = lower_call_type_args(Some(receiver.as_ref()), name, type_args, expected_type);
             let method = pascal_case(name);
             format!("{}?.{}{}({})", recv, method, ta_str, args_str.join(", "))
         }
         Expr::NonNullAssert { expr, .. } => {
-            lower_expr(expr)
+            lower_expr_with_expected_type(expr, expected_type, callable_signatures)
         }
         Expr::Elvis { left, right, .. } => {
-            format!("{} ?? {}", lower_expr(left), lower_expr(right))
+            format!(
+                "{} ?? {}",
+                lower_expr_with_expected_type(left, expected_type, callable_signatures),
+                lower_expr_with_expected_type(right, expected_type, callable_signatures),
+            )
         }
         Expr::Call { receiver, name, type_args, args, .. } => {
-            let args_str: Vec<String> = args.iter().map(|a| lower_expr(&a.value)).collect();
-            let ta_str = if type_args.is_empty() {
-                String::new()
-            } else {
-                format!("<{}>", type_args.iter().map(|t| lower_type(t)).collect::<Vec<_>>().join(", "))
-            };
+            let args_str = lower_call_args(receiver.as_deref(), name, args, callable_signatures);
+            let ta_str = lower_call_type_args(receiver.as_deref(), name, type_args, expected_type);
 
             if let Some(recv) = receiver {
-                let recv_str = lower_expr(recv);
+                let recv_str = lower_expr_with_expected_type(recv, None, callable_signatures);
                 // Handle safe call + method call (SafeCall node as receiver)
                 if name.is_empty() {
                     format!("{}{}({})", recv_str, ta_str, args_str.join(", "))
@@ -1610,36 +1803,52 @@ fn lower_expr(expr: &Expr) -> String {
             }
         }
         Expr::IndexAccess { receiver, index, .. } => {
-            format!("{}[{}]", lower_expr(receiver), lower_expr(index))
+            format!(
+                "{}[{}]",
+                lower_expr_with_expected_type(receiver, None, callable_signatures),
+                lower_expr_with_expected_type(index, None, callable_signatures),
+            )
         }
         Expr::Range { start, .. } => {
             // Ranges are handled in for-loop lowering; this is a fallback
-            lower_expr(start)
+            lower_expr_with_expected_type(start, None, callable_signatures)
         }
         Expr::Is { expr, ty, .. } => {
-            format!("{} is {}", lower_expr(expr), lower_type(ty))
+            format!(
+                "{} is {}",
+                lower_expr_with_expected_type(expr, None, callable_signatures),
+                lower_type(ty)
+            )
         }
         Expr::IfExpr { cond, then_block, else_block, .. } => {
             format!(
                 "({} ? {} : {})",
-                lower_expr(cond),
-                lower_value_block_expr(then_block, "if expression"),
-                lower_value_block_expr(else_block, "if expression"),
+                lower_expr_with_expected_type(cond, None, callable_signatures),
+                lower_value_block_expr_with_expected(then_block, "if expression", expected_type, callable_signatures),
+                lower_value_block_expr_with_expected(else_block, "if expression", expected_type, callable_signatures),
             )
         }
         Expr::WhenExpr { subject, branches, .. } => {
             if let Some(subj) = subject {
-                let mut lines = vec![format!("{} switch", lower_expr(subj)), "{".to_string()];
+                let mut lines = vec![format!(
+                    "{} switch",
+                    lower_expr_with_expected_type(subj, None, callable_signatures)
+                ), "{".to_string()];
                 for branch in branches {
                     let pattern = match &branch.pattern {
-                        WhenPattern::Expression(expr) => lower_expr(expr),
+                        WhenPattern::Expression(expr) => lower_expr_with_expected_type(expr, None, callable_signatures),
                         WhenPattern::Is(ty) => format!("{} _", lower_type(ty)),
                         WhenPattern::Else => "_".into(),
                         WhenPattern::Binding { path, .. } => format!("{} _", path.join(".")),
                     };
                     let value = match &branch.body {
-                        WhenBody::Expr(expr) => lower_expr(expr),
-                        WhenBody::Block(block) => lower_value_block_expr(block, "when expression"),
+                        WhenBody::Expr(expr) => lower_expr_with_expected_type(expr, expected_type, callable_signatures),
+                        WhenBody::Block(block) => lower_value_block_expr_with_expected(
+                            block,
+                            "when expression",
+                            expected_type,
+                            callable_signatures,
+                        ),
                     };
                     lines.push(format!("    {} => {},", pattern, value));
                 }
@@ -1652,12 +1861,22 @@ fn lower_expr(expr: &Expr) -> String {
                 let mut result = "throw new System.InvalidOperationException(\"PrSM when expression did not match any branch\")".to_string();
                 for branch in branches.iter().rev() {
                     let value = match &branch.body {
-                        WhenBody::Expr(expr) => lower_expr(expr),
-                        WhenBody::Block(block) => lower_value_block_expr(block, "when expression"),
+                        WhenBody::Expr(expr) => lower_expr_with_expected_type(expr, expected_type, callable_signatures),
+                        WhenBody::Block(block) => lower_value_block_expr_with_expected(
+                            block,
+                            "when expression",
+                            expected_type,
+                            callable_signatures,
+                        ),
                     };
                     result = match &branch.pattern {
                         WhenPattern::Else => value,
-                        WhenPattern::Expression(cond) => format!("({} ? {} : {})", lower_expr(cond), value, result),
+                        WhenPattern::Expression(cond) => format!(
+                            "({} ? {} : {})",
+                            lower_expr_with_expected_type(cond, None, callable_signatures),
+                            value,
+                            result
+                        ),
                         WhenPattern::Is(_) | WhenPattern::Binding { .. } => result,
                     };
                 }
@@ -1668,6 +1887,101 @@ fn lower_expr(expr: &Expr) -> String {
             "/* lambda */".into()
         }
         Expr::IntrinsicExpr { code, .. } => code.clone(),
+    }
+}
+
+fn lower_call_args(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Arg],
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> Vec<String> {
+    let signature = lookup_callable_signature(receiver, name, callable_signatures);
+    args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            let expected_type = signature.and_then(|sig| sig.params.get(index));
+            lower_expr_with_expected_type(&arg.value, expected_type, callable_signatures)
+        })
+        .collect()
+}
+
+fn lower_call_type_args(
+    receiver: Option<&Expr>,
+    name: &str,
+    type_args: &[TypeRef],
+    expected_type: Option<&TypeRef>,
+) -> String {
+    if !type_args.is_empty() {
+        return format!(
+            "<{}>",
+            type_args
+                .iter()
+                .map(lower_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !supports_expected_type_inference(receiver, name) {
+        return String::new();
+    }
+
+    let Some(expected_type) = expected_type else {
+        return String::new();
+    };
+
+    let inferred = lower_type(&strip_nullable_type(expected_type));
+    if inferred == "void" {
+        String::new()
+    } else {
+        format!("<{}>", inferred)
+    }
+}
+
+fn lookup_callable_signature<'a>(
+    receiver: Option<&Expr>,
+    name: &str,
+    callable_signatures: Option<&'a HashMap<String, CallableSignature>>,
+) -> Option<&'a CallableSignature> {
+    let signatures = callable_signatures?;
+    match receiver {
+        None => signatures.get(name),
+        Some(Expr::This(_)) => signatures.get(name),
+        _ => None,
+    }
+}
+
+fn supports_expected_type_inference(receiver: Option<&Expr>, name: &str) -> bool {
+    match receiver {
+        None => matches!(name, "get" | "require" | "find" | "child" | "parent" | "loadJson"),
+        Some(_) => matches!(
+            name,
+            "getComponent" | "getComponentInChildren" | "getComponentInParent" | "findFirstObjectByType"
+        ),
+    }
+}
+
+fn strip_nullable_type(ty: &TypeRef) -> TypeRef {
+    match ty {
+        TypeRef::Simple { name, span, .. } => TypeRef::Simple {
+            name: name.clone(),
+            nullable: false,
+            span: *span,
+        },
+        TypeRef::Generic { name, type_args, span, .. } => TypeRef::Generic {
+            name: name.clone(),
+            type_args: type_args.clone(),
+            nullable: false,
+            span: *span,
+        },
+        TypeRef::Qualified { qualifier, name, span, .. } => TypeRef::Qualified {
+            qualifier: qualifier.clone(),
+            name: name.clone(),
+            nullable: false,
+            span: *span,
+        },
     }
 }
 
@@ -1845,11 +2159,12 @@ enum SubscriptionCleanup {
 struct ComponentCtx {
     next_id: usize,
     records: Vec<SubscriptionRecord>,
+    callable_signatures: HashMap<String, CallableSignature>,
 }
 
 impl ComponentCtx {
-    fn new() -> Self {
-        ComponentCtx { next_id: 0, records: Vec::new() }
+    fn new(callable_signatures: HashMap<String, CallableSignature>) -> Self {
+        ComponentCtx { next_id: 0, records: Vec::new(), callable_signatures }
     }
 
     fn alloc_handler(&mut self) -> String {
@@ -1861,25 +2176,42 @@ impl ComponentCtx {
 
 /// Lower a block of statements with Component-level subscription context.
 /// This replaces `lower_stmt` calls inside lifecycle/func bodies when inside a Component.
-fn lower_stmts_with_ctx(stmts: &[Stmt], ctx: &mut ComponentCtx) -> Vec<CsStmt> {
+fn lower_stmts_with_ctx(
+    stmts: &[Stmt],
+    ctx: &mut ComponentCtx,
+    expected_return_ty: Option<&TypeRef>,
+) -> Vec<CsStmt> {
     let mut out = Vec::new();
     for stmt in stmts {
-        out.extend(lower_stmt_with_ctx(stmt, ctx));
+        out.extend(lower_stmt_with_ctx(stmt, ctx, expected_return_ty));
     }
     out
 }
 
-fn lower_stmt_with_ctx(stmt: &Stmt, ctx: &mut ComponentCtx) -> Vec<CsStmt> {
+fn lower_stmt_with_ctx(
+    stmt: &Stmt,
+    ctx: &mut ComponentCtx,
+    expected_return_ty: Option<&TypeRef>,
+) -> Vec<CsStmt> {
     let source_span = Some(stmt_span(stmt));
     match stmt {
         Stmt::Listen { event, params, body, lifetime, bound_name, .. } => {
             match lifetime {
                 ListenLifetime::Register => {
-                    vec![lower_listen_stmt(event, params, body, lifetime, None, source_span, None)]
+                    vec![lower_listen_stmt(
+                        event,
+                        params,
+                        body,
+                        lifetime,
+                        None,
+                        source_span,
+                        None,
+                        Some(&ctx.callable_signatures),
+                    )]
                 }
                 ListenLifetime::UntilDisable | ListenLifetime::UntilDestroy | ListenLifetime::Manual => {
                     let handler = ctx.alloc_handler();
-                    let event_str = lower_expr(event);
+                    let event_str = lower_expr_with_expected_type(event, None, Some(&ctx.callable_signatures));
                     let cleanup = match lifetime {
                         ListenLifetime::UntilDisable => SubscriptionCleanup::OnDisable,
                         ListenLifetime::UntilDestroy => SubscriptionCleanup::OnDestroy,
@@ -1894,20 +2226,29 @@ fn lower_stmt_with_ctx(stmt: &Stmt, ctx: &mut ComponentCtx) -> Vec<CsStmt> {
                         cleanup,
                     });
                     // Emit: fieldName = (params) => { body }; event.AddListener(fieldName);
-                    let stmts_vec = lower_listen_stmt(event, params, body, lifetime, None, source_span, Some(&handler));
+                    let stmts_vec = lower_listen_stmt(
+                        event,
+                        params,
+                        body,
+                        lifetime,
+                        None,
+                        source_span,
+                        Some(&handler),
+                        Some(&ctx.callable_signatures),
+                    );
                     vec![stmts_vec]
                 }
             }
         }
         // Recurse into control-flow so nested listens are also handled.
         Stmt::If { cond, then_block, else_branch, span, .. } => {
-            let then_body = lower_stmts_with_ctx(&then_block.stmts, ctx);
+            let then_body = lower_stmts_with_ctx(&then_block.stmts, ctx, expected_return_ty);
             let else_body = else_branch.as_ref().map(|eb| match eb {
-                ElseBranch::ElseBlock(block) => lower_stmts_with_ctx(&block.stmts, ctx),
-                ElseBranch::ElseIf(if_stmt) => lower_stmt_with_ctx(if_stmt, ctx),
+                ElseBranch::ElseBlock(block) => lower_stmts_with_ctx(&block.stmts, ctx, expected_return_ty),
+                ElseBranch::ElseIf(if_stmt) => lower_stmt_with_ctx(if_stmt, ctx, expected_return_ty),
             });
             vec![CsStmt::If {
-                cond: lower_expr(cond),
+                cond: lower_expr_with_expected_type(cond, None, Some(&ctx.callable_signatures)),
                 then_body,
                 else_body,
                 source_span: Some(*span),
@@ -1935,7 +2276,7 @@ fn lower_stmt_with_ctx(stmt: &Stmt, ctx: &mut ComponentCtx) -> Vec<CsStmt> {
             }
         }
         // All other statements: lower normally.
-        other => vec![lower_stmt(other)],
+        other => vec![lower_stmt_with_context(other, Some(&ctx.callable_signatures), expected_return_ty)],
     }
 }
 
@@ -1951,8 +2292,9 @@ fn lower_listen_stmt(
     _bound_name: Option<&str>,
     source_span: Option<Span>,
     handler_field: Option<&str>,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
 ) -> CsStmt {
-    let event_str = lower_expr(event);
+    let event_str = lower_expr_with_expected_type(event, None, callable_signatures);
     let params_str = if params.is_empty() {
         "()".to_string()
     } else {
@@ -1961,7 +2303,10 @@ fn lower_listen_stmt(
     let body_lines: Vec<String> = body
         .stmts
         .iter()
-        .map(|s| format!("    {};", stmt_to_inline(&lower_stmt(s))))
+        .map(|stmt| format!(
+            "    {};",
+            stmt_to_inline(&lower_stmt_with_context(stmt, callable_signatures, None))
+        ))
         .collect();
     let lambda_body = body_lines.join("\n");
     let lambda = format!(

@@ -1850,6 +1850,18 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Ident(name, span))
             }
+            TokenKind::Require => {
+                self.advance();
+                Ok(Expr::Ident("require".into(), span))
+            }
+            TokenKind::Child => {
+                self.advance();
+                Ok(Expr::Ident("child".into(), span))
+            }
+            TokenKind::Parent => {
+                self.advance();
+                Ok(Expr::Ident("parent".into(), span))
+            }
             TokenKind::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;
