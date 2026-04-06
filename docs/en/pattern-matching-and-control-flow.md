@@ -58,7 +58,7 @@ when {
 
 `when` is also an expression and can return values. The semantic layer checks for exhaustiveness where branch coverage can be determined (warning W003 when missing variants).
 
-### Pattern bindings (PrSM 2 부터)
+### Pattern bindings (since PrSM 2)
 
 Enum payload bindings extract data from parameterized enum entries:
 
@@ -90,7 +90,7 @@ case EnemyState.Chase _prsm_m8_5:
 - Variant name must exist in the enum (error E081 if unknown)
 - Empty bindings `EnemyState.Idle` match without extraction
 
-### When guards (PrSM 2 부터)
+### When guards (since PrSM 2)
 
 Guards add a condition after a pattern:
 
@@ -103,7 +103,7 @@ when state {
 
 The guard expression is checked after the pattern matches. It generates an `&&` condition in the C# output.
 
-### Destructuring in `val` (PrSM 2 부터)
+### Destructuring in `val` (since PrSM 2)
 
 Data class instances can be destructured into individual variables:
 
@@ -125,7 +125,7 @@ var speed = _prsm_d.speed;
 - Binding count must match the data class field count (error E082)
 - Binding names are used as local variable names
 
-### Destructuring in `for` (PrSM 2 부터)
+### Destructuring in `for` (since PrSM 2)
 
 The same destructuring syntax works in `for` loops:
 

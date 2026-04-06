@@ -6,11 +6,7 @@ nav_order: 1
 
 # PrSM 언어 표준
 
-::: warning
-Language 2 --- 작업 초안
-:::
-
----
+**Language 2 — 작업 초안**
 
 ## 1 범위 [scope]
 

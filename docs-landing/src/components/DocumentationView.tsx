@@ -221,10 +221,10 @@ const CodeBlock = ({ children, className }: { children: string; className?: stri
 
 const renderInlineMarkdown = (text: string) => {
   // Split on: inline code, bold, links, and version markers
-  return text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[([^\]]+)\]\(([^)]+)\)|\(PrSM \d[\d.]* 부터\)|\(Since PrSM \d[\d.]*\))/).filter(Boolean).map((part, i) => {
+  return text.split(/(`[^`]+`|\*\*[^*]+\*\*|\[([^\]]+)\]\(([^)]+)\)|\(PrSM \d[\d.]* 부터\)|\([Ss]ince PrSM \d[\d.]*\))/).filter(Boolean).map((part, i) => {
     if (part.startsWith('`')) return <code key={i}>{part.slice(1, -1)}</code>;
     if (part.startsWith('**')) return <strong key={i}>{part.slice(2, -2)}</strong>;
-    if (/^\((?:PrSM \d|Since PrSM \d)/.test(part)) {
+    if (/^\((?:PrSM \d|[Ss]ince PrSM \d)/.test(part)) {
       return <span key={i} className="prsm-version-marker">{part}</span>;
     }
     // Links: [text](url) — captured groups become separate parts
@@ -353,7 +353,7 @@ function SimpleMarkdown({ content }: { content: string }) {
       flushTable(i);
       const content = trimmed.slice(2);
       // Version marker blockquotes render as styled cards
-      const isVersionCard = /(\[Since language \d|PrSM \d.*부터|Since PrSM \d|Added in)/.test(content);
+      const isVersionCard = /(\[Since language \d|PrSM \d.*부터|[Ss]ince PrSM \d|Added in)/.test(content);
       if (isVersionCard) {
         elements.push(
           <div key={i} className="prsm-version-card">

@@ -165,7 +165,7 @@ the Unity Input System package is installed.
 
 PrSM v1 shipped sugar for Unity's legacy `UnityEngine.Input` API:
 
-| Legacy sugar (PrSM 1) | New Input System sugar (PrSM 2 부터) |
+| Legacy sugar (PrSM 1) | New Input System sugar (since PrSM 2) |
 |---|---|
 | `input.getKey(KeyCode.Space)` | `input.action("Jump").pressed` |
 | `input.axis("Horizontal")` | `input.action("Move").vector2.x` |
