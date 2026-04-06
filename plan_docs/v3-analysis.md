@@ -194,28 +194,201 @@ PDF에서 강조하는 SOLID를 언어 수준에서:
 
 ---
 
-## 4. v3 범위 우선순위 제안
+## 4. v3 범위 (확정)
 
-### Tier 1 (핵심 — 가장 큰 보일러플레이트 제거)
+### v3 핵심 기능 (6개)
 
-1. **`singleton` 키워드** — 싱글톤 보일러플레이트 30줄 → 1줄
-2. **`state machine` 블록** — 상태 머신 60줄 → 15줄
-3. **C# 코드 옵티마이저 패스** — GetComponent 캐싱, 임시 변수 제거
-4. **인터페이스 선언** — `interface` 키워드로 PrSM 내에서 인터페이스 정의
+| # | 기능 | 유형 | 효과 |
+|---|------|------|------|
+| 1 | **인터페이스 선언** | 언어 확장 | PrSM 내에서 `interface` 정의 가능. 현재는 C# 인터페이스 참조만 가능 |
+| 2 | **제네릭 선언** | 언어 확장 | `class<T>`, `func<T>` 정의 가능. 타입 제약 (`where T : MonoBehaviour`) 포함 |
+| 3 | **C# 코드 옵티마이저** | 컴파일러 | GetComponent 캐싱, 임시 변수 제거, 널 체크 병합, 박싱 회피 |
+| 4 | **`singleton` 키워드** | 패턴 sugar | 싱글톤 보일러플레이트 30줄 → `singleton component Name` 1줄 |
+| 5 | **`pool` 수식자** | 패턴 sugar | 오브젝트 풀 50줄 → `pool name: Type(capacity)` 2줄 |
+| 6 | **SOLID 분석 경고** | 정적 분석 | 단일 책임 위반 감지(W010), 과도한 의존성 경고(W011) |
 
-### Tier 2 (고가치)
+### v3 각 기능 상세
 
-5. **`command` 선언** — 커맨드 패턴 40줄 → 5줄
-6. **`pool` 수식자** — 오브젝트 풀 50줄 → 2줄
-7. **`bind` 문법** — MVVM 데이터 바인딩
-8. **제네릭 선언** — `class<T>` 정의 가능
+#### 1. 인터페이스 선언
 
-### Tier 3 (미래)
+```prsm
+interface IDamageable {
+    func takeDamage(amount: Int)
+    val isAlive: Bool
+}
 
-9. **async/await** (UniTask)
-10. **ECS 경량 문법**
-11. **SOLID 분석 경고**
-12. **직렬화 자동 생성**
+component Enemy : MonoBehaviour, IDamageable {
+    var hp: Int = 100
+    val isAlive: Bool = hp > 0
+    func takeDamage(amount: Int) { hp -= amount }
+}
+```
+
+생성 C#: 표준 C# `interface` + 구현 클래스. 컴파일러가 인터페이스 멤버 구현 여부를 검증.
+
+#### 2. 제네릭 선언
+
+```prsm
+class ObjectPool<T>(capacity: Int) where T : MonoBehaviour {
+    var items: List<T> = null
+    func get(): T { /* ... */ }
+    func release(item: T) { /* ... */ }
+}
+
+// 사용
+val pool = ObjectPool<Bullet>(20)
+val bullet = pool.get()
+```
+
+생성 C#: 표준 C# 제네릭 클래스. 타입 제약은 `where` 절로 전달.
+제네릭 함수도 지원:
+
+```prsm
+func findAll<T>(): List<T> where T : Component {
+    return FindObjectsByType<T>(FindObjectsSortMode.None).toList()
+}
+```
+
+#### 3. C# 코드 옵티마이저
+
+lowering과 codegen 사이에 최적화 패스를 삽입한다.
+
+```
+Parser → Semantic → HIR → Lowering → [Optimizer] → CodeGen
+```
+
+최적화 규칙:
+
+| 규칙 | Before | After |
+|------|--------|-------|
+| GetComponent 캐싱 | 루프 내 `GetComponent<T>()` 반복 호출 | 메서드 시작에 로컬 변수로 캐싱 |
+| 임시 변수 제거 | `var _prsm_d = expr; var a = _prsm_d.a;` (단일 사용) | `var a = expr.a;` |
+| 널 체크 병합 | `if (a != null) { if (a.b != null) { a.b.c(); } }` | `a?.b?.c();` |
+| 박싱 회피 | `foreach (var item in list)` (값 타입 리스트) | `for (int i = 0; ...)` |
+| 상수 문자열 접기 | `$"hello {"world"}"` | `"hello world"` |
+| 불필요한 캐스트 제거 | `(Type)GetComponent<Type>()` | `GetComponent<Type>()` |
+
+옵티마이저는 `--optimize` 플래그로 활성화. 기본값은 비활성 (읽기 쉬운 C# 우선).
+
+#### 4. `singleton` 키워드
+
+```prsm
+singleton component GameManager : MonoBehaviour {
+    var score: Int = 0
+    var isGameOver: Bool = false
+
+    func addScore(amount: Int) {
+        score += amount
+    }
+}
+
+// 다른 곳에서 사용
+GameManager.instance.addScore(100)
+```
+
+생성 C#:
+
+```csharp
+public class GameManager : MonoBehaviour
+{
+    private static GameManager _instance;
+    public static GameManager Instance
+    {
+        get
+        {
+            if (_instance == null)
+            {
+                _instance = FindFirstObjectByType<GameManager>();
+                if (_instance == null)
+                {
+                    var go = new GameObject("GameManager");
+                    _instance = go.AddComponent<GameManager>();
+                }
+            }
+            return _instance;
+        }
+    }
+
+    private void Awake()
+    {
+        if (_instance == null)
+        {
+            _instance = this;
+            DontDestroyOnLoad(gameObject);
+        }
+        else if (_instance != this)
+        {
+            Destroy(gameObject);
+        }
+    }
+
+    // ... 사용자 멤버
+}
+```
+
+옵션:
+- `singleton component Name` — DontDestroyOnLoad 포함 (기본값)
+- `singleton component Name : scoped` — 씬 한정 싱글톤 (DontDestroyOnLoad 없음)
+
+#### 5. `pool` 수식자
+
+```prsm
+component BulletSpawner : MonoBehaviour {
+    pool bullets: Bullet(capacity = 20, max = 100)
+
+    func fire(direction: Vector3) {
+        val bullet = bullets.get()
+        bullet.transform.position = transform.position
+        bullet.launch(direction)
+    }
+}
+
+component Bullet : MonoBehaviour {
+    func launch(direction: Vector3) { /* ... */ }
+
+    func onHit() {
+        bullets.release(this)  // 또는 pool.release(this)
+    }
+}
+```
+
+생성 C#: `UnityEngine.Pool.ObjectPool<T>` 기반 코드. CreateFunc, OnGet, OnRelease, OnDestroy 콜백 자동 생성.
+
+#### 6. SOLID 분석 경고
+
+시맨틱 분석에 정적 분석 패스를 추가한다.
+
+| 코드 | 조건 | 설명 |
+|------|------|------|
+| W010 | 컴포넌트의 public 메서드가 8개+ | "이 컴포넌트는 많은 책임을 가지고 있습니다. 분리를 고려하세요." |
+| W011 | require/optional 필드가 6개+ | "이 컴포넌트의 의존성이 많습니다. 종속성 역전을 고려하세요." |
+| W012 | 단일 메서드가 50줄+ | "이 메서드가 길어졌습니다. 분리를 고려하세요." |
+| W013 | require에 구체 타입 사용 시 (인터페이스 아닌 경우) | "인터페이스 타입을 사용하면 종속성 역전 원칙에 부합합니다." (인터페이스 선언 기능과 연동) |
+
+모든 SOLID 경고는 `.prsmproject`에서 비활성화 가능:
+
+```toml
+[analysis]
+solid_warnings = false  # 또는 개별: disabled_warnings = ["W010", "W012"]
+```
+
+### 미래 (v3 이후)
+
+| 기능 | 비고 |
+|------|------|
+| `state machine` 블록 | 상태 머신 sugar — 설계 복잡도 높음, v4 후보 |
+| `command` 선언 | 커맨드 패턴 sugar — v4 후보 |
+| `bind` 문법 | MVVM 데이터 바인딩 — Unity UI Toolkit 안정화 후 |
+| async/await | UniTask 통합 — Unity 공식 지원 상태에 따라 |
+| 직렬화 자동 생성 | JSON/Binary 시리얼라이저 — v4 후보 |
+
+### 제외 (영구)
+
+| 기능 | 사유 |
+|------|------|
+| ECS/DOTS 문법 | PrSM의 근본 전제(MonoBehaviour C# 생성)와 호환 불가. ECS는 별도 백엔드가 필요하며 PrSM의 정체성과 맞지 않음. intrinsic으로 대체. |
+| 매크로/메타프로그래밍 | v0부터 비목표로 설정. 컴파일 타임 코드 생성은 컴파일러의 역할 |
+| 커스텀 VM/런타임 | v0부터 비목표. 모든 실행은 Unity Mono/IL2CPP 경유 |
 
 ---
 
