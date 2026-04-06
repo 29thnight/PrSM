@@ -109,7 +109,7 @@
         <!-- ========================================================== -->
 
         <UIRef Id='WixUI_Minimal' />
-        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf' />
+        <WixVariable Id='WixUILicenseRtf' Value='crates\refraction\wix\License.rtf' />
 
         <Property Id='WIXUI_EXITDIALOGOPTIONALTEXT'
             Value='PrSM has been installed successfully.&#13;&#10;&#13;&#10;To install the Unity package, open Unity and go to:&#13;&#10;Window > Package Manager > + > Add package from git URL:&#13;&#10;https://github.com/29thnight/PrSM.git?path=unity-package' />
