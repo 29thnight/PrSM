@@ -1,10 +1,12 @@
 using UnityEngine
 
+struct PlayerHealthData(hp: Int, invincible: Bool)
+
 component PlayerHealth : MonoBehaviour {
     serialize maxHp: Int = 100
     serialize invincibleTime: Float = 1.0
 
-    var hp: Int = 100
+    const val hp: Int = 100
     var invincible: Bool = false
 
     func damage(amount: Int) {
@@ -26,5 +28,9 @@ component PlayerHealth : MonoBehaviour {
 
     func die() {
         gameObject.setActive(false)
+    }
+
+    static func heal(player: PlayerHealth, amount: Int) {
+        player.hp = min(player.hp + amount, player.maxHp)
     }
 }
