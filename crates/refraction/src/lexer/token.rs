@@ -332,6 +332,103 @@ impl TokenKind {
     }
 }
 
+impl TokenKind {
+    /// Inverse of `lookup_keyword`: return the raw source text for a
+    /// keyword token. Used by `expect_ident_or_keyword` in the parser
+    /// when a keyword needs to be accepted in identifier position
+    /// (parameter names, state machine state names, etc.). Returns
+    /// `None` for non-keyword tokens.
+    pub fn keyword_text(&self) -> Option<&'static str> {
+        match self {
+            // Declarations
+            TokenKind::Component => Some("component"),
+            TokenKind::Asset => Some("asset"),
+            TokenKind::Class => Some("class"),
+            TokenKind::Data => Some("data"),
+            TokenKind::Enum => Some("enum"),
+            TokenKind::Attribute => Some("attribute"),
+            TokenKind::Interface => Some("interface"),
+            TokenKind::Singleton => Some("singleton"),
+            TokenKind::Serialize => Some("serialize"),
+            TokenKind::Require => Some("require"),
+            TokenKind::Optional => Some("optional"),
+            TokenKind::Child => Some("child"),
+            TokenKind::Parent => Some("parent"),
+            TokenKind::Pool => Some("pool"),
+            TokenKind::Val => Some("val"),
+            TokenKind::Var => Some("var"),
+            TokenKind::Const => Some("const"),
+            TokenKind::Fixed => Some("fixed"),
+            TokenKind::Public => Some("public"),
+            TokenKind::Private => Some("private"),
+            TokenKind::Protected => Some("protected"),
+            TokenKind::Func => Some("func"),
+            TokenKind::Override => Some("override"),
+            TokenKind::Return => Some("return"),
+            TokenKind::Coroutine => Some("coroutine"),
+            // Lifecycle / coroutine keywords
+            TokenKind::Wait => Some("wait"),
+            TokenKind::Start => Some("start"),
+            TokenKind::Stop => Some("stop"),
+            TokenKind::StopAll => Some("stopAll"),
+            TokenKind::Awake => Some("awake"),
+            TokenKind::Update => Some("update"),
+            TokenKind::FixedUpdate => Some("fixedUpdate"),
+            TokenKind::LateUpdate => Some("lateUpdate"),
+            TokenKind::OnEnable => Some("onEnable"),
+            TokenKind::OnDisable => Some("onDisable"),
+            TokenKind::OnDestroy => Some("onDestroy"),
+            TokenKind::OnTriggerEnter => Some("onTriggerEnter"),
+            TokenKind::OnTriggerExit => Some("onTriggerExit"),
+            TokenKind::OnTriggerStay => Some("onTriggerStay"),
+            TokenKind::OnCollisionEnter => Some("onCollisionEnter"),
+            TokenKind::OnCollisionExit => Some("onCollisionExit"),
+            TokenKind::OnCollisionStay => Some("onCollisionStay"),
+            // Control flow
+            TokenKind::If => Some("if"),
+            TokenKind::Else => Some("else"),
+            TokenKind::When => Some("when"),
+            TokenKind::For => Some("for"),
+            TokenKind::While => Some("while"),
+            TokenKind::In => Some("in"),
+            TokenKind::Until => Some("until"),
+            TokenKind::DownTo => Some("downTo"),
+            TokenKind::Step => Some("step"),
+            TokenKind::Break => Some("break"),
+            TokenKind::Continue => Some("continue"),
+            TokenKind::Is => Some("is"),
+            // Listen / intrinsic
+            TokenKind::Listen => Some("listen"),
+            TokenKind::Unlisten => Some("unlisten"),
+            TokenKind::Manual => Some("manual"),
+            TokenKind::Intrinsic => Some("intrinsic"),
+            // Exceptions
+            TokenKind::Try => Some("try"),
+            TokenKind::Catch => Some("catch"),
+            TokenKind::Finally => Some("finally"),
+            TokenKind::Throw => Some("throw"),
+            // Modifiers
+            TokenKind::Static => Some("static"),
+            TokenKind::Abstract => Some("abstract"),
+            TokenKind::Sealed => Some("sealed"),
+            TokenKind::Open => Some("open"),
+            TokenKind::TypeAlias => Some("typealias"),
+            TokenKind::As => Some("as"),
+            TokenKind::Struct => Some("struct"),
+            TokenKind::Extend => Some("extend"),
+            TokenKind::Operator => Some("operator"),
+            TokenKind::Using => Some("using"),
+            TokenKind::Null => Some("null"),
+            TokenKind::This => Some("this"),
+            TokenKind::BoolTrue => Some("true"),
+            TokenKind::BoolFalse => Some("false"),
+            TokenKind::NextFrame => Some("nextFrame"),
+            TokenKind::FixedFrame => Some("fixedFrame"),
+            _ => None,
+        }
+    }
+}
+
 /// Look up an identifier string to see if it's a keyword.
 pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
     match ident {

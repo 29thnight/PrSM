@@ -1453,6 +1453,31 @@ hello world
         );
     }
 
+    // Issue #4: parameter names that collide with PrSM keywords
+    // (`start`, `length`, `class`, etc.) must be accepted in declaration
+    // position. The lang-5 spec example for `ref struct` uses `start` as
+    // a field name; the parser previously rejected it as a `Start` token.
+    #[test]
+    fn test_ref_struct_keyword_param_name() {
+        let src = "ref struct Slice(start: Int, length: Int) {\n  func describe(): String = \"slice\"\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("public ref struct Slice"),
+            "expected public ref struct Slice: {}",
+            output
+        );
+        assert!(
+            output.contains("public int start;"),
+            "expected `start` field declaration: {}",
+            output
+        );
+        assert!(
+            output.contains("public int length;"),
+            "expected `length` field declaration: {}",
+            output
+        );
+    }
+
     // `arr[1..5]` lowers to a C# range slice. PrSM `..` is inclusive
     // (matching Kotlin), so the lowered upper bound is `(5 + 1)`.
     // `arr until 5` lowers to the half-open form `arr[1..5]`.

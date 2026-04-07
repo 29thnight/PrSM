@@ -95,6 +95,33 @@ impl Parser {
         }
     }
 
+    /// Like `expect_ident`, but also accepts keyword tokens by mapping
+    /// them back to their raw source text via `TokenKind::keyword_text`.
+    /// Used in positions where a keyword may legitimately serve as an
+    /// identifier — for example, parameter names (`Slice(start: Int)`)
+    /// or state machine state names (`state Update { ... }`). The
+    /// caller is responsible for guaranteeing that the keyword's normal
+    /// meaning would not have triggered here (i.e. the production is
+    /// already inside a context where only an identifier is expected).
+    fn expect_ident_or_keyword(&mut self) -> Result<(String, Span), ParseError> {
+        match self.peek().clone() {
+            TokenKind::Identifier(name) => {
+                let span = self.peek_span();
+                self.advance();
+                Ok((name, span))
+            }
+            ref kind => {
+                if let Some(text) = kind.keyword_text() {
+                    let span = self.peek_span();
+                    self.advance();
+                    Ok((text.to_string(), span))
+                } else {
+                    Err(self.error(format!("Expected identifier, found {:?}", self.peek())))
+                }
+            }
+        }
+    }
+
     /// Check if the current token is the contextual identifier with the given text.
     fn check_contextual(&self, text: &str) -> bool {
         matches!(self.peek(), TokenKind::Identifier(name) if name == text)
@@ -4217,17 +4244,30 @@ impl Parser {
             }
             this.tokens.get(p).map(|t| t.kind.clone()).unwrap_or(TokenKind::Eof)
         };
-        if self.check_contextual("ref") && matches!(next_after(self), TokenKind::Identifier(_)) {
+        // Issue #4: parameter names may legitimately collide with PrSM
+        // keywords (`ref struct Slice(start: Int, length: Int)` from the
+        // lang-5 spec). Allow either an identifier or a keyword token in
+        // the parameter-name slot. The keyword's normal meaning is not
+        // in play here because the parser is already inside a parameter
+        // list, where only a name-colon-type sequence is valid.
+        //
+        // The disambiguation for the `ref` / `out` / `vararg` modifiers
+        // accepts a following identifier *or* a keyword (since the
+        // parameter name itself is now allowed to be a keyword).
+        let looks_like_param_name = |kind: &TokenKind| -> bool {
+            matches!(kind, TokenKind::Identifier(_)) || kind.keyword_text().is_some()
+        };
+        if self.check_contextual("ref") && looks_like_param_name(&next_after(self)) {
             self.advance();
             modifier = ParamMod::Ref;
-        } else if self.check_contextual("out") && matches!(next_after(self), TokenKind::Identifier(_)) {
+        } else if self.check_contextual("out") && looks_like_param_name(&next_after(self)) {
             self.advance();
             modifier = ParamMod::Out;
-        } else if self.check_contextual("vararg") && matches!(next_after(self), TokenKind::Identifier(_)) {
+        } else if self.check_contextual("vararg") && looks_like_param_name(&next_after(self)) {
             self.advance();
             is_vararg = true;
         }
-        let (name, name_span) = self.expect_ident()?;
+        let (name, name_span) = self.expect_ident_or_keyword()?;
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
         let default = if self.eat(&TokenKind::Eq) {
