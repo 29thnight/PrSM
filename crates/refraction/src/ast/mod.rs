@@ -211,6 +211,10 @@ pub enum Member {
         is_operator: bool,
         /// v4: `async func` — lowered to async Task/UniTask method.
         is_async: bool,
+        /// v5 Sprint 2: leading `@burst`/`@header`/etc. annotations attached
+        /// to this function. The lowering pass uses these to drive
+        /// `[BurstCompile]` emission and burst analysis.
+        annotations: Vec<Annotation>,
         name: String,
         name_span: Span,
         type_params: Vec<String>,

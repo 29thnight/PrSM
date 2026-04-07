@@ -61,6 +61,11 @@ impl LanguageFeature {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnityCapabilities {
     pub input_system_package: bool,
+    /// v5 Sprint 2: `com.cysharp.unitask` is present in the Unity package
+    /// manifest. When true, async functions lower to `UniTask`/`UniTask<T>`;
+    /// when false, they fall back to the standard
+    /// `System.Threading.Tasks.Task` family.
+    pub unitask_package: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -156,6 +161,7 @@ fn detect_unity_capabilities(project_root: &Path) -> UnityCapabilities {
     };
 
     capabilities.input_system_package = dependencies.contains_key("com.unity.inputsystem");
+    capabilities.unitask_package = dependencies.contains_key("com.cysharp.unitask");
     capabilities
 }
 

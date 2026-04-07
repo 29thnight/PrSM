@@ -1470,7 +1470,7 @@ fn lifecycle_method_name(kind: LifecycleKind) -> &'static str {
 
 fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableSignature>) -> CsMember {
     match m {
-        Member::Func { visibility, is_static, is_override, is_abstract, is_open, is_async, name, type_params, where_clauses, params, return_ty, body, .. } => {
+        Member::Func { visibility, is_static, is_override, is_abstract, is_open, is_async, annotations, name, type_params, where_clauses, params, return_ty, body, .. } => {
             let inner_ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
             let ret = if *is_async {
                 async_return_type(&inner_ret)
@@ -1524,8 +1524,12 @@ fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableS
             // Build method name with optional type parameters
             let cs_name = lower_func_name_with_generics(name, type_params);
 
+            // Language 5, Sprint 2: forward `@burst` and `@header` style
+            // annotations to C# attributes on the lowered method.
+            let attrs = lower_func_annotations(annotations);
+
             CsMember::Method {
-                attributes: vec![],
+                attributes: attrs,
                 modifiers: mods,
                 return_ty: ret,
                 name: cs_name,
@@ -1536,6 +1540,49 @@ fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableS
             }
         }
         _ => CsMember::RawCode("// unexpected member".into()),
+    }
+}
+
+/// Language 5, Sprint 2: lower a list of `@name(args)` annotations on a
+/// PrSM `func` declaration to C# attribute strings. The recognized
+/// annotations include the v4 `@header(...)` and the new `@burst`
+/// annotation, which lowers to `[Unity.Burst.BurstCompile]`.
+fn lower_func_annotations(annotations: &[Annotation]) -> Vec<String> {
+    let mut out = Vec::new();
+    for ann in annotations {
+        match ann.name.as_str() {
+            "burst" => out.push("[Unity.Burst.BurstCompile]".into()),
+            // Pass-through any other annotation as a verbatim attribute.
+            // The args are rendered with `lower_expr` so literal/string
+            // values forward to the corresponding C# attribute argument.
+            _ => {
+                let cs_name = pascal_attr_case(&ann.name);
+                if ann.args.is_empty() {
+                    out.push(format!("[{}]", cs_name));
+                } else {
+                    let rendered: Vec<String> = ann.args.iter().map(lower_expr).collect();
+                    out.push(format!("[{}({})]", cs_name, rendered.join(", ")));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Mirror the parser-side helper that capitalizes the first character
+/// of an attribute name (`burst` → `Burst`, `serializeField` → `SerializeField`).
+fn pascal_attr_case(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => {
+            let mut out = String::new();
+            for ch in c.to_uppercase() {
+                out.push(ch);
+            }
+            out.extend(chars);
+            out
+        }
+        None => String::new(),
     }
 }
 
@@ -1599,7 +1646,7 @@ fn lower_intrinsic_coroutine(name: &str, params: &[Param], code: &str, span: Spa
 /// component-level `ComponentCtx`.
 fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
     match m {
-        Member::Func { visibility, is_static, is_override, is_abstract, is_open, is_async, name, type_params, where_clauses, params, return_ty, body, .. } => {
+        Member::Func { visibility, is_static, is_override, is_abstract, is_open, is_async, annotations, name, type_params, where_clauses, params, return_ty, body, .. } => {
             let inner_ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
             let ret = if *is_async {
                 async_return_type(&inner_ret)
@@ -1650,8 +1697,11 @@ fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
             // Build method name with optional type parameters
             let cs_name = lower_func_name_with_generics(name, type_params);
 
+            // Language 5, Sprint 2: forward function annotations to attrs.
+            let attrs = lower_func_annotations(annotations);
+
             CsMember::Method {
-                attributes: vec![],
+                attributes: attrs,
                 modifiers: mods,
                 return_ty: ret,
                 name: cs_name,

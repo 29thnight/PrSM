@@ -1502,6 +1502,23 @@ hello world
         );
     }
 
+    // `@burst` annotation lowers to `[Unity.Burst.BurstCompile]`.
+    #[test]
+    fn test_burst_annotation_lowers_to_attribute() {
+        let src = r#"component Compute : MonoBehaviour {
+  @burst
+  func process(): Int {
+    return 42
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("[Unity.Burst.BurstCompile]"),
+            "expected BurstCompile attribute: {}",
+            output
+        );
+    }
+
     // `nameof(target)` — emits a verbatim C# `nameof(target)` expression.
     #[test]
     fn test_nameof_emits_csharp_nameof() {

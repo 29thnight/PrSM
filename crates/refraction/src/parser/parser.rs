@@ -806,7 +806,7 @@ impl Parser {
             TokenKind::Child => self.parse_child(),
             TokenKind::Parent => self.parse_parent(),
             TokenKind::Pool => self.parse_pool(),
-            TokenKind::Func => self.parse_func(Visibility::Public, false),
+            TokenKind::Func => self.parse_func_with_annotations(Visibility::Public, false, annotations),
             TokenKind::Coroutine => self.parse_coroutine(),
             TokenKind::Intrinsic => self.parse_intrinsic_member(),
             TokenKind::Override => {
@@ -826,7 +826,7 @@ impl Parser {
                 }
                 match self.peek().clone() {
                     TokenKind::Serialize => self.parse_serialize_field_with_vis(annotations, target_annotations, Some(vis)),
-                    TokenKind::Func => self.parse_func(vis, false),
+                    TokenKind::Func => self.parse_func_with_annotations(vis, false, annotations),
                     TokenKind::Override => {
                         self.advance();
                         self.expect(&TokenKind::Func)?;
@@ -850,12 +850,12 @@ impl Parser {
             TokenKind::Abstract => {
                 self.advance(); // consume 'abstract'
                 self.expect(&TokenKind::Func)?;
-                self.parse_func_inner_ext(Visibility::Public, false, false, true, false, false)
+                self.parse_func_inner_ext(Visibility::Public, false, false, true, false, false, vec![])
             }
             TokenKind::Open => {
                 self.advance(); // consume 'open'
                 self.expect(&TokenKind::Func)?;
-                self.parse_func_inner_ext(Visibility::Public, false, false, false, true, false)
+                self.parse_func_inner_ext(Visibility::Public, false, false, false, true, false, vec![])
             }
             TokenKind::Operator => self.parse_operator_member(),
             TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property_with_targets(Visibility::Public, false, target_annotations),
@@ -1310,25 +1310,34 @@ impl Parser {
     }
 
     fn parse_func(&mut self, vis: Visibility, is_override: bool) -> Result<Member, ParseError> {
+        self.parse_func_with_annotations(vis, is_override, vec![])
+    }
+
+    fn parse_func_with_annotations(
+        &mut self,
+        vis: Visibility,
+        is_override: bool,
+        annotations: Vec<Annotation>,
+    ) -> Result<Member, ParseError> {
         self.advance(); // consume 'func'
-        self.parse_func_inner(vis, false, is_override)
+        self.parse_func_inner_ext(vis, false, is_override, false, false, false, annotations)
     }
 
     fn parse_func_with_static(&mut self, vis: Visibility, is_override: bool, is_static: bool) -> Result<Member, ParseError> {
         self.advance(); // consume 'func'
-        self.parse_func_inner(vis, is_static, is_override)
+        self.parse_func_inner_ext(vis, is_static, is_override, false, false, false, vec![])
     }
 
     fn parse_func_inner(&mut self, vis: Visibility, is_static: bool, is_override: bool) -> Result<Member, ParseError> {
-        self.parse_func_inner_ext(vis, is_static, is_override, false, false, false)
+        self.parse_func_inner_ext(vis, is_static, is_override, false, false, false, vec![])
     }
 
     /// Convenience: parse `func` after a contextual `async` prefix has already been consumed.
     fn parse_func_inner_async(&mut self, vis: Visibility) -> Result<Member, ParseError> {
-        self.parse_func_inner_ext(vis, false, false, false, false, true)
+        self.parse_func_inner_ext(vis, false, false, false, false, true, vec![])
     }
 
-    fn parse_func_inner_ext(&mut self, vis: Visibility, is_static: bool, is_override: bool, is_abstract: bool, is_open: bool, is_async: bool) -> Result<Member, ParseError> {
+    fn parse_func_inner_ext(&mut self, vis: Visibility, is_static: bool, is_override: bool, is_abstract: bool, is_open: bool, is_async: bool, annotations: Vec<Annotation>) -> Result<Member, ParseError> {
         let start = self.peek_span();
         let (name, name_span) = self.expect_ident()?;
 
@@ -1374,6 +1383,7 @@ impl Parser {
             is_open,
             is_operator: false,
             is_async,
+            annotations,
             name,
             name_span,
             type_params,
@@ -1790,6 +1800,7 @@ impl Parser {
             is_open: false,
             is_operator: true,
             is_async: false,
+            annotations: vec![],
             name: op_name,
             name_span: op_name_span,
             type_params: vec![],

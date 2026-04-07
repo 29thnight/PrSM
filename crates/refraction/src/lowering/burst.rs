@@ -56,10 +56,11 @@ fn analyze_class(class: &CsClass, options: &BurstAnalysisOptions, report: &mut B
             name,
             body,
             source_span,
+            attributes,
             ..
         } = member
         {
-            if !is_burst_target(name, options) {
+            if !is_burst_target(name, attributes, options) {
                 continue;
             }
             report.analyzed_methods += 1;
@@ -74,8 +75,15 @@ fn analyze_class(class: &CsClass, options: &BurstAnalysisOptions, report: &mut B
     }
 }
 
-fn is_burst_target(name: &str, options: &BurstAnalysisOptions) -> bool {
+fn is_burst_target(name: &str, attributes: &[String], options: &BurstAnalysisOptions) -> bool {
     if options.explicit_targets.iter().any(|n| n == name) {
+        return true;
+    }
+    // Language 5, Sprint 2: detect `[Unity.Burst.BurstCompile]` attribute
+    // emitted by `@burst` annotation lowering. Anything containing the
+    // substring "BurstCompile" counts (so unqualified `[BurstCompile]`
+    // works too).
+    if attributes.iter().any(|a| a.contains("BurstCompile")) {
         return true;
     }
     name.starts_with("burst_") || name.starts_with("Burst_") || name.starts_with("__burst_")
@@ -431,5 +439,31 @@ mod tests {
         let report = analyze(&file, &opts);
         assert_eq!(report.analyzed_methods, 1);
         assert!(report.diagnostics.iter().any(|d| d.code == "W028"));
+    }
+
+    // Language 5, Sprint 2: a method tagged with `[Unity.Burst.BurstCompile]`
+    // is treated as a Burst target without needing the naming heuristic.
+    #[test]
+    fn burst_compile_attribute_targets_are_analyzed() {
+        let mut method = make_method(
+            "ProcessPoints",
+            vec![CsStmt::TryCatch {
+                try_body: vec![],
+                catches: vec![],
+                finally_body: None,
+                source_span: None,
+            }],
+        );
+        if let CsMember::Method { attributes, .. } = &mut method {
+            attributes.push("[Unity.Burst.BurstCompile]".into());
+        }
+        let file = class_with(method);
+        let report = analyze(&file, &BurstAnalysisOptions::default());
+        assert_eq!(report.analyzed_methods, 1);
+        assert!(
+            report.diagnostics.iter().any(|d| d.code == "E138"),
+            "expected E138 for try/catch in @burst method: {:?}",
+            report.diagnostics
+        );
     }
 }
