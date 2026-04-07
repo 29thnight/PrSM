@@ -100,6 +100,31 @@ impl PrismType {
                 return matches!(target, PrismType::External(_));
             }
         }
+        // Issue #21: collection literals (`[1, 2, 3]`, `{"k": v}`) are
+        // analyzed as `External("list")` / `External("map")` because
+        // the entry types are not always inferable without consulting
+        // the explicit annotation. Trust the annotation when the target
+        // is a corresponding generic collection type.
+        if let PrismType::External(name) = self {
+            match name.as_str() {
+                "list" => {
+                    if matches!(target, PrismType::Generic(g, _) if g == "List" || g == "MutableList" || g == "IList") {
+                        return true;
+                    }
+                }
+                "map" => {
+                    if matches!(target, PrismType::Generic(g, _) if g == "Map" || g == "MutableMap" || g == "Dictionary" || g == "IDictionary") {
+                        return true;
+                    }
+                }
+                "set" => {
+                    if matches!(target, PrismType::Generic(g, _) if g == "Set" || g == "MutableSet" || g == "HashSet") {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
         // null is assignable to any nullable type
         // A non-null T is assignable to T?
         if let PrismType::Nullable(inner) = target {

@@ -1528,6 +1528,20 @@ hello world
         );
     }
 
+    // Issue #21: a map literal assigned to a `Map<String, Int>`-typed
+    // variable passes the type check, even though the analyzer reports
+    // the literal as `External("map")` instead of a full generic type.
+    #[test]
+    fn test_map_literal_assignment_to_typed_variable() {
+        let src = "component Probe : MonoBehaviour {\n  func go() {\n    val lookup: Map<String, Int> = {\"hp\": 100, \"mp\": 50}\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("Dictionary<string, int> lookup"),
+            "expected Dictionary<string, int> lookup assignment: {}",
+            output
+        );
+    }
+
     // Issue #20: a lambda literal assigned to a variable annotated
     // with a function type passes the type check (the analyzer trusts
     // the explicit annotation rather than producing a function type
