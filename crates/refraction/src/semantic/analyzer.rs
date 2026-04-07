@@ -1275,7 +1275,7 @@ impl Analyzer {
                 body,
                 ..
             } => {
-                let iter_ty = self.analyze_expr(iterable);
+                let _iter_ty = self.analyze_expr(iterable);
                 if let Some(pattern) = for_pattern {
                     self.record_pattern_binding(
                         HirPatternBindingKind::ForDestructure,
@@ -1286,10 +1286,24 @@ impl Analyzer {
                     );
                 }
                 self.scopes.push_scope();
-                // For range expressions, infer the element type
-                let elem_ty = match &iter_ty {
-                    // Range of ints → Int
-                    _ => PrismType::External("var".into()), // simplified for v1
+                // Issue #7: infer the induction variable type from the
+                // iterable's static shape. For a `Range` expression
+                // (`a until b`, `a..b`, `a downTo b`) the element type
+                // is the type of the bounds (`Int` for `0 until 5`,
+                // `Float` for `0.0..1.0`). Other iterables fall back to
+                // `var` until full collection-type inference lands.
+                // The previous fall-through to `var` produced a false
+                // positive E148 inside `for i in 0 until 5 { yield i }`.
+                let elem_ty = match iterable {
+                    Expr::Range { start, .. } => {
+                        let t = self.analyze_expr(start);
+                        if t.is_error() {
+                            PrismType::External("var".into())
+                        } else {
+                            t
+                        }
+                    }
+                    _ => PrismType::External("var".into()),
                 };
                 let definition_id = self.record_nested_definition(
                     var_name,

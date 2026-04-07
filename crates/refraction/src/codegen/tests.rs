@@ -1478,6 +1478,26 @@ hello world
         );
     }
 
+    // Issue #7: `yield i` inside a `for` loop must succeed when the
+    // for-loop induction variable shares the coroutine's element type.
+    // The previous semantic analyzer treated every for-loop variable as
+    // `var`, producing a false-positive E148 against `Seq<Int>`.
+    #[test]
+    fn test_yield_for_loop_induction_variable() {
+        let src = "component Cutscene : MonoBehaviour {\n  coroutine countdown(): Seq<Int> {\n    for i in 0 until 5 {\n      yield i\n    }\n    yield 0\n    yield break\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("yield return i"),
+            "expected `yield return i` in lowered coroutine: {}",
+            output
+        );
+        assert!(
+            output.contains("IEnumerator<int> countdown"),
+            "expected typed iterator return: {}",
+            output
+        );
+    }
+
     // Issue #6: a named argument whose name collides with a PrSM keyword
     // (`parent`, `child`, `length`, etc.) must be accepted at the call
     // site. Discovered after the lang-5 spec example for default
