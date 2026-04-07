@@ -3691,7 +3691,24 @@ impl Parser {
         }
 
         // ── named argument (legacy `name = expr`, v5 `name: expr`) ──
-        if let TokenKind::Identifier(name) = self.peek().clone() {
+        // Identifiers are always candidates for the name slot. Keyword
+        // tokens are also candidates *only* when followed by `=` or `:`,
+        // so an `if` / `when` expression starting with a keyword is
+        // unaffected. This handles issue #6 where `parent: target`
+        // failed because `parent` lexes as the `Parent` keyword.
+        let arg_name_text: Option<String> = if let TokenKind::Identifier(name) = self.peek() {
+            Some(name.clone())
+        } else if let Some(text) = self.peek().keyword_text() {
+            let next = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+            if matches!(next, Some(TokenKind::Eq) | Some(TokenKind::Colon)) {
+                Some(text.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(name) = arg_name_text {
             let save = self.pos;
             self.advance();
             if self.eat(&TokenKind::Eq) {

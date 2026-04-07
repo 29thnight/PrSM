@@ -1478,6 +1478,21 @@ hello world
         );
     }
 
+    // Issue #6: a named argument whose name collides with a PrSM keyword
+    // (`parent`, `child`, `length`, etc.) must be accepted at the call
+    // site. Discovered after the lang-5 spec example for default
+    // parameters tried `instantiate(prefab, parent: someParent)`.
+    #[test]
+    fn test_named_argument_with_keyword_name() {
+        let src = "component Probe : MonoBehaviour {\n  func instantiate(prefab: GameObject, parent: Transform? = null): GameObject {\n    return GameObject.Instantiate(prefab, parent)\n  }\n  func go(some: GameObject, target: Transform) {\n    instantiate(some, parent: target)\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("instantiate(some, parent: target)"),
+            "expected named argument call with keyword name: {}",
+            output
+        );
+    }
+
     // Issue #2: a `serialize var hp: Int { get; set { ... } }`
     // declaration must lower to a backing field carrying
     // `[SerializeField]` (with brackets), and the empty getter must
