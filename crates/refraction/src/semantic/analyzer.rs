@@ -59,6 +59,15 @@ pub struct Analyzer {
     current_member_name: Option<String>,
     /// Whether the `input-system` language feature is enabled for this project.
     input_system_enabled: bool,
+    /// Language 5, Sprint 1: tracks whether the current iterator-bodied
+    /// member has produced at least one value via `yield`. Used by W033
+    /// (`coroutine declares Seq<T> but never yields`).
+    coroutine_yielded_values: bool,
+    /// Language 5, Sprint 1: the declared element type of the surrounding
+    /// iterator body, if known. Set when entering a coroutine with an
+    /// explicit return type or a func returning `Seq<T>`/`IEnumerator<T>`/
+    /// `IEnumerable<T>`. Used by E148 to validate `yield expr`.
+    coroutine_element_type: Option<PrismType>,
 }
 
 impl Analyzer {
@@ -84,6 +93,8 @@ impl Analyzer {
             current_decl_name: None,
             current_member_name: None,
             input_system_enabled: false,
+            coroutine_yielded_values: false,
+            coroutine_element_type: None,
         }
     }
 
@@ -855,7 +866,23 @@ impl Analyzer {
     fn analyze_member_body(&mut self, member: &Member) {
         match member {
             Member::Func { name, params, body, return_ty, is_async, span, .. } => {
-                self.body_ctx = BodyContext::Function;
+                // Language 5, Sprint 1: a func with an iterator-shaped return
+                // type (`Seq<T>`, `IEnumerator(<T>)`, `IEnumerable(<T>)`) is
+                // promoted to a Coroutine context so `yield expr` / `yield break`
+                // is permitted in its body. The element type is captured for
+                // E148.
+                let iter_elem = return_ty
+                    .as_ref()
+                    .and_then(|t| iterator_element_type(&self.resolve_typeref(t)));
+                let is_iter_func = iter_elem.is_some()
+                    || return_ty.as_ref().map(|t| is_non_generic_iterator(&self.resolve_typeref(t))).unwrap_or(false);
+                self.body_ctx = if is_iter_func {
+                    BodyContext::Coroutine
+                } else {
+                    BodyContext::Function
+                };
+                let prev_yielded = std::mem::replace(&mut self.coroutine_yielded_values, false);
+                let prev_elem = std::mem::replace(&mut self.coroutine_element_type, iter_elem.clone());
                 self.current_member_name = Some(name.clone());
                 let prev_in_async = self.in_async_fn;
                 let prev_used_await = self.async_used_await;
@@ -893,13 +920,28 @@ impl Analyzer {
                         *span,
                     );
                 }
+                // W033 — iterator declared a typed element but never produced one.
+                if is_iter_func && self.coroutine_element_type.is_some() && !self.coroutine_yielded_values {
+                    self.diag.warning(
+                        "W033",
+                        format!("iterator function '{}' declares an element type but never yields a value", name),
+                        *span,
+                    );
+                }
+                self.coroutine_yielded_values = prev_yielded;
+                self.coroutine_element_type = prev_elem;
                 self.in_async_fn = prev_in_async;
                 self.async_used_await = prev_used_await;
                 self.current_member_name = None;
                 self.body_ctx = BodyContext::None;
             }
-            Member::Coroutine { name, params, body, .. } => {
+            Member::Coroutine { name, params, body, return_ty, span, .. } => {
                 self.body_ctx = BodyContext::Coroutine;
+                let elem_ty = return_ty
+                    .as_ref()
+                    .and_then(|t| iterator_element_type(&self.resolve_typeref(t)));
+                let prev_yielded = std::mem::replace(&mut self.coroutine_yielded_values, false);
+                let prev_elem = std::mem::replace(&mut self.coroutine_element_type, elem_ty.clone());
                 self.current_member_name = Some(name.clone());
                 self.scopes.push_scope();
                 for p in params {
@@ -918,6 +960,15 @@ impl Analyzer {
                 }
                 self.analyze_block(body);
                 self.scopes.pop_scope();
+                if elem_ty.is_some() && !self.coroutine_yielded_values {
+                    self.diag.warning(
+                        "W033",
+                        format!("coroutine '{}' declares an element type but never yields a value", name),
+                        *span,
+                    );
+                }
+                self.coroutine_yielded_values = prev_yielded;
+                self.coroutine_element_type = prev_elem;
                 self.current_member_name = None;
                 self.body_ctx = BodyContext::None;
             }
@@ -1396,6 +1447,92 @@ impl Analyzer {
                         *span,
                     );
                 }
+            }
+            // ── Language 5, Sprint 1: yield statements ───────────
+            Stmt::Yield { value, span } => {
+                // E147: `yield` is only valid inside a coroutine declaration
+                // or a func returning Seq<T>/IEnumerator(<T>)/IEnumerable(<T>).
+                // The body context is set to Coroutine for both cases (the
+                // analyze_decl path is responsible for entering that context
+                // when a func has an iterator return type).
+                if self.body_ctx != BodyContext::Coroutine {
+                    self.diag.error(
+                        "E147",
+                        "'yield' is only valid inside a coroutine or iterator-returning function",
+                        *span,
+                    );
+                }
+                // Track that the current iterator body actually yielded a value.
+                self.coroutine_yielded_values = true;
+                let value_ty = self.analyze_expr(value);
+                // E148: when an element type is declared (Seq<T>, IEnumerator<T>,
+                // IEnumerable<T>), the yielded value must be assignable to T.
+                if let Some(elem_ty) = self.coroutine_element_type.clone() {
+                    if !value_ty.is_assignable_to(&elem_ty) && !value_ty.is_error() && !elem_ty.is_error() {
+                        self.diag.error(
+                            "E148",
+                            format!(
+                                "yield value type '{}' does not match declared element type '{}'",
+                                value_ty.display_name(),
+                                elem_ty.display_name()
+                            ),
+                            *span,
+                        );
+                    }
+                }
+            }
+            Stmt::YieldBreak { span } => {
+                if self.body_ctx != BodyContext::Coroutine {
+                    self.diag.error(
+                        "E147",
+                        "'yield break' is only valid inside a coroutine or iterator-returning function",
+                        *span,
+                    );
+                }
+            }
+            // ── Language 5, Sprint 1: preprocessor block ─────────
+            Stmt::Preprocessor { arms, else_arm, .. } => {
+                // Walk every branch — diagnostics from inactive arms are still
+                // surfaced because PrSM does not evaluate the conditions at
+                // compile time. We do, however, warn (W034) on unknown
+                // symbols inside the conditions.
+                for arm in arms {
+                    self.check_preprocessor_cond(&arm.cond);
+                    for s in &arm.body {
+                        self.analyze_stmt(s);
+                    }
+                }
+                if let Some(else_stmts) = else_arm {
+                    for s in else_stmts {
+                        self.analyze_stmt(s);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Walk a preprocessor condition tree and emit W034 for any unknown
+    /// symbols (symbols that are neither curated PrSM aliases nor in the
+    /// recognized set of common Unity defines). Unknown symbols still
+    /// pass through verbatim — the warning is informational.
+    fn check_preprocessor_cond(&mut self, cond: &PreprocessorCond) {
+        match cond {
+            PreprocessorCond::Symbol { name, span } => {
+                if !is_known_preprocessor_symbol(name) {
+                    self.diag.warning(
+                        "W034",
+                        format!(
+                            "unknown preprocessor symbol '{}' — passes through verbatim and may not exist in target",
+                            name
+                        ),
+                        *span,
+                    );
+                }
+            }
+            PreprocessorCond::Not { inner, .. } => self.check_preprocessor_cond(inner),
+            PreprocessorCond::And { left, right, .. } | PreprocessorCond::Or { left, right, .. } => {
+                self.check_preprocessor_cond(left);
+                self.check_preprocessor_cond(right);
             }
         }
     }
@@ -2232,6 +2369,57 @@ fn ascii_capitalize(s: &str) -> String {
     }
 }
 
+/// Language 5, Sprint 1: extract the element type T from an iterator-shaped
+/// PrSM type. Returns `Some(T)` for `Seq<T>`, `IEnumerator<T>`, and
+/// `IEnumerable<T>`. Returns `None` for non-generic iterators or for
+/// non-iterator types.
+fn iterator_element_type(ty: &PrismType) -> Option<PrismType> {
+    if let PrismType::Generic(name, args) = ty {
+        if matches!(name.as_str(), "Seq" | "IEnumerator" | "IEnumerable") && args.len() == 1 {
+            return Some(args[0].clone());
+        }
+    }
+    None
+}
+
+/// Returns true for the non-generic iterator types `IEnumerator` and
+/// `IEnumerable` — these are valid iterator return types but place no
+/// constraint on the yielded value type, so E148 is suppressed.
+fn is_non_generic_iterator(ty: &PrismType) -> bool {
+    matches!(ty, PrismType::External(name) if name == "IEnumerator" || name == "IEnumerable")
+}
+
+/// The curated set of preprocessor symbols documented in the v5 spec.
+/// Symbols outside this list still pass through to the C# preprocessor —
+/// the analyzer surfaces W034 only as a hint to the user.
+fn is_known_preprocessor_symbol(name: &str) -> bool {
+    matches!(
+        name,
+        "editor"
+            | "debug"
+            | "release"
+            | "ios"
+            | "android"
+            | "standalone"
+            | "il2cpp"
+            | "mono"
+            | "unity20223"
+            | "unity20231"
+            | "unity6"
+            // Allow common all-caps user defines without W034 noise.
+            | "DEBUG"
+            | "TRACE"
+            | "RELEASE"
+            | "UNITY_EDITOR"
+            | "UNITY_IOS"
+            | "UNITY_ANDROID"
+            | "UNITY_STANDALONE"
+            | "ENABLE_IL2CPP"
+            | "ENABLE_MONO"
+    ) || name.contains('_')
+        || name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+}
+
 fn lifecycle_name(kind: LifecycleKind) -> &'static str {
     match kind {
         LifecycleKind::Awake => "awake",
@@ -2718,6 +2906,86 @@ component PlayerHealth : MonoBehaviour {
         assert!(
             diags.iter().any(|d| d.code == "E143"),
             "expected E143: {:?}",
+            diags
+        );
+    }
+
+    // ── Language 5, Sprint 1 ───────────────────────────────────────
+
+    // E147: yield outside an iterator context.
+    #[test]
+    fn test_yield_outside_iterator_e147() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  func f() {\n    yield 1\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E147"),
+            "expected E147 for yield outside iterator: {:?}",
+            diags
+        );
+    }
+
+    // yield inside a coroutine — accepted with no diagnostics.
+    #[test]
+    fn test_yield_in_coroutine_ok() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  coroutine count(): Seq<Int> {\n    yield 1\n    yield 2\n    yield break\n  }\n}",
+        );
+        assert!(
+            diags.is_empty(),
+            "Unexpected errors for yield in coroutine: {:?}",
+            diags
+        );
+    }
+
+    // yield inside a func with iterator return type — also valid.
+    #[test]
+    fn test_yield_in_iterator_func_ok() {
+        let diags = errors(
+            "component Foo : MonoBehaviour {\n  func nums(): Seq<Int> {\n    yield 1\n    yield 2\n  }\n}",
+        );
+        assert!(
+            diags.is_empty(),
+            "Unexpected errors for yield in iterator-returning func: {:?}",
+            diags
+        );
+    }
+
+    // W033: coroutine declares an element type but never yields a value.
+    #[test]
+    fn test_coroutine_without_yield_w033() {
+        let diags = warnings(
+            "component Foo : MonoBehaviour {\n  coroutine empty(): Seq<Int> {\n    val x = 1\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "W033"),
+            "expected W033 when iterator never yields: {:?}",
+            diags
+        );
+    }
+
+    // Preprocessor block — known PrSM symbols pass without W034.
+    #[test]
+    fn test_preprocessor_known_symbol_no_w034() {
+        let diags = analyze(
+            "component Foo : MonoBehaviour {\n  update {\n    #if editor\n      val x = 1\n    #endif\n  }\n}",
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "W034"),
+            "should not warn on known symbol 'editor': {:?}",
+            diags
+        );
+    }
+
+    // Preprocessor block — unknown lowercase symbol triggers W034.
+    #[test]
+    fn test_preprocessor_unknown_symbol_w034() {
+        let diags = warnings(
+            "component Foo : MonoBehaviour {\n  update {\n    #if maybeFeature\n      val x = 1\n    #endif\n  }\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "W034"),
+            "expected W034 for unknown preprocessor symbol: {:?}",
             diags
         );
     }

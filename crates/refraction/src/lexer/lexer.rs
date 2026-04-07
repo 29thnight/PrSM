@@ -674,8 +674,37 @@ impl Lexer {
             ',' => self.make_span_token(TokenKind::Comma, start),
             ';' => self.make_span_token(TokenKind::Semicolon, start),
             '@' => self.make_span_token(TokenKind::At, start),
+            '#' => self.scan_preprocessor_directive(start),
             _ => self.make_span_token(
                 TokenKind::Error(format!("Unexpected character: '{}'", ch)),
+                start,
+            ),
+        }
+    }
+
+    /// Scan a `#if` / `#elif` / `#else` / `#endif` directive token.
+    ///
+    /// We have already consumed the `#` character; the scanner reads the
+    /// following identifier-like characters and maps it to the appropriate
+    /// `Hash*` token. Anything else becomes an error token — the parser
+    /// will surface E151/E152 diagnostics when it sees the wrong one.
+    fn scan_preprocessor_directive(&mut self, start: Position) -> Token {
+        let mut word = String::new();
+        while let Some(ch) = self.peek() {
+            if ch.is_alphanumeric() || ch == '_' {
+                word.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        match word.as_str() {
+            "if" => self.make_span_token(TokenKind::HashIf, start),
+            "elif" => self.make_span_token(TokenKind::HashElif, start),
+            "else" => self.make_span_token(TokenKind::HashElse, start),
+            "endif" => self.make_span_token(TokenKind::HashEndif, start),
+            _ => self.make_span_token(
+                TokenKind::Error(format!("Unknown preprocessor directive '#{}'", word)),
                 start,
             ),
         }

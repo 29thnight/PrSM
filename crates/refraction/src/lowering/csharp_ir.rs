@@ -112,6 +112,8 @@ pub enum CsStmt {
     },
     Return(Option<String>, Option<Span>),
     YieldReturn(String, Option<Span>),
+    /// `yield break;` — terminates an iterator (Language 5, Sprint 1).
+    YieldBreak(Option<Span>),
     Break(Option<Span>),
     Continue(Option<Span>),
     Raw(String, Option<Span>),
@@ -132,6 +134,22 @@ pub enum CsStmt {
         body: Vec<CsStmt>,
         source_span: Option<Span>,
     },
+    /// `#if COND ... #elif ... #else ... #endif` block (Language 5, Sprint 1).
+    /// Each arm holds the C# preprocessor expression text already in C#
+    /// form (e.g. `UNITY_EDITOR && !DEBUG`) and the body emitted as nested
+    /// `CsStmt`s. The lowering pipeline maps PrSM symbols to their canonical
+    /// C# defines before populating these arms.
+    Preprocessor {
+        arms: Vec<CsPreprocessorArm>,
+        else_body: Option<Vec<CsStmt>>,
+        source_span: Option<Span>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct CsPreprocessorArm {
+    pub cond: String,
+    pub body: Vec<CsStmt>,
 }
 
 #[derive(Debug, Clone)]

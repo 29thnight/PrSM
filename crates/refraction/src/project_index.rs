@@ -894,6 +894,23 @@ fn collect_stmt_type_references(
         Stmt::BindTo { target, .. } => {
             collect_expr_type_references(path, container_name, target, references);
         }
+        // Language 5, Sprint 1: yield + preprocessor walks.
+        Stmt::Yield { value, .. } => {
+            collect_expr_type_references(path, container_name, value, references);
+        }
+        Stmt::YieldBreak { .. } => {}
+        Stmt::Preprocessor { arms, else_arm, .. } => {
+            for arm in arms {
+                for s in &arm.body {
+                    collect_stmt_type_references(path, container_name, s, references);
+                }
+            }
+            if let Some(else_stmts) = else_arm {
+                for s in else_stmts {
+                    collect_stmt_type_references(path, container_name, s, references);
+                }
+            }
+        }
     }
 }
 

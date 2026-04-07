@@ -1358,4 +1358,96 @@ hello world
             output
         );
     }
+
+    // ── Language 5, Sprint 1 ──────────────────────────────────────
+
+    // Coroutine that uses general `yield expr` and `yield break`.
+    #[test]
+    fn test_coroutine_yield_general_value() {
+        let src = r#"component Cutscene : MonoBehaviour {
+  coroutine countdown(): Seq<Int> {
+    yield 3
+    yield 2
+    yield 1
+    yield break
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("System.Collections.Generic.IEnumerator<int>"),
+            "expected typed enumerator return: {}",
+            output
+        );
+        assert!(output.contains("yield return 3;"), "yield return 3: {}", output);
+        assert!(output.contains("yield return 1;"), "yield return 1: {}", output);
+        assert!(output.contains("yield break;"), "yield break: {}", output);
+    }
+
+    // `[field: SerializeField]` lowering for an auto-property with the
+    // `serialize` modifier.
+    #[test]
+    fn test_serialize_auto_property_field_target() {
+        let src = "component Player : MonoBehaviour {\n  serialize var hp: Int get set\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("[field: SerializeField]"),
+            "expected [field: SerializeField] attribute: {}",
+            output
+        );
+        assert!(
+            output.contains("public int hp { get; set; }"),
+            "expected auto-property declaration: {}",
+            output
+        );
+    }
+
+    // `#if editor` block lowers to `#if UNITY_EDITOR ... #endif`.
+    #[test]
+    fn test_preprocessor_editor_block_emits_unity_editor() {
+        let src = r#"component Foo : MonoBehaviour {
+  update {
+    move()
+    #if editor
+      drawGizmos()
+    #endif
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("#if UNITY_EDITOR"),
+            "expected #if UNITY_EDITOR: {}",
+            output
+        );
+        assert!(
+            output.contains("drawGizmos();"),
+            "expected guarded body: {}",
+            output
+        );
+        assert!(output.contains("#endif"), "expected #endif: {}", output);
+    }
+
+    // `#if ios && !editor` block — boolean operators on PrSM symbols.
+    #[test]
+    fn test_preprocessor_combined_condition_lowers_operators() {
+        let src = r#"component Foo : MonoBehaviour {
+  update {
+    #if ios && !editor
+      handleHaptics()
+    #elif android
+      handleVibration()
+    #endif
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("UNITY_IOS && !UNITY_EDITOR"),
+            "expected combined #if condition: {}",
+            output
+        );
+        assert!(
+            output.contains("#elif UNITY_ANDROID"),
+            "expected #elif android: {}",
+            output
+        );
+    }
 }

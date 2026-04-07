@@ -116,8 +116,8 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::Func { .. } => {
                         cs_members.push(lower_func_member_with_ctx(m, &mut listen_ctx));
                     }
-                    Member::Coroutine { name: cname, params, body, .. } => {
-                        cs_members.push(lower_coroutine_with_ctx(cname, params, body, &mut listen_ctx));
+                    Member::Coroutine { name: cname, params, body, return_ty, .. } => {
+                        cs_members.push(lower_coroutine_with_ctx(cname, params, body, return_ty.as_ref(), &mut listen_ctx));
                     }
                     Member::IntrinsicFunc { visibility, name: fname, params, return_ty, code, span, .. } => {
                         cs_members.push(lower_intrinsic_func(*visibility, fname, params, return_ty.as_ref(), code, *span));
@@ -125,8 +125,16 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::IntrinsicCoroutine { name: cname, params, code, span, .. } => {
                         cs_members.push(lower_intrinsic_coroutine(cname, params, code, *span));
                     }
-                    Member::Property { name: pname, ty, mutability, getter, setter, .. } => {
-                        cs_members.extend(lower_property_member(pname, ty, *mutability, getter, setter));
+                    Member::Property { name: pname, ty, mutability, getter, setter, is_serialize, target_annotations, .. } => {
+                        cs_members.extend(lower_property_member_with_targets(
+                            pname,
+                            ty,
+                            *mutability,
+                            getter,
+                            setter,
+                            *is_serialize,
+                            target_annotations,
+                        ));
                     }
                     // ── Phase 5 sugar ─────────────────────────────
                     Member::StateMachine { name: sm_name, states, .. } => {
@@ -327,8 +335,16 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::IntrinsicCoroutine { name: cname, params, code, span, .. } => {
                         cs_members.push(lower_intrinsic_coroutine(cname, params, code, *span));
                     }
-                    Member::Property { name: pname, ty, mutability, getter, setter, .. } => {
-                        cs_members.extend(lower_property_member(pname, ty, *mutability, getter, setter));
+                    Member::Property { name: pname, ty, mutability, getter, setter, is_serialize, target_annotations, .. } => {
+                        cs_members.extend(lower_property_member_with_targets(
+                            pname,
+                            ty,
+                            *mutability,
+                            getter,
+                            setter,
+                            *is_serialize,
+                            target_annotations,
+                        ));
                     }
                     _ => {}
                 }
@@ -611,8 +627,16 @@ fn lower_struct(name: &str, fields: &[Param], members: &[Member]) -> CsClass {
                 cs_members.extend(lower_operator_member(op_name, name, params, return_ty, body));
             }
             Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
-            Member::Property { name: pname, ty, mutability, getter, setter, .. } => {
-                cs_members.extend(lower_property_member(pname, ty, *mutability, getter, setter));
+            Member::Property { name: pname, ty, mutability, getter, setter, is_serialize, target_annotations, .. } => {
+                cs_members.extend(lower_property_member_with_targets(
+                    pname,
+                    ty,
+                    *mutability,
+                    getter,
+                    setter,
+                    *is_serialize,
+                    target_annotations,
+                ));
             }
             _ => {}
         }
@@ -1645,6 +1669,7 @@ fn lower_coroutine_with_ctx(
     name: &str,
     params: &[Param],
     body: &Block,
+    return_ty: Option<&TypeRef>,
     ctx: &mut ComponentCtx,
 ) -> CsMember {
     let ps: Vec<CsParam> = params.iter().map(|p| CsParam {
@@ -1653,15 +1678,54 @@ fn lower_coroutine_with_ctx(
 
     let cs_body = lower_stmts_with_ctx(&body.stmts, ctx, None);
 
+    // Language 5, Sprint 1: choose the lowered return type from an
+    // explicit `: Seq<T>` / `: IEnumerator(<T>)` / `: IEnumerable(<T>)`
+    // annotation. Falls back to the v4 default of `IEnumerator`.
+    let cs_return_ty = match return_ty {
+        Some(ty) => lower_coroutine_return_type(ty),
+        None => "System.Collections.IEnumerator".into(),
+    };
+
     CsMember::Method {
         attributes: vec![],
         modifiers: "private".into(),
-        return_ty: "System.Collections.IEnumerator".into(),
+        return_ty: cs_return_ty,
         name: name.into(),
         params: ps,
         where_clauses: vec![],
         body: cs_body,
         source_span: Some(body.span),
+    }
+}
+
+/// Lower a coroutine return type annotation. `Seq<T>` becomes
+/// `System.Collections.Generic.IEnumerator<T>` and the C# `IEnumerator(<T>)`
+/// / `IEnumerable(<T>)` family is forwarded as-is. Anything else falls
+/// back to the non-generic `IEnumerator` and lets the user catch the
+/// mismatch via E148 from the analyzer.
+fn lower_coroutine_return_type(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Generic { name, type_args, .. } if name == "Seq" && type_args.len() == 1 => {
+            format!(
+                "System.Collections.Generic.IEnumerator<{}>",
+                lower_type(&type_args[0])
+            )
+        }
+        TypeRef::Generic { name, type_args, .. } if name == "IEnumerator" && type_args.len() == 1 => {
+            format!(
+                "System.Collections.Generic.IEnumerator<{}>",
+                lower_type(&type_args[0])
+            )
+        }
+        TypeRef::Generic { name, type_args, .. } if name == "IEnumerable" && type_args.len() == 1 => {
+            format!(
+                "System.Collections.Generic.IEnumerable<{}>",
+                lower_type(&type_args[0])
+            )
+        }
+        TypeRef::Simple { name, .. } if name == "IEnumerator" => "System.Collections.IEnumerator".into(),
+        TypeRef::Simple { name, .. } if name == "IEnumerable" => "System.Collections.IEnumerable".into(),
+        _ => "System.Collections.IEnumerator".into(),
     }
 }
 
@@ -1723,7 +1787,10 @@ fn stmt_span(stmt: &Stmt) -> Span {
         | Stmt::Try { span, .. }
         | Stmt::Throw { span, .. }
         | Stmt::Use { span, .. }
-        | Stmt::BindTo { span, .. } => *span,
+        | Stmt::BindTo { span, .. }
+        | Stmt::Yield { span, .. }
+        | Stmt::YieldBreak { span, .. }
+        | Stmt::Preprocessor { span, .. } => *span,
     }
 }
 
@@ -2224,6 +2291,99 @@ fn lower_stmt_with_context(
                 source_span,
             }
         }
+        // ── Language 5, Sprint 1: yield / yield break ────────────
+        Stmt::Yield { value, .. } => {
+            // `yield expr` lowers to `yield return expr;` in C#.
+            // The value type is checked separately by the semantic analyzer
+            // (E147 / E148) before reaching here.
+            let val = lower_expr_with_expected_type(value, None, callable_signatures);
+            CsStmt::YieldReturn(val, source_span)
+        }
+        Stmt::YieldBreak { .. } => CsStmt::YieldBreak(source_span),
+        // ── Language 5, Sprint 1: preprocessor block ─────────────
+        Stmt::Preprocessor { arms, else_arm, .. } => {
+            let cs_arms: Vec<CsPreprocessorArm> = arms
+                .iter()
+                .map(|a| CsPreprocessorArm {
+                    cond: lower_preprocessor_cond(&a.cond),
+                    body: a
+                        .body
+                        .iter()
+                        .map(|s| lower_stmt_with_context(s, callable_signatures, expected_return_ty))
+                        .collect(),
+                })
+                .collect();
+            let cs_else = else_arm.as_ref().map(|stmts| {
+                stmts
+                    .iter()
+                    .map(|s| lower_stmt_with_context(s, callable_signatures, expected_return_ty))
+                    .collect::<Vec<_>>()
+            });
+            CsStmt::Preprocessor {
+                arms: cs_arms,
+                else_body: cs_else,
+                source_span,
+            }
+        }
+    }
+}
+
+/// Map a PrSM preprocessor symbol to its canonical C# define name.
+/// Symbols that are not in the curated list pass through unchanged so that
+/// raw user-defined defines like `MY_FEATURE` continue to work; the
+/// semantic analyzer surfaces W034 for unknown symbols separately.
+pub(crate) fn map_preprocessor_symbol(name: &str) -> String {
+    match name {
+        "editor" => "UNITY_EDITOR".into(),
+        "debug" => "DEBUG".into(),
+        "release" => "!DEBUG".into(),
+        "ios" => "UNITY_IOS".into(),
+        "android" => "UNITY_ANDROID".into(),
+        "standalone" => "UNITY_STANDALONE".into(),
+        "il2cpp" => "ENABLE_IL2CPP".into(),
+        "mono" => "ENABLE_MONO".into(),
+        "unity20223" => "UNITY_2022_3_OR_NEWER".into(),
+        "unity20231" => "UNITY_2023_1_OR_NEWER".into(),
+        "unity6" => "UNITY_6000_0_OR_NEWER".into(),
+        // Pass-through for raw C# defines (e.g. MY_FEATURE).
+        other => other.into(),
+    }
+}
+
+/// Lower a `PreprocessorCond` into the C# preprocessor expression syntax.
+/// Operator precedence and associativity follow C#: `!` > `&&` > `||`,
+/// matching the parser's structure exactly so we can avoid extra parens
+/// in the leaf cases.
+pub(crate) fn lower_preprocessor_cond(cond: &PreprocessorCond) -> String {
+    match cond {
+        PreprocessorCond::Symbol { name, .. } => map_preprocessor_symbol(name),
+        PreprocessorCond::Not { inner, .. } => format!("!{}", lower_preprocessor_cond_atom(inner)),
+        PreprocessorCond::And { left, right, .. } => format!(
+            "{} && {}",
+            lower_preprocessor_cond_and_lhs(left),
+            lower_preprocessor_cond_and_lhs(right)
+        ),
+        PreprocessorCond::Or { left, right, .. } => format!(
+            "{} || {}",
+            lower_preprocessor_cond(left),
+            lower_preprocessor_cond(right)
+        ),
+    }
+}
+
+fn lower_preprocessor_cond_atom(cond: &PreprocessorCond) -> String {
+    match cond {
+        PreprocessorCond::Symbol { .. } | PreprocessorCond::Not { .. } => {
+            lower_preprocessor_cond(cond)
+        }
+        _ => format!("({})", lower_preprocessor_cond(cond)),
+    }
+}
+
+fn lower_preprocessor_cond_and_lhs(cond: &PreprocessorCond) -> String {
+    match cond {
+        PreprocessorCond::Or { .. } => format!("({})", lower_preprocessor_cond(cond)),
+        _ => lower_preprocessor_cond(cond),
     }
 }
 
@@ -2421,6 +2581,26 @@ fn cs_stmt_to_lines(stmt: &CsStmt, indent: usize) -> Vec<String> {
                 lines.extend(cs_stmt_to_lines(nested, indent + 1));
             }
             lines.push(format!("{}}}", pad));
+            lines
+        }
+        // Language 5, Sprint 1: yield break and preprocessor block.
+        CsStmt::YieldBreak(_) => vec![format!("{}yield break;", pad)],
+        CsStmt::Preprocessor { arms, else_body, .. } => {
+            let mut lines = Vec::new();
+            for (i, arm) in arms.iter().enumerate() {
+                let directive = if i == 0 { "#if" } else { "#elif" };
+                lines.push(format!("{}{} {}", pad, directive, arm.cond));
+                for nested in &arm.body {
+                    lines.extend(cs_stmt_to_lines(nested, indent));
+                }
+            }
+            if let Some(else_stmts) = else_body {
+                lines.push(format!("{}#else", pad));
+                for nested in else_stmts {
+                    lines.extend(cs_stmt_to_lines(nested, indent));
+                }
+            }
+            lines.push(format!("{}#endif", pad));
             lines
         }
     }
@@ -3190,6 +3370,7 @@ fn replace_this_in_stmt(stmt: &mut CsStmt, replacement: &str) {
 }
 
 /// Lower a Member::Property to CsMember entries.
+#[allow(dead_code)]
 fn lower_property_member(
     name: &str,
     ty: &TypeRef,
@@ -3197,8 +3378,87 @@ fn lower_property_member(
     getter: &Option<FuncBody>,
     setter: &Option<PropertySetter>,
 ) -> Vec<CsMember> {
+    lower_property_member_with_targets(name, ty, mutability, getter, setter, false, &[])
+}
+
+/// Language 5, Sprint 1: extended `lower_property_member` that honors the
+/// `serialize` modifier and `@field/@property/@return/...` target
+/// annotations.
+///
+/// Lowering decisions:
+///
+/// * `serialize` + an *auto-property* pattern (both `get` and `set` have
+///   empty bodies) → emit a C# auto-property prefixed with
+///   `[field: SerializeField]`.
+/// * `serialize` on a non-auto-property → fall back to the regular block
+///   lowering. The semantic analyzer surfaces E150 in that case.
+/// * `@field(...)` annotations are forwarded as `[field: ...]` attributes
+///   on the produced property; `@property(...)` becomes a plain `[...]`
+///   attribute on the property declaration; `@return(...)` is currently
+///   not expressible on a property and is silently dropped.
+fn lower_property_member_with_targets(
+    name: &str,
+    ty: &TypeRef,
+    mutability: Mutability,
+    getter: &Option<FuncBody>,
+    setter: &Option<PropertySetter>,
+    is_serialize: bool,
+    target_annotations: &[TargetAnnotation],
+) -> Vec<CsMember> {
     let cs_ty = lower_type(ty);
     let mut result = Vec::new();
+
+    // Build the prefix attributes for an auto-property based on the
+    // declaration's modifier and target annotations.
+    let mut field_attrs: Vec<String> = Vec::new();
+    let mut property_attrs: Vec<String> = Vec::new();
+    if is_serialize {
+        field_attrs.push("SerializeField".into());
+    }
+    for ta in target_annotations {
+        let rendered = render_target_attribute_args(&ta.attr_name, &ta.args);
+        match ta.target {
+            AttrTargetKind::Field => field_attrs.push(rendered),
+            AttrTargetKind::Property => property_attrs.push(rendered),
+            // `@return` / `@param` / `@type` aren't meaningful on a
+            // property accessor — silently drop here. (E149 is the
+            // diagnostic that catches misuse at the analyzer level.)
+            _ => {}
+        }
+    }
+
+    // Detect the auto-property pattern: both get and set are present and
+    // both bodies are empty blocks. (`var hp: Int get set` shape.)
+    let is_auto_property = matches!(
+        (getter, setter),
+        (Some(FuncBody::Block(g)), Some(s))
+            if g.stmts.is_empty() && s.body.stmts.is_empty()
+    );
+
+    if is_auto_property && (is_serialize || !field_attrs.is_empty() || !property_attrs.is_empty()) {
+        // Emit an auto-property with `[field: SerializeField]` and any
+        // other forwarded attribute targets.
+        let mut code = String::new();
+        for attr in &property_attrs {
+            code.push_str(&format!("[{}]\n    ", attr));
+        }
+        for attr in &field_attrs {
+            code.push_str(&format!("[field: {}]\n    ", attr));
+        }
+        let setter_keyword = if matches!(mutability, Mutability::Val) {
+            // val + auto-property → public get, private set (so the
+            // backing field can still be assigned by Unity serialization).
+            "private set;"
+        } else {
+            "set;"
+        };
+        code.push_str(&format!(
+            "public {} {} {{ get; {} }}",
+            cs_ty, name, setter_keyword
+        ));
+        result.push(CsMember::RawCode(code));
+        return result;
+    }
 
     match (getter, setter) {
         // val with getter only → computed property: `public Type Name => expr;`
@@ -3219,7 +3479,7 @@ fn lower_property_member(
             // Backing field if setter exists
             if setter_opt.is_some() {
                 result.push(CsMember::Field {
-                    attributes: vec![],
+                    attributes: field_attrs.clone(),
                     modifiers: "private".into(),
                     ty: cs_ty.clone(),
                     name: backing.clone(),
@@ -3242,7 +3502,11 @@ fn lower_property_member(
                 code.replace("field", &backing).replace(&s.param_name, "value")
             });
             // Emit as RawCode for full control
-            let mut code = format!("public {} {}\n    {{\n        get\n        {{\n", cs_ty, name);
+            let mut code = String::new();
+            for attr in &property_attrs {
+                code.push_str(&format!("[{}]\n    ", attr));
+            }
+            code.push_str(&format!("public {} {}\n    {{\n        get\n        {{\n", cs_ty, name));
             code.push_str(&format!("            return {};\n", getter_str));
             code.push_str("        }\n");
             if let Some(setter_code) = setter_str {
@@ -3256,7 +3520,7 @@ fn lower_property_member(
         // No getter — just a field with no special handling
         (None, _) => {
             result.push(CsMember::Field {
-                attributes: vec![],
+                attributes: field_attrs,
                 modifiers: "public".into(),
                 ty: cs_ty,
                 name: name.into(),
@@ -3266,6 +3530,16 @@ fn lower_property_member(
     }
 
     result
+}
+
+/// Render an attribute call as `Name` or `Name(arg1, arg2)`. Used by the
+/// v5 attribute target lowering for `[field: SerializeField]` and friends.
+fn render_target_attribute_args(name: &str, args: &[Expr]) -> String {
+    if args.is_empty() {
+        return name.to_string();
+    }
+    let rendered: Vec<String> = args.iter().map(lower_expr).collect();
+    format!("{}({})", name, rendered.join(", "))
 }
 
 /// Map PrSM operator names to C# operator symbols.

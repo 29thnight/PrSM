@@ -233,6 +233,16 @@ pub enum TokenKind {
     Newline,
     Eof,
 
+    // === Language 5, Sprint 1: preprocessor directives ===
+    /// `#if` — opens a preprocessor block.
+    HashIf,
+    /// `#elif` — alternative branch.
+    HashElif,
+    /// `#else` — final alternative branch.
+    HashElse,
+    /// `#endif` — closes a preprocessor block.
+    HashEndif,
+
     // === Error ===
     Error(String),
 }

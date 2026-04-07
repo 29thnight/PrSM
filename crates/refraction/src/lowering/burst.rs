@@ -172,6 +172,19 @@ fn analyze_stmt(stmt: &CsStmt, ctx: &mut AnalysisCtx) {
             ));
             analyze_block(body, ctx);
         }
+        // Language 5, Sprint 1: yield break is harmless inside a Burst-friendly
+        // iterator (Burst doesn't accept iterators anyway, so the surrounding
+        // method-shape check catches misuse). Preprocessor blocks just walk
+        // their bodies — the directive itself is structural.
+        CsStmt::YieldBreak(_) => {}
+        CsStmt::Preprocessor { arms, else_body, .. } => {
+            for arm in arms {
+                analyze_block(&arm.body, ctx);
+            }
+            if let Some(else_stmts) = else_body {
+                analyze_block(else_stmts, ctx);
+            }
+        }
     }
 }
 

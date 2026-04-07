@@ -775,8 +775,8 @@ impl Parser {
     }
 
     fn parse_member(&mut self) -> Result<Member, ParseError> {
-        // Collect annotations
-        let annotations = self.parse_annotations()?;
+        // Collect annotations (including v5 attribute targets like @field/@property/...)
+        let (annotations, target_annotations) = self.parse_annotations_and_targets()?;
 
         // Contextual `event` keyword (Language 4): `event onDamaged: (Int) => Unit`
         if self.check_contextual("event") {
@@ -800,7 +800,7 @@ impl Parser {
         }
 
         match self.peek().clone() {
-            TokenKind::Serialize => self.parse_serialize_field(annotations),
+            TokenKind::Serialize => self.parse_serialize_field(annotations, target_annotations),
             TokenKind::Require => self.parse_require(),
             TokenKind::Optional => self.parse_optional(),
             TokenKind::Child => self.parse_child(),
@@ -825,7 +825,7 @@ impl Parser {
                     return self.parse_func_inner_async(vis);
                 }
                 match self.peek().clone() {
-                    TokenKind::Serialize => self.parse_serialize_field_with_vis(annotations, Some(vis)),
+                    TokenKind::Serialize => self.parse_serialize_field_with_vis(annotations, target_annotations, Some(vis)),
                     TokenKind::Func => self.parse_func(vis, false),
                     TokenKind::Override => {
                         self.advance();
@@ -834,7 +834,7 @@ impl Parser {
                     }
                     // field: private rb: Rigidbody
                     TokenKind::Identifier(name) if name != "async" => self.parse_field(vis),
-                    TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property(vis),
+                    TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property_with_targets(vis, false, target_annotations),
                     _ => Err(self.error(format!("Expected member after visibility, found {:?}", self.peek()))),
                 }
             }
@@ -858,7 +858,7 @@ impl Parser {
                 self.parse_func_inner_ext(Visibility::Public, false, false, false, true, false)
             }
             TokenKind::Operator => self.parse_operator_member(),
-            TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property(Visibility::Public),
+            TokenKind::Val | TokenKind::Var | TokenKind::Const | TokenKind::Fixed => self.parse_val_var_field_or_property_with_targets(Visibility::Public, false, target_annotations),
             // Lifecycle blocks
             TokenKind::Awake | TokenKind::Update | TokenKind::FixedUpdate
             | TokenKind::LateUpdate | TokenKind::OnEnable | TokenKind::OnDisable
@@ -892,7 +892,22 @@ impl Parser {
     }
 
     fn parse_annotations(&mut self) -> Result<Vec<Annotation>, ParseError> {
+        let (annotations, _targets) = self.parse_annotations_and_targets()?;
+        Ok(annotations)
+    }
+
+    /// Parse leading `@annotation(...)` metadata and split it into plain
+    /// annotations and attribute-target annotations (v5 Sprint 1 feature 2).
+    ///
+    /// Target annotations are `@field`, `@property`, `@param`, `@return`,
+    /// and `@type`. Their first argument must be an identifier naming the
+    /// C# attribute to emit (e.g. `SerializeField`). Remaining arguments are
+    /// literal exprs forwarded to the attribute invocation.
+    fn parse_annotations_and_targets(
+        &mut self,
+    ) -> Result<(Vec<Annotation>, Vec<TargetAnnotation>), ParseError> {
         let mut annotations = Vec::new();
+        let mut targets = Vec::new();
         while self.check(&TokenKind::At) {
             let start = self.peek_span();
             self.advance(); // consume '@'
@@ -908,17 +923,58 @@ impl Parser {
             } else {
                 vec![]
             };
-            annotations.push(Annotation { name, args, span: Span { start: start.start, end: self.peek_span().end } });
+            let ann_span = Span { start: start.start, end: self.peek_span().end };
+
+            let target_kind = match name.as_str() {
+                "field" => Some(AttrTargetKind::Field),
+                "property" => Some(AttrTargetKind::Property),
+                "param" => Some(AttrTargetKind::Param),
+                "return" => Some(AttrTargetKind::Return),
+                "type" => Some(AttrTargetKind::Type),
+                _ => None,
+            };
+
+            if let Some(target) = target_kind {
+                // Expect an identifier as the first argument (the attribute name).
+                let (attr_name, rest) = extract_target_attr_name(&args);
+                if let Some(attr_name) = attr_name {
+                    targets.push(TargetAnnotation {
+                        target,
+                        attr_name,
+                        args: rest,
+                        span: ann_span,
+                    });
+                } else {
+                    self.errors.push(ParseError {
+                        message: format!(
+                            "@{}(...) requires an identifier naming a C# attribute as its first argument",
+                            name
+                        ),
+                        span: ann_span,
+                    });
+                }
+            } else {
+                annotations.push(Annotation { name, args, span: ann_span });
+            }
             self.skip_newlines();
         }
-        Ok(annotations)
+        Ok((annotations, targets))
     }
 
-    fn parse_serialize_field(&mut self, annotations: Vec<Annotation>) -> Result<Member, ParseError> {
-        self.parse_serialize_field_with_vis(annotations, None)
+    fn parse_serialize_field(
+        &mut self,
+        annotations: Vec<Annotation>,
+        target_annotations: Vec<TargetAnnotation>,
+    ) -> Result<Member, ParseError> {
+        self.parse_serialize_field_with_vis(annotations, target_annotations, None)
     }
 
-    fn parse_serialize_field_with_vis(&mut self, annotations: Vec<Annotation>, visibility: Option<Visibility>) -> Result<Member, ParseError> {
+    fn parse_serialize_field_with_vis(
+        &mut self,
+        annotations: Vec<Annotation>,
+        target_annotations: Vec<TargetAnnotation>,
+        visibility: Option<Visibility>,
+    ) -> Result<Member, ParseError> {
         let start = self.peek_span();
         self.expect(&TokenKind::Serialize)?;
         // Optional val/var after serialize
@@ -936,7 +992,33 @@ impl Parser {
         } else {
             None
         };
+
+        // v5 Sprint 1: detect `serialize var hp: Int [= init] get [set]` form,
+        // which is sugar for `[field: SerializeField] var hp: Int { get; set; }`.
+        // The presence of `get` (or `set`) on the next non-newline token routes
+        // us into the property accessors path with `is_serialize: true`.
+        let saved = self.pos;
+        self.skip_newlines();
+        if self.check_contextual("get") || self.check_contextual("set") {
+            return self.parse_property_accessors_full(
+                start,
+                mutability,
+                name,
+                name_span,
+                ty,
+                init,
+                /*is_serialize*/ true,
+                target_annotations,
+            );
+        }
+        self.pos = saved;
+
         self.expect_newline_or_eof();
+        // No accessors → fall back to the existing SerializeField member.
+        // Target annotations on a SerializeField are not currently expressed
+        // in the AST; they are silently dropped here. (E149 covers most
+        // misuse cases at the property entry point.)
+        let _ = target_annotations;
         Ok(Member::SerializeField {
             annotations,
             visibility,
@@ -1310,12 +1392,21 @@ impl Parser {
         self.expect(&TokenKind::LParen)?;
         let params = self.parse_param_list()?;
         self.expect(&TokenKind::RParen)?;
+        // v5 Sprint 1: optional return type — `coroutine countdown(): Seq<Int>`.
+        // Used by yield value type checking and for choosing the lowered
+        // C# return type (`IEnumerator` vs `IEnumerator<T>`).
+        let return_ty = if self.eat(&TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         self.skip_newlines();
         let body = self.parse_block()?;
         Ok(Member::Coroutine {
             name,
             name_span,
             params,
+            return_ty,
             body,
             span: Span { start: start.start, end: self.peek_span().end },
         })
@@ -1445,6 +1536,15 @@ impl Parser {
 
     /// Parse val/var that may be a property (with get/set) or a plain field.
     fn parse_val_var_field_or_property(&mut self, vis: Visibility) -> Result<Member, ParseError> {
+        self.parse_val_var_field_or_property_with_targets(vis, false, vec![])
+    }
+
+    fn parse_val_var_field_or_property_with_targets(
+        &mut self,
+        vis: Visibility,
+        is_serialize: bool,
+        target_annotations: Vec<TargetAnnotation>,
+    ) -> Result<Member, ParseError> {
         let start = self.peek_span();
         let mutability = match self.peek() {
             TokenKind::Val => { self.advance(); Mutability::Val }
@@ -1468,7 +1568,16 @@ impl Parser {
             self.skip_newlines();
             if self.check_contextual("get") || self.check_contextual("set") {
                 // This is a property declaration
-                return self.parse_property_accessors(start, mutability, name, name_span, ty.unwrap());
+                return self.parse_property_accessors_full(
+                    start,
+                    mutability,
+                    name,
+                    name_span,
+                    ty.unwrap(),
+                    None,
+                    is_serialize,
+                    target_annotations,
+                );
             }
             // Not a property — restore position
             self.pos = saved;
@@ -1480,6 +1589,8 @@ impl Parser {
             None
         };
         self.expect_newline_or_eof();
+        // Target annotations on a plain field have no current AST representation.
+        let _ = target_annotations;
         Ok(Member::Field {
             visibility: vis,
             is_static: false,
@@ -1548,10 +1659,36 @@ impl Parser {
         name_span: Span,
         ty: TypeRef,
     ) -> Result<Member, ParseError> {
+        self.parse_property_accessors_full(
+            start, mutability, name, name_span, ty, None, false, vec![],
+        )
+    }
+
+    /// v5 Sprint 1 extended form: also accepts an optional inline `init` expr
+    /// (parsed before the accessors as `var name: Type = init get set`),
+    /// the `is_serialize` flag for the `serialize` modifier, and any
+    /// `@field/@property/@return/...` target annotations attached to the
+    /// declaration. The `init` expression is currently dropped because the
+    /// auto-property lowering does not yet model field initializers; this
+    /// keeps backward compatibility with v4 Member::Property.
+    fn parse_property_accessors_full(
+        &mut self,
+        start: Span,
+        mutability: Mutability,
+        name: String,
+        name_span: Span,
+        ty: TypeRef,
+        _init: Option<Expr>,
+        is_serialize: bool,
+        target_annotations: Vec<TargetAnnotation>,
+    ) -> Result<Member, ParseError> {
         let mut getter: Option<FuncBody> = None;
         let mut setter: Option<PropertySetter> = None;
 
-        // Parse `get` and/or `set` in any order
+        // Parse `get` and/or `set` in any order. Each accessor may be:
+        //   • a bare keyword `get` / `set` (auto-property accessor)
+        //   • `get = expr` or `set = expr` (expression-bodied)
+        //   • `get { … }` or `set(value) { … }` (block body)
         loop {
             self.skip_newlines();
             if self.check_contextual("get") && getter.is_none() {
@@ -1560,19 +1697,35 @@ impl Parser {
                     // get = expr
                     let expr = self.parse_expr()?;
                     getter = Some(FuncBody::ExprBody(expr));
-                } else {
+                } else if self.check(&TokenKind::LBrace) || matches!(self.peek_after_newlines(), TokenKind::LBrace) {
                     self.skip_newlines();
                     let block = self.parse_block()?;
                     getter = Some(FuncBody::Block(block));
+                } else {
+                    // Bare `get` accessor (auto-property): use an empty block as
+                    // the marker. The lowering pass detects empty bodies and
+                    // emits a `{ get; set; }` form.
+                    getter = Some(FuncBody::Block(Block { stmts: vec![], span: name_span }));
                 }
             } else if self.check_contextual("set") && setter.is_none() {
                 self.advance(); // consume 'set'
-                self.expect(&TokenKind::LParen)?;
-                let (param_name, _) = self.expect_ident()?;
-                self.expect(&TokenKind::RParen)?;
-                self.skip_newlines();
-                let block = self.parse_block()?;
-                setter = Some(PropertySetter { param_name, body: block });
+                if self.eat(&TokenKind::LParen) {
+                    let (param_name, _) = self.expect_ident()?;
+                    self.expect(&TokenKind::RParen)?;
+                    self.skip_newlines();
+                    let block = self.parse_block()?;
+                    setter = Some(PropertySetter { param_name, body: block });
+                } else if self.check(&TokenKind::LBrace) || matches!(self.peek_after_newlines(), TokenKind::LBrace) {
+                    self.skip_newlines();
+                    let block = self.parse_block()?;
+                    setter = Some(PropertySetter { param_name: "value".into(), body: block });
+                } else {
+                    // Bare `set` accessor (auto-property): use empty body marker.
+                    setter = Some(PropertySetter {
+                        param_name: "value".into(),
+                        body: Block { stmts: vec![], span: name_span },
+                    });
+                }
             } else {
                 break;
             }
@@ -1585,8 +1738,19 @@ impl Parser {
             ty,
             getter,
             setter,
+            is_serialize,
+            target_annotations,
             span: Span { start: start.start, end: self.peek_span().end },
         })
+    }
+
+    /// Look at the next non-newline token without advancing.
+    fn peek_after_newlines(&self) -> TokenKind {
+        let mut p = self.pos;
+        while p < self.tokens.len() && self.tokens[p].kind == TokenKind::Newline {
+            p += 1;
+        }
+        self.tokens.get(p).map(|t| t.kind.clone()).unwrap_or(TokenKind::Eof)
     }
 
     // ── Operator member parsing ─────────────────────────────────
@@ -1691,6 +1855,18 @@ impl Parser {
         // not interpreted as a call to a function named `bind`.
         if self.check_contextual("bind") && self.peek_ahead_is_contextual(2, "to") {
             return self.parse_bind_to_stmt();
+        }
+
+        // Language 5, Sprint 1: `yield expr` and `yield break`.
+        // `yield` is a contextual keyword — it must not break existing
+        // identifiers, so we look it up by text rather than as a token kind.
+        if self.check_contextual("yield") {
+            return self.parse_yield_stmt();
+        }
+
+        // Language 5, Sprint 1: `#if` preprocessor block.
+        if self.check(&TokenKind::HashIf) {
+            return self.parse_preprocessor_stmt();
         }
 
         match self.peek().clone() {
@@ -2292,6 +2468,199 @@ impl Parser {
             expr,
             span: Span { start: start.start, end: self.peek_span().end },
         })
+    }
+
+    /// Parse a `yield expr` or `yield break` statement (Language 5, Sprint 1).
+    ///
+    /// `yield` is a contextual keyword: only the two valid follow-on shapes
+    /// here are recognized; anything else falls through to a parse error.
+    /// The semantic analyzer is responsible for E147 (use outside an
+    /// iterator) and E148 (element type mismatch).
+    fn parse_yield_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.peek_span();
+        let _ = self.eat_contextual("yield");
+        // `yield break` — terminate the iterator.
+        if self.check(&TokenKind::Break) {
+            self.advance();
+            self.expect_newline_or_eof();
+            return Ok(Stmt::YieldBreak {
+                span: Span { start: start.start, end: self.peek_span().end },
+            });
+        }
+        // `yield expr` — emit a value.
+        let value = self.parse_expr()?;
+        self.expect_newline_or_eof();
+        Ok(Stmt::Yield {
+            value,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    /// Parse a preprocessor block (Language 5, Sprint 1):
+    ///
+    /// ```text
+    /// #if cond
+    ///     stmt*
+    /// #elif cond
+    ///     stmt*
+    /// #else
+    ///     stmt*
+    /// #endif
+    /// ```
+    ///
+    /// Each branch contains zero or more statements. Statements are parsed
+    /// with the regular `parse_stmt` so all of PrSM is available inside an
+    /// `#if` arm. Diagnostics for unterminated blocks (E151) and dangling
+    /// `#elif`/`#else` (E152) are surfaced from the parser; W034 (unknown
+    /// symbol) is reported by the semantic analyzer.
+    fn parse_preprocessor_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let start = self.peek_span();
+        self.expect(&TokenKind::HashIf)?;
+        let first_cond = self.parse_preprocessor_cond()?;
+        self.expect_newline_or_eof();
+        let first_body = self.parse_preprocessor_arm_body()?;
+        let mut arms = vec![PreprocessorArm {
+            cond: first_cond,
+            body: first_body,
+            span: start,
+        }];
+        // Zero or more `#elif` arms.
+        while self.check(&TokenKind::HashElif) {
+            let arm_start = self.peek_span();
+            self.advance(); // consume #elif
+            let cond = self.parse_preprocessor_cond()?;
+            self.expect_newline_or_eof();
+            let body = self.parse_preprocessor_arm_body()?;
+            arms.push(PreprocessorArm {
+                cond,
+                body,
+                span: arm_start,
+            });
+        }
+        // Optional `#else` arm.
+        let else_arm = if self.check(&TokenKind::HashElse) {
+            self.advance(); // consume #else
+            self.expect_newline_or_eof();
+            Some(self.parse_preprocessor_arm_body()?)
+        } else {
+            None
+        };
+        // Mandatory `#endif`.
+        if !self.check(&TokenKind::HashEndif) {
+            self.errors.push(ParseError {
+                message: "E151: unterminated '#if' block — expected '#endif'".into(),
+                span: start,
+            });
+        } else {
+            self.advance();
+            self.expect_newline_or_eof();
+        }
+        Ok(Stmt::Preprocessor {
+            arms,
+            else_arm,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    /// Parse statements for one preprocessor arm. Stops at the next
+    /// `#elif`, `#else`, `#endif`, or end of file.
+    fn parse_preprocessor_arm_body(&mut self) -> Result<Vec<Stmt>, ParseError> {
+        let mut stmts = Vec::new();
+        loop {
+            self.skip_newlines();
+            match self.peek() {
+                TokenKind::HashElif
+                | TokenKind::HashElse
+                | TokenKind::HashEndif
+                | TokenKind::Eof => break,
+                // A nested `#if` is parsed as a regular statement, which
+                // recurses into `parse_preprocessor_stmt`.
+                _ => {
+                    let stmt = self.parse_stmt()?;
+                    stmts.push(stmt);
+                }
+            }
+        }
+        Ok(stmts)
+    }
+
+    /// Parse a preprocessor condition expression. Grammar:
+    ///
+    /// ```text
+    /// Cond = Or
+    /// Or   = And { "||" And }
+    /// And  = Not { "&&" Not }
+    /// Not  = "!" Not | Atom
+    /// Atom = Symbol | "(" Or ")"
+    /// ```
+    fn parse_preprocessor_cond(&mut self) -> Result<PreprocessorCond, ParseError> {
+        self.parse_pp_or()
+    }
+
+    fn parse_pp_or(&mut self) -> Result<PreprocessorCond, ParseError> {
+        let mut left = self.parse_pp_and()?;
+        while self.check(&TokenKind::PipePipe) {
+            self.advance();
+            let right = self.parse_pp_and()?;
+            let span = pp_cond_span(&left);
+            left = PreprocessorCond::Or {
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_pp_and(&mut self) -> Result<PreprocessorCond, ParseError> {
+        let mut left = self.parse_pp_not()?;
+        while self.check(&TokenKind::AmpAmp) {
+            self.advance();
+            let right = self.parse_pp_not()?;
+            let span = pp_cond_span(&left);
+            left = PreprocessorCond::And {
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    fn parse_pp_not(&mut self) -> Result<PreprocessorCond, ParseError> {
+        if self.check(&TokenKind::Bang) {
+            let start = self.peek_span();
+            self.advance();
+            let inner = self.parse_pp_not()?;
+            return Ok(PreprocessorCond::Not {
+                inner: Box::new(inner),
+                span: start,
+            });
+        }
+        self.parse_pp_atom()
+    }
+
+    fn parse_pp_atom(&mut self) -> Result<PreprocessorCond, ParseError> {
+        if self.eat(&TokenKind::LParen) {
+            let inner = self.parse_pp_or()?;
+            self.expect(&TokenKind::RParen)?;
+            return Ok(inner);
+        }
+        // A symbol — accept any identifier (curated PrSM symbol or raw define).
+        let span = self.peek_span();
+        let name = match self.peek().clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                name
+            }
+            other => {
+                return Err(self.error(format!(
+                    "Expected preprocessor symbol identifier, found {:?}",
+                    other
+                )));
+            }
+        };
+        Ok(PreprocessorCond::Symbol { name, span })
     }
 
     /// Parse `use val name = expr` (declaration form) or `use name = expr { body }`
@@ -3376,6 +3745,55 @@ impl Parser {
 }
 
 // ── Helper: reconstruct source text from token ───────────────────
+
+/// Given the parsed `args` of an `@field(SerializeField)` / `@return(NotNull)` etc.
+/// annotation, extract the first argument as the C# attribute identifier and
+/// return the remaining arguments. Returns `None` if the first argument is
+/// not an identifier expression.
+fn extract_target_attr_name(args: &[Expr]) -> (Option<String>, Vec<Expr>) {
+    if args.is_empty() {
+        return (None, vec![]);
+    }
+    let first = match &args[0] {
+        Expr::Ident(name, _) => Some(pascal_attr_case(name)),
+        Expr::Call { name, .. } => Some(pascal_attr_case(name)),
+        _ => None,
+    };
+    let rest = args.iter().skip(1).cloned().collect::<Vec<_>>();
+    (first, rest)
+}
+
+/// Return the span of a preprocessor condition node — used by the parser
+/// to construct enclosing `And`/`Or` spans without rebuilding them from
+/// the operator position. The span is conservative; it points at the
+/// left-most operand and the diagnostic positions remain stable for tests.
+fn pp_cond_span(cond: &PreprocessorCond) -> Span {
+    match cond {
+        PreprocessorCond::Symbol { span, .. } => *span,
+        PreprocessorCond::Not { span, .. } => *span,
+        PreprocessorCond::And { span, .. } => *span,
+        PreprocessorCond::Or { span, .. } => *span,
+    }
+}
+
+/// Convert a PrSM-cased attribute name (e.g. `serializeField`, `nonSerialized`)
+/// to its canonical C# form (e.g. `SerializeField`, `NonSerialized`) by
+/// upper-casing the first character.  Names that already begin with an
+/// upper-case letter are passed through unchanged.
+fn pascal_attr_case(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) => {
+            let mut out = String::new();
+            for ch in c.to_uppercase() {
+                out.push(ch);
+            }
+            out.extend(chars);
+            out
+        }
+        None => String::new(),
+    }
+}
 
 fn token_to_source_text(kind: &TokenKind) -> String {
     match kind {

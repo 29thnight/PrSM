@@ -228,12 +228,23 @@ pub enum Member {
         ty: TypeRef,
         getter: Option<FuncBody>,
         setter: Option<PropertySetter>,
+        /// v5 Sprint 1: `serialize` modifier was applied. When combined with
+        /// an auto-property (empty get/set bodies) this triggers
+        /// `[field: SerializeField]` lowering for the backing field.
+        is_serialize: bool,
+        /// v5 Sprint 1: `@field(...)` / `@property(...)` / `@return(...)`
+        /// attribute target annotations attached to this property.
+        target_annotations: Vec<TargetAnnotation>,
         span: Span,
     },
     Coroutine {
         name: String,
         name_span: Span,
         params: Vec<Param>,
+        /// v5 Sprint 1: optional declared return type for the iterator.
+        /// `None` lowers to `IEnumerator`. `Some(Seq<T>)` / `Some(IEnumerator<T>)`
+        /// lower to `IEnumerator<T>`. Used by yield value type checking (E148).
+        return_ty: Option<TypeRef>,
         body: Block,
         span: Span,
     },
@@ -440,6 +451,26 @@ pub enum Stmt {
         expr: Expr,
         span: Span,
     },
+    /// `yield expr` — iterator value (Language 5, Sprint 1)
+    /// Valid only inside a coroutine declaration or a func returning
+    /// `Seq<T>`/`IEnumerator`/`IEnumerator<T>`/`IEnumerable`/`IEnumerable<T>`.
+    Yield {
+        value: Expr,
+        span: Span,
+    },
+    /// `yield break` — terminate iterator (Language 5, Sprint 1)
+    YieldBreak {
+        span: Span,
+    },
+    /// `#if cond ... #elif cond ... #else ... #endif` — preprocessor directive
+    /// block (Language 5, Sprint 1). Each arm holds statements that appear
+    /// inside the branch body; the lowering pass emits the literal C#
+    /// preprocessor around them unchanged.
+    Preprocessor {
+        arms: Vec<PreprocessorArm>,
+        else_arm: Option<Vec<Stmt>>,
+        span: Span,
+    },
     /// `use val name = expr` (declaration form — disposed at scope exit)
     /// or `use name = expr { body }` (block form — disposed at block exit).
     /// Lowered to C# `using` declaration / `using` statement.
@@ -473,6 +504,35 @@ pub struct CatchClause {
     pub ty: TypeRef,
     pub body: Block,
     pub span: Span,
+}
+
+/// A single `#if` / `#elif` arm inside a preprocessor directive block.
+/// `cond` is the raw PrSM-level condition AST that the lowering pass
+/// translates to the matching C# preprocessor expression.
+#[derive(Debug, Clone)]
+pub struct PreprocessorArm {
+    pub cond: PreprocessorCond,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// Preprocessor condition expression.
+///
+/// Grammar (Language 5, Sprint 1):
+///
+/// ```text
+/// Cond = Symbol | "!" Cond | Cond "&&" Cond | Cond "||" Cond | "(" Cond ")"
+/// ```
+///
+/// Symbols may be a curated PrSM alias (e.g. `editor`, `ios`, `il2cpp`)
+/// that maps to a Unity `UNITY_*` define, or an arbitrary identifier
+/// that passes through verbatim (with a W034 warning).
+#[derive(Debug, Clone)]
+pub enum PreprocessorCond {
+    Symbol { name: String, span: Span },
+    Not { inner: Box<PreprocessorCond>, span: Span },
+    And { left: Box<PreprocessorCond>, right: Box<PreprocessorCond>, span: Span },
+    Or { left: Box<PreprocessorCond>, right: Box<PreprocessorCond>, span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -775,6 +835,28 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct Annotation {
     pub name: String,
+    pub args: Vec<Expr>,
+    pub span: Span,
+}
+
+/// v5 Sprint 1: attribute target annotation of the form
+/// `@field(name)`, `@property(name)`, `@param(name)`, `@return(name)`, `@type(name)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttrTargetKind {
+    Field,
+    Property,
+    Param,
+    Return,
+    Type,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetAnnotation {
+    pub target: AttrTargetKind,
+    /// The raw attribute name as it should appear inside the C# brackets,
+    /// e.g. `"SerializeField"` or `"NonSerialized"`.
+    pub attr_name: String,
+    /// Optional attribute arguments (literal exprs only for now).
     pub args: Vec<Expr>,
     pub span: Span,
 }

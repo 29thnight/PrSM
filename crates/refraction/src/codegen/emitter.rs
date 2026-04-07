@@ -240,6 +240,9 @@ fn emit_stmt(out: &mut String, stmt: &CsStmt, indent: usize) {
         CsStmt::YieldReturn(value, _) => {
             out.push_str(&format!("{}yield return {};\n", pad, value));
         }
+        CsStmt::YieldBreak(_) => {
+            out.push_str(&format!("{}yield break;\n", pad));
+        }
         CsStmt::Break(_) => {
             out.push_str(&format!("{}break;\n", pad));
         }
@@ -294,6 +297,26 @@ fn emit_stmt(out: &mut String, stmt: &CsStmt, indent: usize) {
                 emit_stmt(out, s, indent + 1);
             }
             out.push_str(&format!("{}}}\n", pad));
+        }
+        // Language 5, Sprint 1: preprocessor block.
+        // The arms are emitted at the *current* indentation column, but the
+        // body statements are still indented one level deeper so the result
+        // looks like an idiomatic C# `#if` guard around a code block.
+        CsStmt::Preprocessor { arms, else_body, .. } => {
+            for (i, arm) in arms.iter().enumerate() {
+                let directive = if i == 0 { "#if" } else { "#elif" };
+                out.push_str(&format!("{}{} {}\n", pad, directive, arm.cond));
+                for s in &arm.body {
+                    emit_stmt(out, s, indent);
+                }
+            }
+            if let Some(else_stmts) = else_body {
+                out.push_str(&format!("{}#else\n", pad));
+                for s in else_stmts {
+                    emit_stmt(out, s, indent);
+                }
+            }
+            out.push_str(&format!("{}#endif\n", pad));
         }
     }
 }

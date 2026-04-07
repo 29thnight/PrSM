@@ -1946,6 +1946,23 @@ fn collect_used_namespaces_for_stmt(stmt: &Stmt, used_namespaces: &mut HashSet<S
         Stmt::BindTo { target, .. } => {
             collect_used_namespaces_for_expr(target, used_namespaces);
         }
+        // Language 5, Sprint 1: yield / yield break / preprocessor block.
+        Stmt::Yield { value, .. } => {
+            collect_used_namespaces_for_expr(value, used_namespaces);
+        }
+        Stmt::YieldBreak { .. } => {}
+        Stmt::Preprocessor { arms, else_arm, .. } => {
+            for arm in arms {
+                for s in &arm.body {
+                    collect_used_namespaces_for_stmt(s, used_namespaces);
+                }
+            }
+            if let Some(else_stmts) = else_arm {
+                for s in else_stmts {
+                    collect_used_namespaces_for_stmt(s, used_namespaces);
+                }
+            }
+        }
     }
 }
 
@@ -2326,6 +2343,16 @@ fn stmt_contains_intrinsic_code(stmt: &Stmt) -> bool {
                 || body.as_ref().is_some_and(block_contains_intrinsic_code)
         }
         Stmt::BindTo { target, .. } => expr_contains_intrinsic_code(target),
+        // Language 5, Sprint 1: yield bodies and preprocessor blocks may
+        // themselves contain intrinsic code; recurse into both.
+        Stmt::Yield { value, .. } => expr_contains_intrinsic_code(value),
+        Stmt::YieldBreak { .. } => false,
+        Stmt::Preprocessor { arms, else_arm, .. } => {
+            arms.iter().any(|arm| arm.body.iter().any(stmt_contains_intrinsic_code))
+                || else_arm
+                    .as_ref()
+                    .is_some_and(|stmts| stmts.iter().any(stmt_contains_intrinsic_code))
+        }
     }
 }
 
@@ -2800,6 +2827,41 @@ fn collect_stmt_explicit_type_arg_actions(
                 selection_span,
                 actions,
             );
+        }
+        // Language 5, Sprint 1: yield + preprocessor walks.
+        Stmt::Yield { value, .. } => {
+            collect_expr_explicit_type_arg_actions(
+                value,
+                None,
+                callable_signatures,
+                selection_span,
+                actions,
+            );
+        }
+        Stmt::YieldBreak { .. } => {}
+        Stmt::Preprocessor { arms, else_arm, .. } => {
+            for arm in arms {
+                for s in &arm.body {
+                    collect_stmt_explicit_type_arg_actions(
+                        s,
+                        callable_signatures,
+                        expected_return_ty,
+                        selection_span,
+                        actions,
+                    );
+                }
+            }
+            if let Some(else_stmts) = else_arm {
+                for s in else_stmts {
+                    collect_stmt_explicit_type_arg_actions(
+                        s,
+                        callable_signatures,
+                        expected_return_ty,
+                        selection_span,
+                        actions,
+                    );
+                }
+            }
         }
     }
 }
