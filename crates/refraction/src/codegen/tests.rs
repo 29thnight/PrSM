@@ -1528,6 +1528,19 @@ hello world
         );
     }
 
+    // Issue #26: a `typealias Name = Target` declaration emits a C#
+    // file-scoped using alias directive (`using Name = Target;`).
+    #[test]
+    fn test_typealias_emits_using_alias_directive() {
+        let src = "typealias Position = Vector3";
+        let output = compile(src);
+        assert!(
+            output.contains("using Position = Vector3;"),
+            "expected `using Position = Vector3;` directive: {}",
+            output
+        );
+    }
+
     // Issue #29: a nested data class lowers with the correct indent
     // (one level inside the parent class) and the parent's collection
     // field uses the nested type rather than `object` (covered by
