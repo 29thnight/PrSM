@@ -4,6 +4,7 @@
   "displayName": "PrSM Language",
   "description": "Unity Editor integration for the PrSM scripting language",
   "unity": "2022.3",
+  "license": "MIT",
   "keywords": ["prsm", "scripting", "language", "compiler"],
   "author": {
     "name": "PrSM"
