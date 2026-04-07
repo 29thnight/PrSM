@@ -866,8 +866,8 @@ var first = inventory?.items?[0];
 val rb = body ?: throw IllegalStateException("Rigidbody required")
 
 func divide(a: Int, b: Int): Int =
-    if b == 0 then throw ArgumentException("divide by zero")
-    else a / b
+    if b == 0 { throw ArgumentException("divide by zero") }
+    else { a / b }
 ```
 
 ```csharp
