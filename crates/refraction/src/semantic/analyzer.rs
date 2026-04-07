@@ -1892,6 +1892,25 @@ impl Analyzer {
             // expression's type. Reference-ness is tracked at the
             // declaration level, not in the type system today.
             Expr::RefOf { inner, .. } => self.analyze_expr(inner),
+            // Language 5, Sprint 6: `arr?[index]` — type is the element
+            // type of the indexed collection (best-effort: we just
+            // recurse and use the receiver's type for now).
+            Expr::SafeIndexAccess { receiver, .. } => {
+                let recv_ty = self.analyze_expr(receiver);
+                if let PrismType::Generic(_, args) = &recv_ty {
+                    if args.len() == 1 {
+                        return PrismType::Nullable(Box::new(args[0].clone()));
+                    }
+                }
+                PrismType::Error
+            }
+            // Language 5, Sprint 6: `throw expr` in expression position
+            // never returns; the type is `Nothing` which the type
+            // checker treats as compatible with any expected type.
+            Expr::ThrowExpr { exception, .. } => {
+                self.analyze_expr(exception);
+                PrismType::Error
+            }
         }
     }
 

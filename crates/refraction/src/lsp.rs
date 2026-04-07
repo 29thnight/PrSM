@@ -2049,6 +2049,14 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
         | Expr::NameOf { .. } => {}
         // Language 5, Sprint 3: `ref expr` recurses into the inner expr.
         Expr::RefOf { inner, .. } => collect_used_namespaces_for_expr(inner, used_namespaces),
+        // Language 5, Sprint 6: safe-index and throw expressions recurse.
+        Expr::SafeIndexAccess { receiver, index, .. } => {
+            collect_used_namespaces_for_expr(receiver, used_namespaces);
+            collect_used_namespaces_for_expr(index, used_namespaces);
+        }
+        Expr::ThrowExpr { exception, .. } => {
+            collect_used_namespaces_for_expr(exception, used_namespaces);
+        }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
                 if let StringPart::Expr(expr) = part {
@@ -2490,6 +2498,11 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
         Expr::Await { expr: inner, .. } => expr_contains_intrinsic_code(inner),
         // Language 5, Sprint 3: `ref expr` recurses into the inner expr.
         Expr::RefOf { inner, .. } => expr_contains_intrinsic_code(inner),
+        // Language 5, Sprint 6: safe-index and throw expressions recurse.
+        Expr::SafeIndexAccess { receiver, index, .. } => {
+            expr_contains_intrinsic_code(receiver) || expr_contains_intrinsic_code(index)
+        }
+        Expr::ThrowExpr { exception, .. } => expr_contains_intrinsic_code(exception),
         Expr::IntLit(_, _)
         | Expr::FloatLit(_, _)
         | Expr::DurationLit(_, _)
@@ -2927,6 +2940,18 @@ fn collect_expr_explicit_type_arg_actions(
         // Language 5, Sprint 3: `ref expr` recurses into the inner expr.
         Expr::RefOf { inner, .. } => collect_expr_explicit_type_arg_actions(
             inner,
+            None,
+            callable_signatures,
+            selection_span,
+            actions,
+        ),
+        // Language 5, Sprint 6: safe-index and throw expressions recurse.
+        Expr::SafeIndexAccess { receiver, index, .. } => {
+            collect_expr_explicit_type_arg_actions(receiver, None, callable_signatures, selection_span, actions);
+            collect_expr_explicit_type_arg_actions(index, None, callable_signatures, selection_span, actions);
+        }
+        Expr::ThrowExpr { exception, .. } => collect_expr_explicit_type_arg_actions(
+            exception,
             None,
             callable_signatures,
             selection_span,

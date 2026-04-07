@@ -835,6 +835,20 @@ pub enum Expr {
         inner: Box<Expr>,
         span: Span,
     },
+    /// v5 Sprint 6: `arr?[index]` — null-conditional indexer access.
+    /// Lowers to C# `arr?[index]` directly.
+    SafeIndexAccess {
+        receiver: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
+    /// v5 Sprint 6: `throw expr` in expression position — used in elvis
+    /// (`val rb = body ?? throw Exception("missing")`) and other contexts
+    /// where C# allows throw expressions.
+    ThrowExpr {
+        exception: Box<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]

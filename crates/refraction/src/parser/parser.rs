@@ -3292,6 +3292,25 @@ impl Parser {
                         };
                     }
                 }
+                // v5 Sprint 6: `arr?[index]` — null-conditional indexer.
+                // The `?` token is followed immediately by `[`, so we
+                // disambiguate from a regular ternary by peeking at the
+                // next token in the postfix loop.
+                TokenKind::Question if matches!(
+                    self.tokens.get(self.pos + 1).map(|t| t.kind.clone()),
+                    Some(TokenKind::LBracket)
+                ) => {
+                    self.advance(); // consume '?'
+                    self.advance(); // consume '['
+                    let index = self.parse_expr()?;
+                    self.expect(&TokenKind::RBracket)?;
+                    let span = Span { start: expr.span().start, end: self.peek_span().end };
+                    expr = Expr::SafeIndexAccess {
+                        receiver: Box::new(expr),
+                        index: Box::new(index),
+                        span,
+                    };
+                }
                 TokenKind::BangBang => {
                     self.advance();
                     let span = Span { start: expr.span().start, end: self.peek_span().end };
@@ -3510,6 +3529,16 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         let span = self.peek_span();
+        // v5 Sprint 6: `throw expr` is allowed in expression position
+        // (e.g. `val rb = body ?? throw Exception("missing")`).
+        if self.check(&TokenKind::Throw) {
+            self.advance();
+            let exc = self.parse_expr()?;
+            return Ok(Expr::ThrowExpr {
+                exception: Box::new(exc),
+                span: Span { start: span.start, end: self.peek_span().end },
+            });
+        }
         match self.peek().clone() {
             TokenKind::IntLiteral(n) => { self.advance(); Ok(Expr::IntLit(n, span)) }
             TokenKind::FloatLiteral(n) => { self.advance(); Ok(Expr::FloatLit(n, span)) }
@@ -4258,7 +4287,9 @@ impl Expr {
             | Expr::MapLit { span, .. }
             | Expr::Await { span, .. }
             | Expr::NameOf { span, .. }
-            | Expr::RefOf { span, .. } => *span,
+            | Expr::RefOf { span, .. }
+            | Expr::SafeIndexAccess { span, .. }
+            | Expr::ThrowExpr { span, .. } => *span,
         }
     }
 }

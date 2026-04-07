@@ -1392,6 +1392,34 @@ hello world
         );
     }
 
+    // ── Language 5, Sprint 6 ──────────────────────────────────────
+
+    // `arr?[0]` lowers to a C# null-conditional indexer.
+    #[test]
+    fn test_safe_index_access_lowers_to_question_bracket() {
+        let src = "component Probe : MonoBehaviour {\n  func go(arr: List<Int>) {\n    val first = arr?[0]\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("arr?[0]"),
+            "expected null-conditional indexer: {}",
+            output
+        );
+    }
+
+    // `throw expr` in expression position composes with the `?:` elvis
+    // operator. PrSM uses Kotlin-style `?:` for null-coalescing rather
+    // than C# `??`; the lowered C# uses the corresponding `??` form.
+    #[test]
+    fn test_throw_expression_in_elvis() {
+        let src = "component Probe : MonoBehaviour {\n  func go(body: GameObject?) {\n    val rb = body ?: throw Exception(\"missing\")\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("throw"),
+            "expected throw expression in lowered output: {}",
+            output
+        );
+    }
+
     // ── Language 5, Sprint 5 ──────────────────────────────────────
 
     // `partial component Player : ...` lowers to `public partial class`.

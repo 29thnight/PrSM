@@ -1952,7 +1952,9 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::MapLit { span, .. }
         | Expr::Await { span, .. }
         | Expr::NameOf { span, .. }
-        | Expr::RefOf { span, .. } => *span,
+        | Expr::RefOf { span, .. }
+        | Expr::SafeIndexAccess { span, .. }
+        | Expr::ThrowExpr { span, .. } => *span,
     }
 }
 
@@ -3124,6 +3126,23 @@ fn lower_expr_with_expected_type(
         Expr::RefOf { inner, .. } => {
             let inner_str = lower_expr_with_expected_type(inner, None, callable_signatures);
             format!("ref {}", inner_str)
+        }
+        // Language 5, Sprint 6: `arr?[index]` — null-conditional indexer.
+        Expr::SafeIndexAccess { receiver, index, .. } => {
+            let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
+            let idx = lower_expr_with_expected_type(index, None, callable_signatures);
+            format!("{}?[{}]", recv, idx)
+        }
+        // Language 5, Sprint 6: `throw expr` in expression position.
+        // C# throw expressions support exactly the same syntax form.
+        Expr::ThrowExpr { exception, .. } => {
+            let exc = lower_expr_with_expected_type(exception, None, callable_signatures);
+            // C# throw expressions require `new`-prefix for exception
+            // construction; if the user wrote `throw Exception("...")`
+            // (a Call) we'd want to emit `throw new Exception(...)`. The
+            // call lowering already produces the construction form when
+            // the name resolves to a known type, so we forward verbatim.
+            format!("throw {}", exc)
         }
     }
 }
