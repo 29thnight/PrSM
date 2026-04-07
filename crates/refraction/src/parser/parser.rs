@@ -3849,6 +3849,49 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Ident("parent".into(), span))
             }
+            // Issue #14: lifecycle keywords (`start`, `stop`, `update`,
+            // ...) sometimes appear as field / parameter names in user
+            // code (the lang-5 `ref struct Slice(start: Int, length: Int)`
+            // example references `start` from inside the function body).
+            // Statement forms like `start spawn()` are already consumed
+            // by `parse_stmt` before expression parsing begins, so it is
+            // safe to fall back to an identifier here.
+            //
+            // The set is restricted to keywords that have no expression-
+            // level meaning. Control-flow keywords (`if`, `when`, `for`,
+            // `while`, `throw`, `try`), value keywords (`null`, `this`,
+            // `true`, `false`), and type-form keywords (`is`, `as`,
+            // `in`, `until`, `downTo`, `step`) retain their normal role.
+            TokenKind::Start
+            | TokenKind::Stop
+            | TokenKind::StopAll
+            | TokenKind::Awake
+            | TokenKind::Update
+            | TokenKind::FixedUpdate
+            | TokenKind::LateUpdate
+            | TokenKind::OnEnable
+            | TokenKind::OnDisable
+            | TokenKind::OnDestroy
+            | TokenKind::OnTriggerEnter
+            | TokenKind::OnTriggerExit
+            | TokenKind::OnTriggerStay
+            | TokenKind::OnCollisionEnter
+            | TokenKind::OnCollisionExit
+            | TokenKind::OnCollisionStay
+            | TokenKind::Wait
+            | TokenKind::NextFrame
+            | TokenKind::FixedFrame
+            | TokenKind::Listen
+            | TokenKind::Unlisten
+            | TokenKind::Manual
+            | TokenKind::Pool
+            | TokenKind::Singleton
+            | TokenKind::Serialize
+            | TokenKind::Optional => {
+                let text = self.peek().keyword_text().unwrap().to_string();
+                self.advance();
+                Ok(Expr::Ident(text, span))
+            }
             TokenKind::LParen => {
                 self.advance();
                 let expr = self.parse_expr()?;

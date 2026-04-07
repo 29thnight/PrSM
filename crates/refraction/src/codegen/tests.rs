@@ -1453,6 +1453,27 @@ hello world
         );
     }
 
+    // Issue #14 (follow-up to #4): a parameter name that collides with
+    // a PrSM keyword (`start`) must also be referenceable from the
+    // function body. The lang-5 spec example uses `start + length`
+    // inside `func sum()`, where `start` previously failed to parse as
+    // an expression because it lexes as the `Start` token.
+    #[test]
+    fn test_ref_struct_keyword_field_referenced_in_body() {
+        let src = "ref struct Slice(start: Int, length: Int) {\n  func sum(): Int = start + length\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("public ref struct Slice"),
+            "expected ref struct lowering: {}",
+            output
+        );
+        assert!(
+            output.contains("return start + length;"),
+            "expected `start + length` body to compile and lower verbatim: {}",
+            output
+        );
+    }
+
     // Issue #4: parameter names that collide with PrSM keywords
     // (`start`, `length`, `class`, etc.) must be accepted in declaration
     // position. The lang-5 spec example for `ref struct` uses `start` as
