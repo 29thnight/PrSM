@@ -1528,6 +1528,26 @@ hello world
         );
     }
 
+    // Issue #25: a generic class field initializer `var items: List<T> = []`
+    // lowers to `new List<T>()` (not `new List<object>()`). The previous
+    // lowering dropped the type annotation and fell back to `object`
+    // for the element type, silently producing wrong runtime behavior.
+    #[test]
+    fn test_generic_field_init_preserves_type_parameter() {
+        let src = "class Registry<T> where T : MonoBehaviour {\n  var items: List<T> = []\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("new System.Collections.Generic.List<T>()"),
+            "expected `new List<T>()` (not `<object>`): {}",
+            output
+        );
+        assert!(
+            !output.contains("new System.Collections.Generic.List<object>()"),
+            "lowered output must not fall back to List<object>: {}",
+            output
+        );
+    }
+
     // Issue #22: `bind X to widget.text` (the canonical lang-4 MVVM
     // pattern) compiles without a false-positive E144 type mismatch.
     // The previous semantic check rejected the case because it treated

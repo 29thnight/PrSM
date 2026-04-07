@@ -1104,7 +1104,16 @@ fn lower_field_member(m: &Member) -> Vec<CsMember> {
         }
         Member::Field { visibility, is_static, mutability, name, ty, init, .. } => {
             let cs_ty = ty.as_ref().map(|t| lower_type(t)).unwrap_or("var".into());
-            let init_str = init.as_ref().map(|e| lower_expr(e));
+            // Issue #25: pass the field's declared type into the
+            // expression lowering so empty collection literals (`[]`,
+            // `{}`) emit `new List<T>()` / `new Dictionary<K,V>()` with
+            // the correct generic substitution. Without this hint the
+            // lowering fell back to `object` for the element type and
+            // generic class fields produced silently incorrect
+            // `new List<object>()` initializers.
+            let init_str = init
+                .as_ref()
+                .map(|e| lower_expr_with_expected_type(e, ty.as_ref(), None));
             let vis = lower_visibility(*visibility);
             let static_prefix = if *is_static { "static " } else { "" };
 
