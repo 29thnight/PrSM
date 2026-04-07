@@ -43,6 +43,8 @@ const WORKSPACE_SYMBOL: &str = "workspace/symbol";
 const INVALID_PARAMS: i32 = -32602;
 const METHOD_NOT_FOUND: i32 = -32601;
 const CODE_ACTION_KIND_REFACTOR_REWRITE: &str = "refactor.rewrite";
+const CODE_ACTION_KIND_REFACTOR_EXTRACT: &str = "refactor.extract";
+const CODE_ACTION_KIND_REFACTOR_INLINE: &str = "refactor.inline";
 const CODE_ACTION_KIND_SOURCE_ORGANIZE_IMPORTS: &str = "source.organizeImports";
 const ROSLYN_SIDECAR_EXE_ENV: &str = "PRISM_ROSLYN_SIDECAR_EXE";
 const ROSLYN_SIDECAR_ARGS_ENV: &str = "PRISM_ROSLYN_SIDECAR_ARGS";
@@ -1468,6 +1470,26 @@ fn collect_code_actions_json(
 
     if requested_code_action_allows(requested_kinds, CODE_ACTION_KIND_REFACTOR_REWRITE) {
         actions.extend(collect_explicit_type_arg_actions_json(source, uri, selection_span));
+        // v5 (deferred): refactoring dispatch wires the helpers in
+        // `refactor.rs` into the `textDocument/codeAction` handler.
+        // We surface them only when the user has selected a non-empty
+        // range so they don't pollute regular completion.
+        if !is_empty_span(selection_span) {
+            actions.extend(collect_inline_variable_actions_json(source, uri, selection_span));
+            actions.extend(collect_extract_method_actions_json(source, uri, selection_span));
+        }
+    }
+
+    if requested_code_action_allows(requested_kinds, CODE_ACTION_KIND_REFACTOR_EXTRACT) {
+        if !is_empty_span(selection_span) {
+            actions.extend(collect_extract_method_actions_json(source, uri, selection_span));
+        }
+    }
+
+    if requested_code_action_allows(requested_kinds, CODE_ACTION_KIND_REFACTOR_INLINE) {
+        if !is_empty_span(selection_span) {
+            actions.extend(collect_inline_variable_actions_json(source, uri, selection_span));
+        }
     }
 
     if requested_code_action_allows(requested_kinds, CODE_ACTION_KIND_SOURCE_ORGANIZE_IMPORTS) {
@@ -1478,6 +1500,218 @@ fn collect_code_actions_json(
 
     actions
 }
+
+/// v5 (deferred): true when the selection has zero-width — the user
+/// just placed the cursor without highlighting a region. Most refactor
+/// actions need a real range, so we suppress them in that case.
+fn is_empty_span(span: Span) -> bool {
+    span.start.line == span.end.line && span.start.col == span.end.col
+}
+
+/// v5 (deferred): collect Inline Variable code actions for the selection.
+/// The action only fires when the cursor lands on a `val name = expr;`
+/// declaration that has at least one in-scope use elsewhere.
+fn collect_inline_variable_actions_json(
+    source: &str,
+    uri: &str,
+    selection_span: Span,
+) -> Vec<Value> {
+    let (file, _) = parse_prsm_file(source);
+    let mut out = Vec::new();
+    if let Some(members) = decl_members(&file.decl) {
+        for member in members {
+            collect_inline_variable_actions_for_member(member, source, selection_span, uri, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_inline_variable_actions_for_member(
+    member: &Member,
+    source: &str,
+    selection_span: Span,
+    uri: &str,
+    out: &mut Vec<Value>,
+) {
+    let body_block = match member {
+        Member::Func { body: FuncBody::Block(block), .. }
+        | Member::Coroutine { body: block, .. }
+        | Member::Lifecycle { body: block, .. } => block,
+        _ => return,
+    };
+    for (idx, stmt) in body_block.stmts.iter().enumerate() {
+        if let Stmt::ValDecl { name, name_span, init, span, .. } = stmt {
+            if !spans_overlap(*span, selection_span) {
+                continue;
+            }
+            // Find every use of `name` in the rest of the block by
+            // looking for the bare identifier in subsequent statements.
+            let init_text = source_text_for_span(source, init.span()).unwrap_or("").trim();
+            if init_text.is_empty() {
+                continue;
+            }
+            let uses = collect_identifier_use_spans(source, name, &body_block.stmts[idx + 1..]);
+            if uses.is_empty() {
+                continue;
+            }
+            // Build edits: zero out the val statement plus replace each use.
+            let mut changes_for_uri: Vec<Value> = Vec::new();
+            // Removal: collapse the entire statement line.
+            changes_for_uri.push(json!({
+                "range": lsp_range_json(*span),
+                "newText": "",
+            }));
+            for use_span in &uses {
+                changes_for_uri.push(json!({
+                    "range": lsp_range_json(*use_span),
+                    "newText": init_text,
+                }));
+            }
+            let mut changes = HashMap::new();
+            changes.insert(uri.to_string(), changes_for_uri);
+            out.push(json!({
+                "title": format!("Inline variable '{}'", name),
+                "kind": CODE_ACTION_KIND_REFACTOR_INLINE,
+                "edit": { "changes": changes },
+            }));
+            // Use name_span just to silence the unused-variable lint.
+            let _ = name_span;
+        }
+    }
+}
+
+/// v5 (deferred): collect Extract Method code actions for the selection.
+/// We pull every full statement that lies completely within the
+/// selection and feed the resulting source text to `refactor::extract_method`.
+fn collect_extract_method_actions_json(
+    source: &str,
+    uri: &str,
+    selection_span: Span,
+) -> Vec<Value> {
+    let selection_text = match source_text_for_span(source, selection_span) {
+        Some(text) if !text.trim().is_empty() => text,
+        _ => return Vec::new(),
+    };
+    // Use a synthetic name that the IDE can rename after the fact.
+    let plan = match crate::refactor::extract_method(selection_text, "extracted") {
+        Ok(plan) => plan,
+        Err(_) => return Vec::new(),
+    };
+    let mut changes_for_uri: Vec<Value> = Vec::new();
+    // Replace the selection with the call site.
+    changes_for_uri.push(json!({
+        "range": lsp_range_json(selection_span),
+        "newText": plan.call_site,
+    }));
+    // Insert the new function above the selection at column 1 of the
+    // selection start line. This is intentionally simple — IDEs are
+    // expected to format the result.
+    let insert_pos = Position {
+        line: selection_span.start.line,
+        col: 1,
+    };
+    changes_for_uri.push(json!({
+        "range": lsp_text_edit_range_json(insert_pos, insert_pos),
+        "newText": format!("{}\n", plan.function_decl),
+    }));
+    let mut changes = HashMap::new();
+    changes.insert(uri.to_string(), changes_for_uri);
+    vec![json!({
+        "title": "Extract selection to function 'extracted'",
+        "kind": CODE_ACTION_KIND_REFACTOR_EXTRACT,
+        "edit": { "changes": changes },
+    })]
+}
+
+/// v5 (deferred): scan the supplied statements for spans that contain
+/// the literal identifier `name` (whole-word). The match is text-based
+/// so it works for any statement kind without re-walking the AST.
+fn collect_identifier_use_spans(source: &str, name: &str, stmts: &[Stmt]) -> Vec<Span> {
+    let mut out = Vec::new();
+    for s in stmts {
+        let stmt_span = stmt_span_for_lsp(s);
+        let Some(text) = source_text_for_span(source, stmt_span) else { continue; };
+        let bytes = text.as_bytes();
+        let needle = name.as_bytes();
+        let mut i = 0;
+        while i + needle.len() <= bytes.len() {
+            if &bytes[i..i + needle.len()] == needle {
+                let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+                let after_ok = i + needle.len() == bytes.len()
+                    || !is_ident_byte(bytes[i + needle.len()]);
+                if before_ok && after_ok {
+                    // Compute the span for this occurrence by walking the
+                    // newline / column offsets from the start of the
+                    // statement text.
+                    let mut line = stmt_span.start.line;
+                    let mut col = stmt_span.start.col;
+                    let mut k = 0;
+                    while k < i {
+                        if bytes[k] == b'\n' {
+                            line += 1;
+                            col = 1;
+                        } else {
+                            col += 1;
+                        }
+                        k += 1;
+                    }
+                    let start_pos = Position { line, col };
+                    let end_pos = Position {
+                        line,
+                        col: col + name.len() as u32,
+                    };
+                    out.push(Span {
+                        start: start_pos,
+                        end: end_pos,
+                    });
+                    i += needle.len();
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Wrapper around the existing statement-span helper used by the LSP.
+/// Inlined here so the refactor walk doesn't depend on private items.
+fn stmt_span_for_lsp(stmt: &Stmt) -> Span {
+    match stmt {
+        Stmt::ValDecl { span, .. }
+        | Stmt::VarDecl { span, .. }
+        | Stmt::Assignment { span, .. }
+        | Stmt::Expr { span, .. }
+        | Stmt::If { span, .. }
+        | Stmt::When { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::While { span, .. }
+        | Stmt::Return { span, .. }
+        | Stmt::Wait { span, .. }
+        | Stmt::Start { span, .. }
+        | Stmt::Stop { span, .. }
+        | Stmt::StopAll { span, .. }
+        | Stmt::Listen { span, .. }
+        | Stmt::Unlisten { span, .. }
+        | Stmt::DestructureVal { span, .. }
+        | Stmt::IntrinsicBlock { span, .. }
+        | Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
+        | Stmt::Try { span, .. }
+        | Stmt::Throw { span, .. }
+        | Stmt::Use { span, .. }
+        | Stmt::BindTo { span, .. }
+        | Stmt::Yield { span, .. }
+        | Stmt::YieldBreak { span, .. }
+        | Stmt::Preprocessor { span, .. } => *span,
+    }
+}
+
+// `spans_overlap` is defined earlier in this module — reused here.
 
 fn requested_code_action_allows(requested_kinds: Option<&[String]>, offered_kind: &str) -> bool {
     requested_kinds.map_or(true, |requested_kinds| {
@@ -4196,9 +4430,10 @@ fn clamp_index(value: usize, max: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_explicit_type_arg_actions_for_source, collect_organize_usings_action_for_source,
-        format_sidecar_hover_section, merge_completion_items, parse_sidecar_args,
-        prsm_label_for_sidecar_item, requested_code_action_allows,
+        collect_code_actions_json, collect_explicit_type_arg_actions_for_source,
+        collect_organize_usings_action_for_source, format_sidecar_hover_section,
+        merge_completion_items, parse_sidecar_args, prsm_label_for_sidecar_item,
+        requested_code_action_allows,
     };
     use crate::lexer::token::{Position, Span};
     use crate::roslyn_sidecar_protocol::{SidecarCompletionItemKind, SidecarSymbolKind, SidecarSymbolSource, UnityCompletionItem, UnityHoverResult};
@@ -4442,6 +4677,47 @@ component Player : MonoBehaviour {
             Some(&["quickfix".to_string()]),
             super::CODE_ACTION_KIND_SOURCE_ORGANIZE_IMPORTS,
         ));
+    }
+
+    // v5 (deferred): LSP refactor dispatch — extract method emits an
+    // edit set whose title and kind reflect the refactor.
+    #[test]
+    fn lsp_extract_method_action_is_dispatched() {
+        let source = "component Player : MonoBehaviour {\n  func go() {\n    print(\"a\")\n    print(\"b\")\n  }\n}";
+        // Selection covers the two `print` lines.
+        let selection = Span {
+            start: Position { line: 3, col: 5 },
+            end: Position { line: 4, col: 15 },
+        };
+        let actions = collect_code_actions_json(source, "file:///dummy.prsm", selection, None);
+        assert!(
+            actions.iter().any(|a| {
+                a["title"].as_str().unwrap_or("").contains("Extract")
+                    && a["kind"].as_str() == Some(super::CODE_ACTION_KIND_REFACTOR_EXTRACT)
+            }),
+            "expected an Extract Method action in: {:#?}",
+            actions
+        );
+    }
+
+    // Inline Variable: cursor on a `val name = init` with at least one
+    // use should produce a refactor.inline action.
+    #[test]
+    fn lsp_inline_variable_action_is_dispatched() {
+        let source = "component P : MonoBehaviour {\n  func go() {\n    val name = 42\n    print(name)\n  }\n}";
+        let selection = Span {
+            start: Position { line: 3, col: 5 },
+            end: Position { line: 3, col: 18 },
+        };
+        let actions = collect_code_actions_json(source, "file:///dummy.prsm", selection, None);
+        assert!(
+            actions.iter().any(|a| {
+                a["title"].as_str().unwrap_or("").contains("Inline variable")
+                    && a["kind"].as_str() == Some(super::CODE_ACTION_KIND_REFACTOR_INLINE)
+            }),
+            "expected an Inline Variable action in: {:#?}",
+            actions
+        );
     }
 
     fn explicit_type_arg_actions_from_marked_source(marked: &str) -> Vec<super::ExplicitTypeArgCodeAction> {
