@@ -18,6 +18,7 @@ import { startPrismLanguageClient, stopPrismLanguageClient } from './lsp-client'
 import { PrismNavigationProvider } from './navigation';
 import { PrismSymbolProvider } from './symbols';
 import { resolveGeneratedCsPath as resolveGeneratedCsPathFromConfig } from './project-config';
+import { registerPrismDebugAdapter } from './dap-adapter';
 
 let diagCollection: vscode.DiagnosticCollection | undefined;
 let statusBar: vscode.StatusBarItem;
@@ -87,6 +88,10 @@ export async function activate(context: vscode.ExtensionContext) {
     statusBar.command = 'workbench.action.problems.focus';
     statusBar.tooltip = 'PrSM language status — click to open Problems';
     context.subscriptions.push(statusBar);
+
+    // v5 (deferred): register the PrSM debug adapter so users can
+    // start C# debugging sessions seeded with PrSM source-file maps.
+    registerPrismDebugAdapter(context);
 
     // Show status bar when a .prsm file is active
     updateStatusBarVisibility(isTrusted);
