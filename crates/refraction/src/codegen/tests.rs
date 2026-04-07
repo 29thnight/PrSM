@@ -1679,12 +1679,27 @@ hello world
 
     // `receiver with { field = value }` lowers to a C# `with`-expression.
     #[test]
+    // Issue #5: a `val name = receiver with { f = v }` declaration is
+    // desugared to a sequence of statements (declaration + per-field
+    // assignments) so the lowered C# is valid for plain `data class`
+    // and Unity struct types. The previous lowering emitted the C#
+    // `with` syntax, which only works on records.
     fn test_with_expression_lowers_to_csharp_with() {
         let src = "component Probe : MonoBehaviour {\n  func go(p: Point) {\n    val q = p with { x = 0 }\n  }\n}";
         let output = compile(src);
         assert!(
-            output.contains("with { x = 0 }"),
-            "expected with-expression: {}",
+            output.contains("var q = p;"),
+            "expected `var q = p;` as first statement of with desugar: {}",
+            output
+        );
+        assert!(
+            output.contains("q.x = 0;"),
+            "expected `q.x = 0;` field mutation: {}",
+            output
+        );
+        assert!(
+            !output.contains(" with { "),
+            "lowered output must not emit C# `with` syntax (invalid on plain class): {}",
             output
         );
     }

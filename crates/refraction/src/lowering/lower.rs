@@ -2058,6 +2058,43 @@ fn lower_stmt_with_context(
     let source_span = Some(stmt_span(stmt));
     match stmt {
         Stmt::ValDecl { name, ty, init, is_ref, .. } => {
+            // Issue #5: when the init is a `with` expression, desugar
+            // to a sequence of statements: declaration initialized with
+            // the receiver, followed by per-field assignments. Avoids
+            // emitting the invalid C# `with` syntax on plain `data class`
+            // and Unity struct types.
+            //
+            //   val grounded = origin with { y = 0.0 }
+            // becomes
+            //   var grounded = origin;
+            //   grounded.y = 0.0f;
+            //
+            // The `CsStmt::Block` variant emits its inner statements
+            // sequentially without surrounding braces, so the
+            // declaration is visible in the surrounding scope.
+            if !*is_ref {
+                if let Expr::With { receiver, updates, .. } = init {
+                    let recv_str = lower_expr_with_expected_type(receiver, ty.as_ref(), callable_signatures);
+                    let cs_ty = ty.as_ref().map(|t| lower_type(t)).unwrap_or("var".into());
+                    let mut stmts = Vec::new();
+                    stmts.push(CsStmt::VarDecl {
+                        ty: cs_ty,
+                        name: name.clone(),
+                        init: recv_str,
+                        source_span,
+                    });
+                    for (field, value) in updates {
+                        let val_str = lower_expr_with_expected_type(value, None, callable_signatures);
+                        stmts.push(CsStmt::Assignment {
+                            target: format!("{}.{}", name, field),
+                            op: "=".into(),
+                            value: val_str,
+                            source_span,
+                        });
+                    }
+                    return CsStmt::Block(stmts, source_span);
+                }
+            }
             // Language 5, Sprint 3: `val ref name = ref expr` lowers to
             // `ref readonly T name = ref expr;` in C#. The init `Expr::RefOf`
             // produces `ref expr` text directly.
