@@ -4799,6 +4799,18 @@ fn lower_destructure_val(
 ) -> CsStmt {
     let init_str = lower_expr(init);
 
+    // Issue #17: an empty `type_name` marks a tuple destructure
+    // (`val (a, b) = expr`). Lower to a C# tuple deconstruction
+    // (`var (a, b) = expr;`) which works for both `ValueTuple` and
+    // `IDeconstructable` receivers.
+    if pattern.type_name.is_empty() {
+        let names: Vec<String> = pattern.bindings.iter().cloned().collect();
+        return CsStmt::Raw(
+            format!("var ({}) = {};", names.join(", "), init_str),
+            source_span,
+        );
+    }
+
     // Optimization: single binding → inline without temp variable.
     if pattern.bindings.len() == 1 {
         let name = &pattern.bindings[0];

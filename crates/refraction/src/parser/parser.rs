@@ -2132,6 +2132,53 @@ impl Parser {
                 span: Span { start: start.start, end: self.peek_span().end },
             });
         }
+
+        // Issue #17: `val (a, b) = expr` — tuple destructuring. The
+        // pattern is represented as a `DestructurePattern` with an
+        // empty `type_name`, which the lowering pass turns into a C#
+        // tuple deconstruction (`var (a, b) = expr;`). Bindings may be
+        // identifiers or the discard placeholder `_`.
+        if self.check(&TokenKind::LParen) {
+            let pat_start = self.peek_span();
+            let saved = self.pos;
+            self.advance(); // consume '('
+            let mut bindings: Vec<String> = Vec::new();
+            let mut ok = true;
+            loop {
+                self.skip_newlines();
+                if self.check_contextual("_") {
+                    bindings.push("_".into());
+                    self.advance();
+                } else if let TokenKind::Identifier(name) = self.peek().clone() {
+                    bindings.push(name);
+                    self.advance();
+                } else {
+                    ok = false;
+                    break;
+                }
+                self.skip_newlines();
+                if !self.eat(&TokenKind::Comma) { break; }
+            }
+            if ok && self.eat(&TokenKind::RParen) && self.check(&TokenKind::Eq) {
+                self.advance(); // consume '='
+                let init = self.parse_expr()?;
+                self.expect_newline_or_eof();
+                return Ok(Stmt::DestructureVal {
+                    pattern: DestructurePattern {
+                        type_name: String::new(),
+                        bindings,
+                        span: Span {
+                            start: pat_start.start,
+                            end: self.peek_span().end,
+                        },
+                    },
+                    init,
+                    span: Span { start: start.start, end: self.peek_span().end },
+                });
+            }
+            // Not a tuple destructure — restore for the regular path.
+            self.pos = saved;
+        }
         } // close `if !is_ref` for binding pattern guard
 
         let (name, name_span) = self.expect_ident()?;

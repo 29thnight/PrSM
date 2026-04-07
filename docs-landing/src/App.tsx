@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { BookOpen } from 'lucide-react'
+import { BookOpen, Globe, ChevronDown, Menu, X } from 'lucide-react'
 import Prism from './components/Prism.jsx'
 import prsmLogo from './assets/prsm-logo.svg'
 import TrueFocus from './components/TrueFocus'
@@ -31,8 +31,16 @@ function App() {
   const [view, setView] = useState<'landing' | 'docs'>('landing')
   const [activeDoc, setActiveDoc] = useState('index')
   const [lang, setLang] = useState<'en' | 'ko'>('en')
+  const [isLangMenuOpen, setIsLangMenuOpen] = useState(false)
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
 
   const t = BRAND_CONTENT[lang]
+
+  useEffect(() => {
+    const closeMenus = () => setIsLangMenuOpen(false)
+    document.addEventListener('click', closeMenus)
+    return () => document.removeEventListener('click', closeMenus)
+  }, [])
 
   // Handle back/forward navigation or initial load
   useEffect(() => {
@@ -124,22 +132,66 @@ function App() {
               <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
             </svg>
           </a>
-          <div className="brand-nav__langs">
+          {/* Language Selector Dropdown */}
+          <div className="brand-nav__lang-selector" onClick={(e) => e.stopPropagation()}>
             <button
-              className={`brand-nav__lang ${lang === 'ko' ? 'brand-nav__lang--active' : ''}`}
-              onClick={() => setLang('ko')}
+              className="brand-nav__lang-btn"
+              onClick={() => setIsLangMenuOpen(!isLangMenuOpen)}
+              aria-expanded={isLangMenuOpen}
+              aria-label="Select language"
             >
-              KO
+              <Globe size={18} />
+              <span>{lang.toUpperCase()}</span>
+              <ChevronDown size={14} className={`brand-nav__lang-chevron ${isLangMenuOpen ? 'open' : ''}`} />
             </button>
-            <span className="brand-nav__lang-sep">/</span>
-            <button
-              className={`brand-nav__lang ${lang === 'en' ? 'brand-nav__lang--active' : ''}`}
-              onClick={() => setLang('en')}
-            >
-              EN
-            </button>
+            {isLangMenuOpen && (
+              <div className="brand-nav__lang-dropdown">
+                <button
+                  className={`brand-nav__lang-option ${lang === 'ko' ? 'active' : ''}`}
+                  onClick={() => { setLang('ko'); setIsLangMenuOpen(false); }}
+                >
+                  한국어 (KO)
+                </button>
+                <button
+                  className={`brand-nav__lang-option ${lang === 'en' ? 'active' : ''}`}
+                  onClick={() => { setLang('en'); setIsLangMenuOpen(false); }}
+                >
+                  English (EN)
+                </button>
+              </div>
+            )}
           </div>
+
+          <button 
+            className="brand-nav__mobile-toggle"
+            onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+            aria-label="Toggle mobile menu"
+          >
+            {isMobileMenuOpen ? <X size={24} /> : <Menu size={24} />}
+          </button>
         </div>
+
+        {/* Mobile Navigation Menu */}
+        {isMobileMenuOpen && (
+          <div className="brand-nav__mobile-menu">
+            <nav className="brand-nav__mobile-links">
+              <a 
+                className={`brand-nav__mobile-link ${view === 'landing' ? 'active' : ''}`} 
+                href={import.meta.env.BASE_URL}
+                onClick={(e) => { e.preventDefault(); setView('landing'); setIsMobileMenuOpen(false); window.history.pushState({}, '', import.meta.env.BASE_URL) }}
+              >
+                {t.home}
+              </a>
+              <a 
+                className={`brand-nav__mobile-link ${view === 'docs' ? 'active' : ''}`} 
+                href={`${base}/${lang}/`.replace(/\/+/g, '/')}
+                onClick={(e) => { e.preventDefault(); enterDocs('index', lang); setIsMobileMenuOpen(false); }}
+              >
+                {t.docs}
+              </a>
+            </nav>
+          </div>
+        )}
       </header>
 
       {view === 'docs' ? (
