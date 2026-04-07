@@ -1491,6 +1491,23 @@ fn lower_when_pattern_text(pattern: &WhenPattern) -> String {
             lower_expr(start),
             lower_expr(end)
         ),
+        // v5 (deferred): positional pattern → `Type(p1, p2)`.
+        WhenPattern::Positional { path, entries, .. } => {
+            let inner: Vec<String> = entries.iter().map(lower_when_pattern_text).collect();
+            format!("{}({})", path.join("."), inner.join(", "))
+        }
+        // v5 (deferred): property pattern → `Type { f1: p1, f2: p2 }`.
+        WhenPattern::Property { type_path, fields, .. } => {
+            let inner: Vec<String> = fields
+                .iter()
+                .map(|(name, p)| format!("{}: {}", name, lower_when_pattern_text(p)))
+                .collect();
+            if type_path.is_empty() {
+                format!("{{ {} }}", inner.join(", "))
+            } else {
+                format!("{} {{ {} }}", type_path.join("."), inner.join(", "))
+            }
+        }
         WhenPattern::Else => "_".into(),
     }
 }
@@ -1994,7 +2011,8 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::NameOf { span, .. }
         | Expr::RefOf { span, .. }
         | Expr::SafeIndexAccess { span, .. }
-        | Expr::ThrowExpr { span, .. } => *span,
+        | Expr::ThrowExpr { span, .. }
+        | Expr::With { span, .. } => *span,
     }
 }
 
@@ -2171,7 +2189,11 @@ fn lower_stmt_with_context(
                         // patterns lower to C# 9 case-pattern syntax.
                         WhenPattern::Relational { .. }
                         | WhenPattern::And { .. }
-                        | WhenPattern::Not { .. } => {
+                        | WhenPattern::Not { .. }
+                        // v5 (deferred): positional + property patterns
+                        // also map to native C# 9 case-pattern syntax.
+                        | WhenPattern::Positional { .. }
+                        | WhenPattern::Property { .. } => {
                             format!("case {}:", lower_when_pattern_text(&b.pattern))
                         }
                     };
@@ -2292,7 +2314,9 @@ fn lower_stmt_with_context(
                         // boolean expression.
                         WhenPattern::Relational { .. }
                         | WhenPattern::And { .. }
-                        | WhenPattern::Not { .. } => {
+                        | WhenPattern::Not { .. }
+                        | WhenPattern::Positional { .. }
+                        | WhenPattern::Property { .. } => {
                             result = Some(CsStmt::Block(body, Some(b.span)));
                         }
                     }
@@ -3018,7 +3042,9 @@ fn lower_expr_with_expected_type(
                         // delegate to the shared text helper.
                         WhenPattern::Relational { .. }
                         | WhenPattern::And { .. }
-                        | WhenPattern::Not { .. } => lower_when_pattern_text(&branch.pattern),
+                        | WhenPattern::Not { .. }
+                        | WhenPattern::Positional { .. }
+                        | WhenPattern::Property { .. } => lower_when_pattern_text(&branch.pattern),
                     };
                     let value = match &branch.body {
                         WhenBody::Expr(expr) => lower_expr_with_expected_type(expr, expected_type, callable_signatures),
@@ -3064,7 +3090,9 @@ fn lower_expr_with_expected_type(
                         // result intact.
                         | WhenPattern::Relational { .. }
                         | WhenPattern::And { .. }
-                        | WhenPattern::Not { .. } => result,
+                        | WhenPattern::Not { .. }
+                        | WhenPattern::Positional { .. }
+                        | WhenPattern::Property { .. } => result,
                     };
                 }
                 result
@@ -3184,6 +3212,23 @@ fn lower_expr_with_expected_type(
             // call lowering already produces the construction form when
             // the name resolves to a known type, so we forward verbatim.
             format!("throw {}", exc)
+        }
+        // v5 (deferred): `receiver with { field = value, ... }` lowers to
+        // a C# `with`-expression. C# 9 records support this directly;
+        // for plain types the user is expected to compile to a record
+        // (the lowering pass does not currently distinguish, so we
+        // emit the same syntax in both cases and let the C# compiler
+        // surface the diagnostic if the receiver isn't a record).
+        Expr::With { receiver, updates, .. } => {
+            let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
+            let pairs: Vec<String> = updates
+                .iter()
+                .map(|(name, value)| {
+                    let val = lower_expr_with_expected_type(value, None, callable_signatures);
+                    format!("{} = {}", name, val)
+                })
+                .collect();
+            format!("{} with {{ {} }}", recv, pairs.join(", "))
         }
     }
 }

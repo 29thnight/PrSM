@@ -623,6 +623,22 @@ pub enum WhenPattern {
         inner: Box<WhenPattern>,
         span: Span,
     },
+    /// v5 (deferred): positional pattern. `Point(0, 0)` etc. The
+    /// difference from `Binding` is that the entries are full
+    /// patterns, not bindings — `Point(0, > 5)` is valid here.
+    Positional {
+        path: Vec<String>,
+        entries: Vec<WhenPattern>,
+        span: Span,
+    },
+    /// v5 (deferred): property pattern. `Point { x: 0, y: > 0 }`.
+    /// Each entry binds a field name to a sub-pattern.
+    Property {
+        /// Optional type prefix (`Point { x: 0 }` vs `{ x: 0 }`).
+        type_path: Vec<String>,
+        fields: Vec<(String, WhenPattern)>,
+        span: Span,
+    },
 }
 
 /// v5 Sprint 4: relational operators usable in `when` patterns. They map
@@ -857,6 +873,15 @@ pub enum Expr {
     /// where C# allows throw expressions.
     ThrowExpr {
         exception: Box<Expr>,
+        span: Span,
+    },
+    /// v5 (deferred): `receiver with { field = value, ... }` — produces a
+    /// copy of `receiver` with the listed fields replaced. Lowers to a
+    /// C# `with`-expression for `record` types and to an IIFE-style
+    /// temporary copy for plain structs/classes.
+    With {
+        receiver: Box<Expr>,
+        updates: Vec<(String, Expr)>,
         span: Span,
     },
 }

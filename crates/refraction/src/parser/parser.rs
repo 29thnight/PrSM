@@ -2256,6 +2256,8 @@ impl Parser {
     /// * `> n`, `< n`, `>= n`, `<= n`, `== n`, `!= n` — relational (v5)
     /// * `not pattern` — negation (v5)
     /// * `TypeName(bindings)` / `TypeName.Variant(bindings)` — binding
+    /// * `Type(p1, p2)` with sub-patterns — positional (v5 deferred)
+    /// * `Type { x: p1, y: p2 }` / `{ x: p1 }` — property (v5 deferred)
     /// * any other expression — equality match
     fn parse_pattern_atom(&mut self) -> Result<WhenPattern, ParseError> {
         if self.eat(&TokenKind::Else) {
@@ -2300,6 +2302,16 @@ impl Parser {
                 span: Span { start: span_start.start, end: self.peek_span().end },
             });
         }
+        // v5 (deferred): bare property pattern `{ x: p1 }`.
+        if self.check(&TokenKind::LBrace) {
+            let start = self.peek_span();
+            return self.parse_property_pattern_body(vec![], start);
+        }
+        // v5 (deferred): positional or property pattern with a leading
+        // type path. We try the binding pattern first (it expects a
+        // tighter shape — `Type(ident, ident)`), then fall back to a
+        // generalized positional pattern that allows full sub-patterns,
+        // then to a property pattern when followed by `{`.
         if let Some(bp) = self.try_parse_binding_pattern()? {
             return Ok(WhenPattern::Binding {
                 path: bp.path,
@@ -2307,8 +2319,113 @@ impl Parser {
                 span: bp.span,
             });
         }
+        if let Some(positional_or_property) = self.try_parse_typed_pattern()? {
+            return Ok(positional_or_property);
+        }
         let expr = self.parse_expr()?;
         Ok(WhenPattern::Expression(expr))
+    }
+
+    /// v5 (deferred): try to parse `Type(p1, p2)` (positional sub-pattern)
+    /// or `Type { x: p1 }` (property pattern). Returns `None` without
+    /// consuming tokens if the speculative parse does not fit.
+    fn try_parse_typed_pattern(&mut self) -> Result<Option<WhenPattern>, ParseError> {
+        let saved = self.pos;
+        let mut path: Vec<String> = Vec::new();
+        let start = self.peek_span();
+        if let TokenKind::Identifier(name) = self.peek().clone() {
+            path.push(name);
+            self.advance();
+        } else {
+            return Ok(None);
+        }
+        // Optional dotted path tail.
+        while self.check(&TokenKind::Dot) {
+            let after_dot = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+            if let Some(TokenKind::Identifier(_)) = after_dot {
+                self.advance(); // consume '.'
+                if let TokenKind::Identifier(name) = self.peek().clone() {
+                    path.push(name);
+                    self.advance();
+                }
+            } else {
+                break;
+            }
+        }
+        // Property pattern: `Type { ... }`.
+        if self.check(&TokenKind::LBrace) {
+            return Ok(Some(self.parse_property_pattern_body(path, start)?));
+        }
+        // Positional pattern: `Type(p1, p2)`. Only treat this as a
+        // pattern when at least one entry contains a non-identifier
+        // sub-pattern; otherwise the binding-pattern path would have
+        // matched first.
+        if self.check(&TokenKind::LParen) {
+            let saved_inner = self.pos;
+            self.advance(); // consume '('
+            let mut entries: Vec<WhenPattern> = Vec::new();
+            self.skip_newlines();
+            if !self.check(&TokenKind::RParen) {
+                loop {
+                    self.skip_newlines();
+                    if self.check(&TokenKind::RParen) { break; }
+                    let entry = match self.parse_pattern_atom() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            self.pos = saved;
+                            return Ok(None);
+                        }
+                    };
+                    entries.push(entry);
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+            }
+            if !self.eat(&TokenKind::RParen) {
+                self.pos = saved_inner;
+                return Ok(None);
+            }
+            return Ok(Some(WhenPattern::Positional {
+                path,
+                entries,
+                span: Span { start: start.start, end: self.peek_span().end },
+            }));
+        }
+        // Neither — restore position so the caller can fall through to
+        // the regular expression path.
+        self.pos = saved;
+        Ok(None)
+    }
+
+    /// v5 (deferred): parse the `{ field: pattern, ... }` body of a
+    /// property pattern. The leading type path (if any) was consumed
+    /// by the caller.
+    fn parse_property_pattern_body(
+        &mut self,
+        type_path: Vec<String>,
+        start: Span,
+    ) -> Result<WhenPattern, ParseError> {
+        self.expect(&TokenKind::LBrace)?;
+        self.skip_newlines();
+        let mut fields: Vec<(String, WhenPattern)> = Vec::new();
+        if !self.check(&TokenKind::RBrace) {
+            loop {
+                self.skip_newlines();
+                if self.check(&TokenKind::RBrace) { break; }
+                let (name, _) = self.expect_ident()?;
+                self.expect(&TokenKind::Colon)?;
+                let sub_pat = self.parse_pattern_atom()?;
+                fields.push((name, sub_pat));
+                if !self.eat(&TokenKind::Comma) { break; }
+                self.skip_newlines();
+            }
+        }
+        self.skip_newlines();
+        self.expect(&TokenKind::RBrace)?;
+        Ok(WhenPattern::Property {
+            type_path,
+            fields,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
     }
 
     /// Return the relational operator at the current token if any.
@@ -3334,6 +3451,38 @@ impl Parser {
                         span,
                     };
                 }
+                // v5 (deferred): `expr with { field = value, ... }` —
+                // record-style update expression. `with` is a contextual
+                // keyword recognized only when followed by `{`.
+                TokenKind::Identifier(ref name) if name == "with" && matches!(
+                    self.tokens.get(self.pos + 1).map(|t| t.kind.clone()),
+                    Some(TokenKind::LBrace)
+                ) => {
+                    self.advance(); // consume 'with'
+                    self.advance(); // consume '{'
+                    let mut updates: Vec<(String, Expr)> = Vec::new();
+                    self.skip_newlines();
+                    if !self.check(&TokenKind::RBrace) {
+                        loop {
+                            self.skip_newlines();
+                            if self.check(&TokenKind::RBrace) { break; }
+                            let (field_name, _) = self.expect_ident()?;
+                            self.expect(&TokenKind::Eq)?;
+                            let value = self.parse_expr()?;
+                            updates.push((field_name, value));
+                            if !self.eat(&TokenKind::Comma) { break; }
+                            self.skip_newlines();
+                        }
+                    }
+                    self.skip_newlines();
+                    self.expect(&TokenKind::RBrace)?;
+                    let span = Span { start: expr.span().start, end: self.peek_span().end };
+                    expr = Expr::With {
+                        receiver: Box::new(expr),
+                        updates,
+                        span,
+                    };
+                }
                 TokenKind::BangBang => {
                     self.advance();
                     let span = Span { start: expr.span().start, end: self.peek_span().end };
@@ -4312,7 +4461,8 @@ impl Expr {
             | Expr::NameOf { span, .. }
             | Expr::RefOf { span, .. }
             | Expr::SafeIndexAccess { span, .. }
-            | Expr::ThrowExpr { span, .. } => *span,
+            | Expr::ThrowExpr { span, .. }
+            | Expr::With { span, .. } => *span,
         }
     }
 }

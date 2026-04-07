@@ -1002,6 +1002,18 @@ fn collect_when_branch_type_references(
         WhenPattern::Not { inner, .. } => {
             collect_when_pattern_type_references(path, container_name, inner, references);
         }
+        // v5 (deferred): positional + property patterns recurse into
+        // their entries via the helper.
+        WhenPattern::Positional { entries, .. } => {
+            for entry in entries {
+                collect_when_pattern_type_references(path, container_name, entry, references);
+            }
+        }
+        WhenPattern::Property { fields, .. } => {
+            for (_, sub_pat) in fields {
+                collect_when_pattern_type_references(path, container_name, sub_pat, references);
+            }
+        }
     }
 
     match &branch.body {
@@ -1036,6 +1048,17 @@ fn collect_when_pattern_type_references(
         WhenPattern::Or { patterns, .. } => {
             for p in patterns {
                 collect_when_pattern_type_references(path, container_name, p, references);
+            }
+        }
+        // v5 (deferred): positional + property patterns recurse.
+        WhenPattern::Positional { entries, .. } => {
+            for entry in entries {
+                collect_when_pattern_type_references(path, container_name, entry, references);
+            }
+        }
+        WhenPattern::Property { fields, .. } => {
+            for (_, sub_pat) in fields {
+                collect_when_pattern_type_references(path, container_name, sub_pat, references);
             }
         }
         WhenPattern::Binding { .. } | WhenPattern::Else => {}
@@ -1082,6 +1105,13 @@ fn collect_expr_type_references(
         }
         Expr::ThrowExpr { exception, .. } => {
             collect_expr_type_references(path, container_name, exception, references);
+        }
+        // v5 (deferred): with-expression recurses into receiver + updates.
+        Expr::With { receiver, updates, .. } => {
+            collect_expr_type_references(path, container_name, receiver, references);
+            for (_, value) in updates {
+                collect_expr_type_references(path, container_name, value, references);
+            }
         }
         Expr::StringInterp { parts, .. } => {
             for part in parts {

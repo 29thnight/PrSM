@@ -1903,6 +1903,16 @@ impl Analyzer {
             // expression's type. Reference-ness is tracked at the
             // declaration level, not in the type system today.
             Expr::RefOf { inner, .. } => self.analyze_expr(inner),
+            // v5 (deferred): `with` produces a value of the same type
+            // as the receiver. The update expressions are analyzed
+            // recursively so type errors inside them surface.
+            Expr::With { receiver, updates, .. } => {
+                let recv_ty = self.analyze_expr(receiver);
+                for (_, value) in updates {
+                    let _ = self.analyze_expr(value);
+                }
+                recv_ty
+            }
             // Language 5, Sprint 6: `arr?[index]` — type is the element
             // type of the indexed collection (best-effort: we just
             // recurse and use the receiver's type for now).

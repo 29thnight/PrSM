@@ -1392,6 +1392,44 @@ hello world
         );
     }
 
+    // ── Language 5 (deferred): positional/property patterns + with ──
+
+    // Positional pattern with sub-patterns lowers to C# 9 case syntax.
+    #[test]
+    fn test_positional_pattern_with_subpatterns() {
+        let src = "component Probe : MonoBehaviour {\n  func describe(p: Point) {\n    when p {\n      Point(0, 0) => print(\"origin\")\n      else => print(\"other\")\n    }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("Point(0, 0)"),
+            "expected positional pattern: {}",
+            output
+        );
+    }
+
+    // Property pattern lowers to C# 9 `Type { x: …, y: … }` syntax.
+    #[test]
+    fn test_property_pattern() {
+        let src = "component Probe : MonoBehaviour {\n  func describe(p: Point) {\n    when p {\n      Point { x: 0, y: > 0 } => print(\"upper\")\n      else => print(\"other\")\n    }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("Point { x: 0, y: > 0 }"),
+            "expected property pattern: {}",
+            output
+        );
+    }
+
+    // `receiver with { field = value }` lowers to a C# `with`-expression.
+    #[test]
+    fn test_with_expression_lowers_to_csharp_with() {
+        let src = "component Probe : MonoBehaviour {\n  func go(p: Point) {\n    val q = p with { x = 0 }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("with { x = 0 }"),
+            "expected with-expression: {}",
+            output
+        );
+    }
+
     // ── Language 5 (deferred): generalized nested class ──────────
 
     // A `data class` declared inside a component lowers to a nested

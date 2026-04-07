@@ -2262,6 +2262,36 @@ fn collect_used_namespaces_for_when_branch(
             };
             collect_used_namespaces_for_when_branch(&inner_branch, used_namespaces);
         }
+        // v5 (deferred): positional + property patterns recurse into
+        // their entries via synthetic sub-branches.
+        WhenPattern::Positional { path, entries, .. } => {
+            if let Some(type_name) = path.first() {
+                mark_namespace_for_known_type_name(type_name, used_namespaces);
+            }
+            for entry in entries {
+                let sub = WhenBranch {
+                    pattern: entry.clone(),
+                    guard: None,
+                    body: WhenBody::Block(Block { stmts: vec![], span: branch.span }),
+                    span: branch.span,
+                };
+                collect_used_namespaces_for_when_branch(&sub, used_namespaces);
+            }
+        }
+        WhenPattern::Property { type_path, fields, .. } => {
+            if let Some(type_name) = type_path.first() {
+                mark_namespace_for_known_type_name(type_name, used_namespaces);
+            }
+            for (_, sub_pat) in fields {
+                let sub = WhenBranch {
+                    pattern: sub_pat.clone(),
+                    guard: None,
+                    body: WhenBody::Block(Block { stmts: vec![], span: branch.span }),
+                    span: branch.span,
+                };
+                collect_used_namespaces_for_when_branch(&sub, used_namespaces);
+            }
+        }
     }
 
     if let Some(guard) = &branch.guard {
@@ -2296,6 +2326,14 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
         }
         Expr::ThrowExpr { exception, .. } => {
             collect_used_namespaces_for_expr(exception, used_namespaces);
+        }
+        // v5 (deferred): with-expression — recurse into the receiver
+        // and each update value.
+        Expr::With { receiver, updates, .. } => {
+            collect_used_namespaces_for_expr(receiver, used_namespaces);
+            for (_, value) in updates {
+                collect_used_namespaces_for_expr(value, used_namespaces);
+            }
         }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
@@ -2745,6 +2783,11 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
             expr_contains_intrinsic_code(receiver) || expr_contains_intrinsic_code(index)
         }
         Expr::ThrowExpr { exception, .. } => expr_contains_intrinsic_code(exception),
+        // v5 (deferred): with-expression recurses into receiver + updates.
+        Expr::With { receiver, updates, .. } => {
+            expr_contains_intrinsic_code(receiver)
+                || updates.iter().any(|(_, v)| expr_contains_intrinsic_code(v))
+        }
         Expr::IntLit(_, _)
         | Expr::FloatLit(_, _)
         | Expr::DurationLit(_, _)
@@ -3199,6 +3242,13 @@ fn collect_expr_explicit_type_arg_actions(
             selection_span,
             actions,
         ),
+        // v5 (deferred): with-expression recurses into receiver + updates.
+        Expr::With { receiver, updates, .. } => {
+            collect_expr_explicit_type_arg_actions(receiver, None, callable_signatures, selection_span, actions);
+            for (_, value) in updates {
+                collect_expr_explicit_type_arg_actions(value, None, callable_signatures, selection_span, actions);
+            }
+        }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
                 if let StringPart::Expr(expr) = part {
