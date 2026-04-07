@@ -1992,6 +1992,36 @@ fn collect_used_namespaces_for_when_branch(
             collect_used_namespaces_for_expr(start, used_namespaces);
             collect_used_namespaces_for_expr(end, used_namespaces);
         }
+        // Language 5, Sprint 4: relational + combinator patterns recurse
+        // into their RHS / inner forms.
+        WhenPattern::Relational { value, .. } => {
+            collect_used_namespaces_for_expr(value, used_namespaces);
+        }
+        WhenPattern::And { left, right, .. } => {
+            let left_branch = WhenBranch {
+                pattern: (**left).clone(),
+                guard: None,
+                body: WhenBody::Block(Block { stmts: vec![], span: branch.span }),
+                span: branch.span,
+            };
+            let right_branch = WhenBranch {
+                pattern: (**right).clone(),
+                guard: None,
+                body: WhenBody::Block(Block { stmts: vec![], span: branch.span }),
+                span: branch.span,
+            };
+            collect_used_namespaces_for_when_branch(&left_branch, used_namespaces);
+            collect_used_namespaces_for_when_branch(&right_branch, used_namespaces);
+        }
+        WhenPattern::Not { inner, .. } => {
+            let inner_branch = WhenBranch {
+                pattern: (**inner).clone(),
+                guard: None,
+                body: WhenBody::Block(Block { stmts: vec![], span: branch.span }),
+                span: branch.span,
+            };
+            collect_used_namespaces_for_when_branch(&inner_branch, used_namespaces);
+        }
     }
 
     if let Some(guard) = &branch.guard {

@@ -587,6 +587,37 @@ pub enum WhenPattern {
         end: Expr,
         span: Span,
     },
+    /// v5 Sprint 4: Relational pattern — `> 80`, `< 30`, `>= 0`, `<= 100`,
+    /// `== 0`, `!= 0`. The expression is the right-hand side; the operator
+    /// determines which C# 9 relational pattern to emit.
+    Relational {
+        op: RelationalOp,
+        value: Expr,
+        span: Span,
+    },
+    /// v5 Sprint 4: `pattern and pattern` — both must match.
+    And {
+        left: Box<WhenPattern>,
+        right: Box<WhenPattern>,
+        span: Span,
+    },
+    /// v5 Sprint 4: `not pattern` — match must fail.
+    Not {
+        inner: Box<WhenPattern>,
+        span: Span,
+    },
+}
+
+/// v5 Sprint 4: relational operators usable in `when` patterns. They map
+/// directly to the corresponding C# 9 relational patterns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationalOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
 }
 
 /// v2: destructuring pattern for val/for statements.

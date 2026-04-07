@@ -950,11 +950,54 @@ fn collect_when_branch_type_references(
             collect_expr_type_references(path, container_name, start, references);
             collect_expr_type_references(path, container_name, end, references);
         }
+        // Language 5, Sprint 4: relational + combinator patterns recurse.
+        WhenPattern::Relational { value, .. } => {
+            collect_expr_type_references(path, container_name, value, references);
+        }
+        WhenPattern::And { left, right, .. } => {
+            collect_when_pattern_type_references(path, container_name, left, references);
+            collect_when_pattern_type_references(path, container_name, right, references);
+        }
+        WhenPattern::Not { inner, .. } => {
+            collect_when_pattern_type_references(path, container_name, inner, references);
+        }
     }
 
     match &branch.body {
         WhenBody::Block(block) => collect_block_type_references(path, container_name, block, references),
         WhenBody::Expr(expr) => collect_expr_type_references(path, container_name, expr, references),
+    }
+}
+
+fn collect_when_pattern_type_references(
+    path: &Path,
+    container_name: &str,
+    pattern: &WhenPattern,
+    references: &mut Vec<IndexedReference>,
+) {
+    match pattern {
+        WhenPattern::Expression(expr) => collect_expr_type_references(path, container_name, expr, references),
+        WhenPattern::Is(ty) => collect_type_references(path, container_name, ty, references),
+        WhenPattern::Range { start, end, .. } => {
+            collect_expr_type_references(path, container_name, start, references);
+            collect_expr_type_references(path, container_name, end, references);
+        }
+        WhenPattern::Relational { value, .. } => {
+            collect_expr_type_references(path, container_name, value, references);
+        }
+        WhenPattern::And { left, right, .. } => {
+            collect_when_pattern_type_references(path, container_name, left, references);
+            collect_when_pattern_type_references(path, container_name, right, references);
+        }
+        WhenPattern::Not { inner, .. } => {
+            collect_when_pattern_type_references(path, container_name, inner, references);
+        }
+        WhenPattern::Or { patterns, .. } => {
+            for p in patterns {
+                collect_when_pattern_type_references(path, container_name, p, references);
+            }
+        }
+        WhenPattern::Binding { .. } | WhenPattern::Else => {}
     }
 }
 

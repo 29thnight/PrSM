@@ -1404,6 +1404,46 @@ fn lower_awake(
     }
 }
 
+/// Language 5, Sprint 4: lower a `WhenPattern` to its C# 9 case-pattern
+/// text. Used by the relational and combinator (`and` / `not`) cases of
+/// the switch lowering.
+fn lower_when_pattern_text(pattern: &WhenPattern) -> String {
+    match pattern {
+        WhenPattern::Expression(expr) => lower_expr(expr),
+        WhenPattern::Is(ty) => lower_type(ty),
+        WhenPattern::Relational { op, value, .. } => {
+            let op_str = match op {
+                RelationalOp::Lt => "<",
+                RelationalOp::Le => "<=",
+                RelationalOp::Gt => ">",
+                RelationalOp::Ge => ">=",
+                RelationalOp::Eq => "==",
+                RelationalOp::Ne => "!=",
+            };
+            format!("{} {}", op_str, lower_expr(value))
+        }
+        WhenPattern::And { left, right, .. } => format!(
+            "{} and {}",
+            lower_when_pattern_text(left),
+            lower_when_pattern_text(right)
+        ),
+        WhenPattern::Not { inner, .. } => format!("not {}", lower_when_pattern_text(inner)),
+        // The legacy `Or` pattern uses C# `or` between case-patterns.
+        WhenPattern::Or { patterns, .. } => patterns
+            .iter()
+            .map(lower_when_pattern_text)
+            .collect::<Vec<_>>()
+            .join(" or "),
+        WhenPattern::Binding { path, .. } => format!("{} _", path.join(".")),
+        WhenPattern::Range { start, end, .. } => format!(
+            ">= {} and <= {}",
+            lower_expr(start),
+            lower_expr(end)
+        ),
+        WhenPattern::Else => "_".into(),
+    }
+}
+
 /// Language 5, Sprint 2: convert a PrSM `Param` (with optional `ref` /
 /// `out` / `vararg` modifiers and a default value) into a `CsParam` for
 /// emission. Centralized so every method/lifecycle/coroutine path picks
@@ -2073,6 +2113,13 @@ fn lower_stmt_with_context(
                             format!("case var _prsm_rv when _prsm_rv >= {} && _prsm_rv <= {}:",
                                 lower_expr(range_start), lower_expr(range_end))
                         }
+                        // Language 5, Sprint 4: relational + combinator
+                        // patterns lower to C# 9 case-pattern syntax.
+                        WhenPattern::Relational { .. }
+                        | WhenPattern::And { .. }
+                        | WhenPattern::Not { .. } => {
+                            format!("case {}:", lower_when_pattern_text(&b.pattern))
+                        }
                     };
                     let body: Vec<CsStmt> = match &b.body {
                         WhenBody::Block(bl) => bl
@@ -2181,6 +2228,18 @@ fn lower_stmt_with_context(
                                 else_body: result.map(|r| vec![r]),
                                 source_span: Some(b.span),
                             });
+                        }
+                        // Language 5, Sprint 4: in subject-less when, a
+                        // relational pattern by itself is meaningless
+                        // (there's no subject to compare against), so we
+                        // emit it as `default:` and let the user reach
+                        // the body unconditionally. The combinators
+                        // similarly fall through to the underlying
+                        // boolean expression.
+                        WhenPattern::Relational { .. }
+                        | WhenPattern::And { .. }
+                        | WhenPattern::Not { .. } => {
+                            result = Some(CsStmt::Block(body, Some(b.span)));
                         }
                     }
                 }
@@ -2901,6 +2960,11 @@ fn lower_expr_with_expected_type(
                         WhenPattern::Range { start: range_start, end: range_end, .. } => {
                             format!(">= {} and <= {}", lower_expr(range_start), lower_expr(range_end))
                         }
+                        // Language 5, Sprint 4: relational + combinator patterns
+                        // delegate to the shared text helper.
+                        WhenPattern::Relational { .. }
+                        | WhenPattern::And { .. }
+                        | WhenPattern::Not { .. } => lower_when_pattern_text(&branch.pattern),
                     };
                     let value = match &branch.body {
                         WhenBody::Expr(expr) => lower_expr_with_expected_type(expr, expected_type, callable_signatures),
@@ -2939,7 +3003,14 @@ fn lower_expr_with_expected_type(
                             result
                         ),
                         WhenPattern::Is(_) | WhenPattern::Binding { .. }
-                        | WhenPattern::Or { .. } | WhenPattern::Range { .. } => result,
+                        | WhenPattern::Or { .. } | WhenPattern::Range { .. }
+                        // Language 5, Sprint 4: relational/and/not patterns
+                        // in subject-less when expressions are not yet
+                        // representable as a boolean — leave the prior
+                        // result intact.
+                        | WhenPattern::Relational { .. }
+                        | WhenPattern::And { .. }
+                        | WhenPattern::Not { .. } => result,
                     };
                 }
                 result

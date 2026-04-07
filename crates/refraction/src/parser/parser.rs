@@ -2130,61 +2130,30 @@ impl Parser {
     fn parse_when_branch(&mut self) -> Result<WhenBranch, ParseError> {
         let start = self.peek_span();
 
-        // v2: detect binding pattern `TypeName.Variant(bindings)` or `TypeName(bindings)`.
-        // Heuristic: Identifier followed by '.' or '(' that is NOT a general call expression used
-        // as a condition.  We try a speculative parse: if next token is Identifier and after
-        // skipping any '.Identifier' chain we find '(' followed by identifier list followed by ')',
-        // treat it as a Binding pattern.  Otherwise fall through to the Expression path.
-        let first_pattern = if self.eat(&TokenKind::Else) {
-            WhenPattern::Else
-        } else if self.eat(&TokenKind::Is) {
-            let ty = self.parse_type()?;
-            WhenPattern::Is(ty)
-        } else if self.check(&TokenKind::In) {
-            // v4: Range pattern: `in start..end`
-            let range_start = self.peek_span();
-            self.advance(); // consume 'in'
-            let range_begin = self.parse_additive()?;
-            self.expect(&TokenKind::DotDot)?;
-            let range_end = self.parse_additive()?;
-            WhenPattern::Range {
-                start: range_begin,
-                end: range_end,
-                span: Span { start: range_start.start, end: self.peek_span().end },
-            }
-        } else if let Some(bp) = self.try_parse_binding_pattern()? {
-            WhenPattern::Binding {
-                path: bp.path,
-                bindings: bp.bindings,
-                span: bp.span,
-            }
-        } else {
-            let expr = self.parse_expr()?;
-            WhenPattern::Expression(expr)
-        };
+        // v2/v5: parse the first pattern, then optionally extend with `and`/comma combinators.
+        let first_pattern = self.parse_pattern_atom()?;
 
-        // v4: OR pattern — if we see ',' and then another pattern (not '=>'), collect multiple patterns
-        let pattern = if self.check(&TokenKind::Comma) && !matches!(first_pattern, WhenPattern::Else | WhenPattern::Range { .. }) {
-            let mut patterns = vec![first_pattern];
+        // v5 Sprint 4: `pattern and pattern` combinator. Parse iteratively
+        // so chains like `> 0 and < 100 and != 50` left-associate naturally.
+        let mut combined = first_pattern;
+        while self.check_contextual("and") {
+            self.advance();
+            let right = self.parse_pattern_atom()?;
+            let span = Span { start: start.start, end: self.peek_span().end };
+            combined = WhenPattern::And {
+                left: Box::new(combined),
+                right: Box::new(right),
+                span,
+            };
+        }
+
+        // v4: OR pattern — if we see ',' and then another pattern (not '=>'),
+        // collect multiple patterns into a single Or wrapper.
+        let pattern = if self.check(&TokenKind::Comma) && !matches!(combined, WhenPattern::Else | WhenPattern::Range { .. }) {
+            let mut patterns = vec![combined];
             while self.eat(&TokenKind::Comma) {
                 self.skip_newlines();
-                // Parse next pattern atom (no nested OR)
-                let next = if self.eat(&TokenKind::Is) {
-                    let ty = self.parse_type()?;
-                    WhenPattern::Is(ty)
-                } else if self.check(&TokenKind::In) {
-                    let rs = self.peek_span();
-                    self.advance();
-                    let rb = self.parse_additive()?;
-                    self.expect(&TokenKind::DotDot)?;
-                    let re = self.parse_additive()?;
-                    WhenPattern::Range { start: rb, end: re, span: Span { start: rs.start, end: self.peek_span().end } }
-                } else if let Some(bp) = self.try_parse_binding_pattern()? {
-                    WhenPattern::Binding { path: bp.path, bindings: bp.bindings, span: bp.span }
-                } else {
-                    let expr = self.parse_expr()?;
-                    WhenPattern::Expression(expr)
-                };
+                let next = self.parse_pattern_atom()?;
                 patterns.push(next);
             }
             WhenPattern::Or {
@@ -2192,7 +2161,7 @@ impl Parser {
                 patterns,
             }
         } else {
-            first_pattern
+            combined
         };
 
         // v2: optional guard `if <cond>`
@@ -2218,6 +2187,82 @@ impl Parser {
             body,
             span: Span { start: start.start, end: self.peek_span().end },
         })
+    }
+
+    /// Parse a single `when` pattern atom (Language 5 update). Recognizes:
+    ///
+    /// * `else` — wildcard
+    /// * `is Type` — type test
+    /// * `in start..end` — range
+    /// * `> n`, `< n`, `>= n`, `<= n`, `== n`, `!= n` — relational (v5)
+    /// * `not pattern` — negation (v5)
+    /// * `TypeName(bindings)` / `TypeName.Variant(bindings)` — binding
+    /// * any other expression — equality match
+    fn parse_pattern_atom(&mut self) -> Result<WhenPattern, ParseError> {
+        if self.eat(&TokenKind::Else) {
+            return Ok(WhenPattern::Else);
+        }
+        if self.eat(&TokenKind::Is) {
+            let ty = self.parse_type()?;
+            return Ok(WhenPattern::Is(ty));
+        }
+        if self.check(&TokenKind::In) {
+            let range_start = self.peek_span();
+            self.advance();
+            let range_begin = self.parse_additive()?;
+            self.expect(&TokenKind::DotDot)?;
+            let range_end = self.parse_additive()?;
+            return Ok(WhenPattern::Range {
+                start: range_begin,
+                end: range_end,
+                span: Span { start: range_start.start, end: self.peek_span().end },
+            });
+        }
+        // v5 Sprint 4: `not pattern` (right-associative).
+        if self.check_contextual("not") {
+            let start = self.peek_span();
+            self.advance();
+            let inner = self.parse_pattern_atom()?;
+            return Ok(WhenPattern::Not {
+                inner: Box::new(inner),
+                span: Span { start: start.start, end: self.peek_span().end },
+            });
+        }
+        // v5 Sprint 4: relational patterns. The leading operator is what
+        // disambiguates them from a regular expression — only `<`, `>`,
+        // `<=`, `>=`, `==`, `!=` qualify.
+        if let Some(op) = self.peek_relational_op() {
+            let span_start = self.peek_span();
+            self.advance(); // consume operator
+            let value = self.parse_additive()?;
+            return Ok(WhenPattern::Relational {
+                op,
+                value,
+                span: Span { start: span_start.start, end: self.peek_span().end },
+            });
+        }
+        if let Some(bp) = self.try_parse_binding_pattern()? {
+            return Ok(WhenPattern::Binding {
+                path: bp.path,
+                bindings: bp.bindings,
+                span: bp.span,
+            });
+        }
+        let expr = self.parse_expr()?;
+        Ok(WhenPattern::Expression(expr))
+    }
+
+    /// Return the relational operator at the current token if any.
+    fn peek_relational_op(&self) -> Option<RelationalOp> {
+        match self.peek() {
+            TokenKind::Lt => Some(RelationalOp::Lt),
+            TokenKind::LtEq => Some(RelationalOp::Le),
+            TokenKind::Gt => Some(RelationalOp::Gt),
+            TokenKind::GtEq => Some(RelationalOp::Ge),
+            TokenKind::EqEq => Some(RelationalOp::Eq),
+            TokenKind::NotEq => Some(RelationalOp::Ne),
+            _ => None,
+        }
     }
 
     /// Speculatively parse a v2 binding pattern: `TypeName.Variant(a, b)` or `TypeName(a, b)`.

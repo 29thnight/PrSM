@@ -1392,6 +1392,65 @@ hello world
         );
     }
 
+    // ── Language 5, Sprint 4 ──────────────────────────────────────
+
+    // Relational pattern in a `when` switch lowers to C# 9 `case > N:`.
+    #[test]
+    fn test_relational_pattern_in_when() {
+        let src = "component Health : MonoBehaviour {\n  func grade(hp: Int) {\n    when hp {\n      > 80 => print(\"Healthy\")\n      > 30 => print(\"Hurt\")\n      else => print(\"Dying\")\n    }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("> 80"),
+            "expected > 80 case-pattern: {}",
+            output
+        );
+        assert!(
+            output.contains("> 30"),
+            "expected > 30 case-pattern: {}",
+            output
+        );
+    }
+
+    // `not pattern` lowers to C# 9 `not` combinator.
+    #[test]
+    fn test_not_pattern_in_when() {
+        let src = "component Probe : MonoBehaviour {\n  func describe(x: Int) {\n    when x {\n      not 0 => print(\"non-zero\")\n      else => print(\"zero\")\n    }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("not 0"),
+            "expected not 0 pattern: {}",
+            output
+        );
+    }
+
+    // `pattern and pattern` lowers to C# 9 `and` combinator.
+    #[test]
+    fn test_and_pattern_in_when() {
+        let src = "component Probe : MonoBehaviour {\n  func describe(x: Int) {\n    when x {\n      > 0 and < 100 => print(\"in range\")\n      else => print(\"out of range\")\n    }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("> 0 and < 100"),
+            "expected and-combined pattern: {}",
+            output
+        );
+    }
+
+    // `where T : unmanaged` is forwarded as the C# unmanaged constraint.
+    #[test]
+    fn test_unmanaged_constraint_passes_through() {
+        let src = r#"component Buf : MonoBehaviour {
+  func sum<T>(values: T): Int where T : unmanaged {
+    return 0
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("where T : unmanaged"),
+            "expected unmanaged constraint in C# output: {}",
+            output
+        );
+    }
+
     // Language 5, Sprint 3: a `bind to` site registers a continuous push
     // callback so future setter writes propagate to every target.
     #[test]
