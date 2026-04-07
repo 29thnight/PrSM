@@ -1108,14 +1108,29 @@ impl Analyzer {
                 name_span,
                 ty,
                 init,
+                is_ref,
                 span,
                 ..
             } => {
+                // Issue #3: `val ref` requires an explicit type annotation
+                // because C# does not support `ref readonly var`. The
+                // existing lowering at lower.rs:2068 emits the invalid
+                // `ref readonly var` form when no type is supplied. Reject
+                // the unannotated case here so the user receives a clear
+                // diagnostic instead of a downstream C# compile failure.
+                if *is_ref && ty.is_none() {
+                    self.diag.error("E190",
+                        format!("'val ref' local '{}' requires an explicit type annotation. C# does not support 'ref readonly var'; write 'val ref {}: SomeType = ref expr' instead.", name, name),
+                        *span);
+                }
                 let declared_ty = if let Some(t) = ty {
                     let dt = self.resolve_typeref(t);
                     let init_ty = self.analyze_expr_with_expected(init, Some(&dt));
-                    // Check type compatibility
-                    if !init_ty.is_assignable_to(&dt) && !init_ty.is_error() {
+                    // Check type compatibility. ref locals trust the
+                    // explicit annotation because the right-hand side is
+                    // a `Expr::RefOf` whose inner Unity API type is not
+                    // always inferable from the current symbol table.
+                    if !*is_ref && !init_ty.is_assignable_to(&dt) && !init_ty.is_error() {
                         self.diag.error("E020",
                             format!("Type mismatch. Expected '{}', found '{}'", dt.display_name(), init_ty.display_name()),
                             *span);
@@ -1142,14 +1157,24 @@ impl Analyzer {
                 name_span,
                 ty,
                 init,
+                is_ref,
                 span,
                 ..
             } => {
+                // Issue #3: `var ref` requires an explicit type annotation
+                // because C# does not support `ref var`. Mirror the
+                // `val ref` check above.
+                if *is_ref && ty.is_none() {
+                    self.diag.error("E190",
+                        format!("'var ref' local '{}' requires an explicit type annotation. C# does not support 'ref var'; write 'var ref {}: SomeType = ref expr' instead.", name, name),
+                        *span);
+                }
                 let declared_ty = if let Some(t) = ty {
                     let dt = self.resolve_typeref(t);
                     if let Some(init_expr) = init {
                         let init_ty = self.analyze_expr_with_expected(init_expr, Some(&dt));
-                        if !init_ty.is_assignable_to(&dt) && !init_ty.is_error() {
+                        // Same trust-the-annotation policy as `val ref`.
+                        if !*is_ref && !init_ty.is_assignable_to(&dt) && !init_ty.is_error() {
                             self.diag.error("E020",
                                 format!("Type mismatch. Expected '{}', found '{}'", dt.display_name(), init_ty.display_name()),
                                 *span);

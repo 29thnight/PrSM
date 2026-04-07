@@ -1478,6 +1478,46 @@ hello world
         );
     }
 
+    // Issue #3: `val ref` with an explicit type lowers to a valid
+    // `ref readonly T name = ref expr;` statement. The annotation is
+    // trusted by the semantic analyzer (no E020 type-mismatch from the
+    // ref-of inner expression).
+    #[test]
+    fn test_val_ref_with_explicit_type_lowers_correctly() {
+        let src = "component Probe : MonoBehaviour {\n  func go() {\n    val ref pos: Vector3 = ref transform.position\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("ref readonly Vector3 pos = ref transform.position"),
+            "expected `ref readonly Vector3 pos = ref transform.position`: {}",
+            output
+        );
+        assert!(
+            !output.contains("ref readonly var"),
+            "lowering must not emit invalid `ref readonly var` form: {}",
+            output
+        );
+    }
+
+    // Issue #3: `val ref` without an explicit type produces E190.
+    #[test]
+    fn test_val_ref_without_type_emits_e190() {
+        let src = "component Probe : MonoBehaviour {\n  func go() {\n    val ref pos = ref transform.position\n  }\n}";
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let file = parser.parse_file();
+        assert!(parser.errors().is_empty(), "Parse errors: {:?}", parser.errors());
+        // Run semantic analysis to surface E190.
+        let mut analyzer = crate::semantic::analyzer::Analyzer::new();
+        analyzer.analyze_file(&file);
+        let errors = analyzer.diag.errors();
+        assert!(
+            errors.iter().any(|d| d.code == "E190"),
+            "expected E190 diagnostic for ref local without explicit type, got: {:?}",
+            errors
+        );
+    }
+
     // Issue #8: a `.prsm` file containing more than one top-level
     // declaration must produce a hard error (E189). Earlier versions
     // silently dropped the second declaration.
