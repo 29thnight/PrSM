@@ -744,6 +744,18 @@ impl Parser {
         }
         self.expect(&TokenKind::RParen)?;
 
+        // Issue #15 (partial fix): a `data class` declaration may carry
+        // a body block of operator overloads, methods, and static
+        // members. The AST does not yet model these as DataClass
+        // members and the lowering pipeline does not emit them. Consume
+        // the body verbatim so the parser does not emit a confusing
+        // E189 multi-decl false positive on the trailing `{`. Full
+        // body member support is tracked as follow-up #32.
+        self.skip_newlines();
+        if self.check(&TokenKind::LBrace) {
+            let _ = self.parse_raw_brace_block()?;
+        }
+
         Ok(Decl::DataClass {
             name,
             name_span,
