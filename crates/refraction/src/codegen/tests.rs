@@ -1478,6 +1478,25 @@ hello world
         );
     }
 
+    // Issue #11: PrSM `length` member access on a collection lowers
+    // to PascalCase `Length` so the result is valid against arrays,
+    // NativeArray<T>, Span<T>, etc.
+    #[test]
+    fn test_length_member_lowers_to_pascalcase() {
+        let src = "component Bench : MonoBehaviour {\n  func go(arr: Array<Int>) {\n    for i in 0 until arr.length {\n      log(\"$i\")\n    }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("arr.Length"),
+            "expected `arr.Length` (PascalCase): {}",
+            output
+        );
+        assert!(
+            !output.contains("arr.length"),
+            "lowered output must not contain camelCase `length`: {}",
+            output
+        );
+    }
+
     // Issue #7: `yield i` inside a `for` loop must succeed when the
     // for-loop induction variable shares the coroutine's element type.
     // The previous semantic analyzer treated every for-loop variable as

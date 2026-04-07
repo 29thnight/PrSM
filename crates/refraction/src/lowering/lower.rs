@@ -2984,6 +2984,13 @@ fn lower_expr_with_expected_type(
                 ("Time", "deltaTime") => "Time.deltaTime".into(),
                 // Duration sugar: expr.s → just expr (seconds value)
                 (_, "s") => recv.to_string(),
+                // Issue #11: PrSM uses camelCase `length` and `count` for
+                // collection sizes; the corresponding C# members on
+                // arrays, NativeArray<T>, Span<T>, Length-supporting
+                // types use PascalCase. Map them so the lowered C# is
+                // valid against any standard collection type.
+                (_, "length") => format!("{}.Length", recv),
+                (_, "count") => format!("{}.Count", recv),
                 _ => format!("{}.{}", recv, name),
             }
         }

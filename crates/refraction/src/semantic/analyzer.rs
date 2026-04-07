@@ -120,6 +120,37 @@ impl Analyzer {
         self.analyze_decl(&file.decl);
     }
 
+    /// Issue #12: validate that a `require` / `optional` / `child` /
+    /// `parent` field references a Unity Component subtype. The full
+    /// subtype check requires the Roslyn sidecar's type registry; as a
+    /// fallback we maintain a small blacklist of well-known non-Component
+    /// types (primitives, collections, function types) that the
+    /// component-lookup qualifiers should never apply to. The diagnostic
+    /// guides users to a regular `val name: Type? = null` field instead.
+    fn check_component_lookup_type(
+        &mut self,
+        qualifier: &str,
+        field_name: &str,
+        ty: &TypeRef,
+        name_span: Span,
+    ) {
+        let type_name: &str = match ty {
+            TypeRef::Simple { name, .. } => name,
+            TypeRef::Generic { name, .. } => name,
+            _ => return,
+        };
+        if is_known_non_component_type(type_name) {
+            self.diag.error(
+                "E191",
+                format!(
+                    "'{}' field '{}' must reference a UnityEngine.Component subtype, but '{}' is not a Component. Use a regular `val {}: {}? = null` field instead.",
+                    qualifier, field_name, type_name, field_name, type_name
+                ),
+                name_span,
+            );
+        }
+    }
+
     pub fn analyze_file_with_hir(&mut self, file: &File, file_path: &Path) -> HirFile {
         self.begin_hir(file_path);
         self.analyze_file(file);
@@ -601,6 +632,7 @@ impl Analyzer {
                 ty,
                 ..
             } => {
+                self.check_component_lookup_type("require", name, ty, *name_span);
                 let btype = self.resolve_typeref(ty);
                 let definition_id = self.record_member_definition(
                     name,
@@ -620,6 +652,7 @@ impl Analyzer {
                 ty,
                 ..
             } => {
+                self.check_component_lookup_type("optional", name, ty, *name_span);
                 let btype = self.resolve_typeref(ty).make_nullable();
                 let definition_id = self.record_member_definition(
                     name,
@@ -639,6 +672,7 @@ impl Analyzer {
                 ty,
                 ..
             } => {
+                self.check_component_lookup_type("child", name, ty, *name_span);
                 let btype = self.resolve_typeref(ty);
                 let definition_id = self.record_member_definition(
                     name,
@@ -658,6 +692,7 @@ impl Analyzer {
                 ty,
                 ..
             } => {
+                self.check_component_lookup_type("parent", name, ty, *name_span);
                 let btype = self.resolve_typeref(ty);
                 let definition_id = self.record_member_definition(
                     name,
@@ -2588,6 +2623,28 @@ fn is_non_generic_iterator(ty: &PrismType) -> bool {
 /// The curated set of preprocessor symbols documented in the v5 spec.
 /// Symbols outside this list still pass through to the C# preprocessor —
 /// the analyzer surfaces W034 only as a hint to the user.
+/// Issue #12: well-known type names that should never be the target of
+/// a `require` / `optional` / `child` / `parent` qualifier. Used by
+/// `Analyzer::check_component_lookup_type` to surface diagnostic E191.
+/// The list intentionally errs on the side of false negatives — only
+/// types we are sure are not Unity Components are flagged. A more
+/// authoritative check would consult the Roslyn sidecar's type registry.
+fn is_known_non_component_type(name: &str) -> bool {
+    matches!(
+        name,
+        // Primitives
+        "Int" | "Float" | "Double" | "Bool" | "String" | "Long" | "Byte"
+            | "Char" | "Unit" | "Object"
+        // Collections (PrSM aliases and C# names)
+            | "List" | "MutableList" | "Map" | "MutableMap" | "Set"
+            | "MutableSet" | "Queue" | "Stack" | "Array" | "Seq"
+            | "Dictionary" | "HashSet" | "IList" | "IDictionary"
+            | "IEnumerable" | "IEnumerator" | "ICollection"
+        // Function types
+            | "Action" | "Func" | "Predicate"
+    )
+}
+
 fn is_known_preprocessor_symbol(name: &str) -> bool {
     matches!(
         name,
