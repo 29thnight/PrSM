@@ -835,6 +835,29 @@ impl Parser {
             return self.parse_bind_member();
         }
 
+        // v5 (deferred): generalized nested declarations. A `class`,
+        // `data class`, `enum`, `struct`, `interface`, or even another
+        // `component` token in member position is parsed as a nested
+        // declaration via `parse_decl`. The result is wrapped in
+        // `Member::NestedDecl`.
+        let nested_starts_decl = matches!(
+            self.peek(),
+            TokenKind::Class
+                | TokenKind::Data
+                | TokenKind::Enum
+                | TokenKind::Struct
+                | TokenKind::Interface
+                | TokenKind::TypeAlias
+        ) || self.check_contextual("partial");
+        if nested_starts_decl {
+            let start = self.peek_span();
+            let inner = self.parse_decl()?;
+            return Ok(Member::NestedDecl {
+                decl: Box::new(inner),
+                span: Span { start: start.start, end: self.peek_span().end },
+            });
+        }
+
         match self.peek().clone() {
             TokenKind::Serialize => self.parse_serialize_field(annotations, target_annotations),
             TokenKind::Require => self.parse_require(),

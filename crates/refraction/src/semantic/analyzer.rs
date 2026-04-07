@@ -865,6 +865,12 @@ impl Analyzer {
                     definition_id,
                 });
             }
+            // v5: nested declaration. Recursively register the nested
+            // declaration so its enclosed types/members are visible to
+            // the rest of the analyzer.
+            Member::NestedDecl { decl, .. } => {
+                self.register_decl(decl);
+            }
         }
     }
 
@@ -1079,6 +1085,11 @@ impl Analyzer {
                 if let Some(expr) = init {
                     let _ = self.analyze_expr(expr);
                 }
+            }
+            // v5: nested declaration — recurse into the inner decl so
+            // its body is analyzed under the surrounding scope.
+            Member::NestedDecl { decl, .. } => {
+                self.analyze_decl(decl);
             }
             _ => {}
         }

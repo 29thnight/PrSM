@@ -28,6 +28,16 @@ pub fn emit(file: &CsFile) -> String {
     out
 }
 
+/// v5 (deferred): public entry point that lets the lowering pass emit
+/// a single nested class to a string at the requested indent level.
+/// Used by the `Member::NestedDecl` lowering path which needs to embed
+/// the class declaration as a `RawCode` member of its parent type.
+pub fn emit_class_at(class: &CsClass, indent: usize) -> String {
+    let mut out = String::new();
+    emit_class(&mut out, class, indent);
+    out
+}
+
 fn emit_class(out: &mut String, class: &CsClass, indent: usize) {
     let pad = "    ".repeat(indent);
 

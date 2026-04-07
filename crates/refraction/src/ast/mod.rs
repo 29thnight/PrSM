@@ -326,6 +326,16 @@ pub enum Member {
         init: Option<Expr>,
         span: Span,
     },
+    /// v5 (deferred): nested declaration. Allows arbitrary `class`,
+    /// `data class`, `enum`, `struct`, `interface` declarations directly
+    /// inside a component / class / asset / struct body. Lowers to a C#
+    /// nested type. The previous v4 path only allowed nested classes
+    /// inside `sealed class` subtypes; this generalizes the behavior
+    /// to every member position.
+    NestedDecl {
+        decl: Box<Decl>,
+        span: Span,
+    },
 }
 
 /// A single state inside a `state machine` declaration.

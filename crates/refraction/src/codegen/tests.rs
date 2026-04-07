@@ -1392,6 +1392,43 @@ hello world
         );
     }
 
+    // ── Language 5 (deferred): generalized nested class ──────────
+
+    // A `data class` declared inside a component lowers to a nested
+    // C# class in the parent type.
+    #[test]
+    fn test_nested_data_class_inside_component() {
+        let src = "component Inventory : MonoBehaviour {\n  data class Slot(name: String, count: Int)\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("public class Inventory"),
+            "expected outer class: {}",
+            output
+        );
+        assert!(
+            output.contains("Slot"),
+            "expected nested Slot type: {}",
+            output
+        );
+    }
+
+    // A nested `enum` declared inside a class is also emitted in-place.
+    #[test]
+    fn test_nested_enum_inside_class() {
+        let src = "class Order {\n  enum Status { Pending, Shipped, Delivered }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("public class Order"),
+            "expected outer class: {}",
+            output
+        );
+        assert!(
+            output.contains("Status"),
+            "expected nested enum: {}",
+            output
+        );
+    }
+
     // ── Language 5, Sprint 6 ──────────────────────────────────────
 
     // `arr?[0]` lowers to a C# null-conditional indexer.

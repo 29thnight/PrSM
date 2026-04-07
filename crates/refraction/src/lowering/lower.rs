@@ -167,6 +167,19 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                         // sites exist for this name.
                         let _ = (bname, ty, init);
                     }
+                    // v5: a nested declaration is lowered to its own
+                    // CsClass and emitted directly inside the parent
+                    // class member list as a `RawCode` block. The body
+                    // is rendered with the existing emitter so all
+                    // lowering features (lifecycle blocks, fields,
+                    // properties, etc.) are reused.
+                    Member::NestedDecl { decl, .. } => {
+                        let (cls, extras) = lower_decl(decl);
+                        cs_members.push(CsMember::RawCode(render_nested_class(&cls)));
+                        for extra in extras {
+                            cs_members.push(CsMember::RawCode(render_nested_class(&extra)));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -326,6 +339,13 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::IntrinsicCoroutine { name: cname, params, code, span, .. } => {
                         cs_members.push(lower_intrinsic_coroutine(cname, params, code, *span));
                     }
+                    Member::NestedDecl { decl, .. } => {
+                        let (cls, extras) = lower_decl(decl);
+                        cs_members.push(CsMember::RawCode(render_nested_class(&cls)));
+                        for extra in extras {
+                            cs_members.push(CsMember::RawCode(render_nested_class(&extra)));
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -372,6 +392,13 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                             *is_serialize,
                             target_annotations,
                         ));
+                    }
+                    Member::NestedDecl { decl, .. } => {
+                        let (cls, extras) = lower_decl(decl);
+                        cs_members.push(CsMember::RawCode(render_nested_class(&cls)));
+                        for extra in extras {
+                            cs_members.push(CsMember::RawCode(render_nested_class(&extra)));
+                        }
                     }
                     _ => {}
                 }
@@ -1415,6 +1442,19 @@ fn lower_awake(
     }
 }
 
+/// v5 (deferred): render a `CsClass` as the body of a nested type so it
+/// can be embedded inside a parent class member list. Mirrors the
+/// emitter's top-level `emit_class` formatter but at indent depth 1
+/// so the resulting block aligns with sibling fields/methods.
+fn render_nested_class(cls: &CsClass) -> String {
+    let raw = crate::codegen::emitter::emit_class_at(cls, 1);
+    // Strip the leading 4-space indent from the first line because the
+    // emitter prepends an indent to every member, and the parent class
+    // emitter will indent the RawCode block again.
+    let stripped = raw.strip_prefix("    ").unwrap_or(&raw);
+    stripped.trim_end().to_string()
+}
+
 /// Language 5, Sprint 4: lower a `WhenPattern` to its C# 9 case-pattern
 /// text. Used by the relational and combinator (`and` / `not`) cases of
 /// the switch lowering.
@@ -1976,7 +2016,8 @@ fn member_span(member: &Member) -> Span {
         | Member::Event { span, .. }
         | Member::StateMachine { span, .. }
         | Member::Command { span, .. }
-        | Member::BindProperty { span, .. } => *span,
+        | Member::BindProperty { span, .. }
+        | Member::NestedDecl { span, .. } => *span,
     }
 }
 

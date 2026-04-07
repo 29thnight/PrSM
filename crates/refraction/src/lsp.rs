@@ -1799,6 +1799,12 @@ fn collect_used_namespaces_for_member(member: &Member, used_namespaces: &mut Has
                 collect_used_namespaces_for_expr(e, used_namespaces);
             }
         }
+        // v5: nested decl — recurse into the contained declaration's
+        // members so transitive type references are picked up. Reuses
+        // the existing top-level decl walker.
+        Member::NestedDecl { decl, .. } => {
+            collect_used_namespaces_for_decl(decl, used_namespaces);
+        }
     }
 }
 
@@ -2320,6 +2326,8 @@ fn member_contains_intrinsic_code(member: &Member) -> bool {
                 || undo.as_ref().is_some_and(block_contains_intrinsic_code)
                 || can_execute.as_ref().is_some_and(expr_contains_intrinsic_code)
         }
+        // v5: nested decl — check the inner declaration's member list.
+        Member::NestedDecl { decl, .. } => decl_contains_intrinsic_code(decl),
     }
 }
 

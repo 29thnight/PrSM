@@ -770,10 +770,51 @@ fn summarize_member_type_references(path: &Path, decl_name: &str, members: &[Mem
                     collect_expr_type_references(path, &format!("{}.{}", decl_name, name), expr, &mut references);
                 }
             }
+            // v5: nested decl — recurse into the inner declaration's
+            // members under a `Outer.Inner` qualified name.
+            Member::NestedDecl { decl, .. } => {
+                if let Some(inner_name) = decl_name_of(decl) {
+                    let inner_qual = format!("{}.{}", decl_name, inner_name);
+                    if let Some(inner_members) = decl_members(decl) {
+                        references.extend(summarize_member_type_references(path, &inner_qual, inner_members));
+                    }
+                }
+            }
         }
     }
 
     references
+}
+
+/// v5: extract the declared name of a `Decl`, used by the nested-decl
+/// reference walk to build qualified names like `Outer.Inner`.
+fn decl_name_of(decl: &Decl) -> Option<&str> {
+    match decl {
+        Decl::Component { name, .. }
+        | Decl::Asset { name, .. }
+        | Decl::Class { name, .. }
+        | Decl::DataClass { name, .. }
+        | Decl::Enum { name, .. }
+        | Decl::Attribute { name, .. }
+        | Decl::Interface { name, .. }
+        | Decl::TypeAlias { name, .. }
+        | Decl::Struct { name, .. } => Some(name.as_str()),
+        Decl::Extension { .. } => None,
+    }
+}
+
+/// v5: extract the member list of a `Decl`, used by the nested-decl
+/// reference walk to recurse into the body. Returns `None` for
+/// declaration kinds that have no `Member` list.
+fn decl_members(decl: &Decl) -> Option<&[Member]> {
+    match decl {
+        Decl::Component { members, .. }
+        | Decl::Asset { members, .. }
+        | Decl::Class { members, .. }
+        | Decl::Struct { members, .. }
+        | Decl::Extension { members, .. } => Some(members),
+        _ => None,
+    }
 }
 
 fn collect_func_body_type_references(
@@ -1220,7 +1261,7 @@ fn summarize_members(path: &Path, container_name: &str, members: &[Member]) -> V
 
     members
         .iter()
-        .map(|member| match member {
+        .filter_map(|member| Some(match member {
             Member::SerializeField {
                 mutability,
                 name,
@@ -1470,7 +1511,11 @@ fn summarize_members(path: &Path, container_name: &str, members: &[Member]) -> V
                 signature: format!("bind {}: {}", name, format_type_ref(ty)),
                 span: *name_span,
             },
-        })
+            // v5: nested decl — skipped from member summaries; the
+            // nested type is enumerated separately as its own
+            // declaration entry by the project index walker.
+            Member::NestedDecl { .. } => return None,
+        }))
         .collect()
 }
 
