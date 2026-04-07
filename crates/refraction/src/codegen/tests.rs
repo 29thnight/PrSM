@@ -1478,6 +1478,35 @@ hello world
         );
     }
 
+    // Issue #10: a `when` expression used in `return` position must
+    // emit each line of the lowered switch expression with the proper
+    // indent (8 spaces inside a function body), not dedented to column
+    // 0 on the second line onwards.
+    #[test]
+    fn test_when_expression_in_return_indent_propagation() {
+        let src = "component Probe : MonoBehaviour {\n  func describe(value: Int): String {\n    return when value {\n      > 80 => \"high\"\n      > 30 => \"mid\"\n      else => \"low\"\n    }\n  }\n}";
+        let output = compile(src);
+        // After the `return value switch` line, the opening `{`, the
+        // case arms, and the closing `};` should all be indented at the
+        // function-body depth (8 spaces). The previous behavior dedented
+        // every line after the first to column 0.
+        assert!(
+            output.contains("value switch\n        {"),
+            "expected `{{` to be padded after `value switch`: {}",
+            output
+        );
+        assert!(
+            output.contains("\n        };"),
+            "expected closing `}};` at function-body indent: {}",
+            output
+        );
+        assert!(
+            !output.contains("value switch\n{"),
+            "lowered output dedents `{{` to column 0 after `value switch`: {}",
+            output
+        );
+    }
+
     // Issue #11: PrSM `length` member access on a collection lowers
     // to PascalCase `Length` so the result is valid against arrays,
     // NativeArray<T>, Span<T>, etc.

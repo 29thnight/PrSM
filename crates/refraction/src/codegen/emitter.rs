@@ -165,17 +165,41 @@ pub fn emit_stmt_to_string(out: &mut String, stmt: &CsStmt, indent: usize) {
     emit_stmt(out, stmt, indent);
 }
 
+/// Issue #10: prepend `pad` to every line after the first inside a
+/// multi-line expression value. The lowering pass produces multi-line
+/// strings for `when`/`switch` expressions used in expression position
+/// (e.g. as a `return` value), and the emitter needs to propagate the
+/// surrounding indent so the result reads as hand-written C# rather
+/// than dedenting to column 0 on the second line onwards.
+fn pad_multiline_value(value: &str, pad: &str) -> String {
+    if !value.contains('\n') {
+        return value.to_string();
+    }
+    let mut result = String::new();
+    for (i, line) in value.split('\n').enumerate() {
+        if i > 0 {
+            result.push('\n');
+            result.push_str(pad);
+        }
+        result.push_str(line);
+    }
+    result
+}
+
 fn emit_stmt(out: &mut String, stmt: &CsStmt, indent: usize) {
     let pad = "    ".repeat(indent);
 
     match stmt {
         CsStmt::VarDecl { ty, name, init, .. } => {
+            let init = pad_multiline_value(init, &pad);
             out.push_str(&format!("{}{} {} = {};\n", pad, ty, name, init));
         }
         CsStmt::Assignment { target, op, value, .. } => {
+            let value = pad_multiline_value(value, &pad);
             out.push_str(&format!("{}{} {} {};\n", pad, target, op, value));
         }
         CsStmt::Expr(expr, _) => {
+            let expr = pad_multiline_value(expr, &pad);
             out.push_str(&format!("{}{};\n", pad, expr));
         }
         CsStmt::If { cond, then_body, else_body, .. } => {
@@ -243,12 +267,14 @@ fn emit_stmt(out: &mut String, stmt: &CsStmt, indent: usize) {
         }
         CsStmt::Return(value, _) => {
             if let Some(v) = value {
+                let v = pad_multiline_value(v, &pad);
                 out.push_str(&format!("{}return {};\n", pad, v));
             } else {
                 out.push_str(&format!("{}return;\n", pad));
             }
         }
         CsStmt::YieldReturn(value, _) => {
+            let value = pad_multiline_value(value, &pad);
             out.push_str(&format!("{}yield return {};\n", pad, value));
         }
         CsStmt::YieldBreak(_) => {
@@ -295,6 +321,7 @@ fn emit_stmt(out: &mut String, stmt: &CsStmt, indent: usize) {
             }
         }
         CsStmt::Throw(expr, _) => {
+            let expr = pad_multiline_value(expr, &pad);
             out.push_str(&format!("{}throw {};\n", pad, expr));
         }
         CsStmt::UseBlock { decl, body, .. } => {
