@@ -3,6 +3,7 @@
 use crate::ast::*;
 use crate::lexer::token::Span;
 use super::csharp_ir::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 /// Lower a PrSM file to C# IR.
@@ -46,6 +47,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
         Decl::Component { name, is_singleton, is_partial, base_class, interfaces, members, .. } => {
             let mut cs_members = Vec::new();
             let callable_signatures = collect_callable_signatures(members);
+            let member_type_env = collect_member_type_env(members);
             let (require_fields, optional_fields, child_fields, parent_fields, pool_fields, user_awake) =
                 collect_component_init(members);
 
@@ -107,7 +109,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
             // Lower remaining members — use ComponentCtx to collect listen subscriptions.
             // Created BEFORE Awake so the user awake block can also register
             // bind-to / listen sites on the shared context.
-            let mut listen_ctx = ComponentCtx::new(callable_signatures.clone());
+            let mut listen_ctx = ComponentCtx::new(callable_signatures.clone(), member_type_env.clone());
 
             // Generate Awake method (require/optional resolution + pool init + user awake)
             let awake_index = if !require_fields.is_empty() || !optional_fields.is_empty()
@@ -362,13 +364,14 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
         Decl::Asset { name, base_class, members, .. } => {
             let mut cs_members = Vec::new();
             let callable_signatures = collect_callable_signatures(members);
+            let member_type_env = collect_member_type_env(members);
             for m in members {
                 match m {
                     Member::SerializeField { .. } | Member::Field { .. } => {
                         cs_members.extend(lower_field_member(m));
                     }
                     Member::Func { .. } => {
-                        cs_members.push(lower_func_member(m, &callable_signatures));
+                        cs_members.push(lower_func_member(m, &callable_signatures, Some(&member_type_env)));
                     }
                     Member::IntrinsicFunc { visibility, name: fname, params, return_ty, code, span, .. } => {
                         cs_members.push(lower_intrinsic_func(*visibility, fname, params, return_ty.as_ref(), code, *span));
@@ -402,9 +405,41 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                 vec![],
             )
         }
-        Decl::Class { name, is_abstract, is_sealed, is_partial, type_params, where_clauses, super_class, interfaces, members, .. } => {
+        Decl::Class { name, is_abstract, is_sealed, is_partial, type_params, where_clauses, super_class, interfaces, members, primary_ctor_params, .. } => {
             let mut cs_members = Vec::new();
+            // Issue #37: synthesize fields and a constructor from
+            // primary-ctor params before lowering the rest of the
+            // members. The fields are public auto-properties and the
+            // constructor forwards each value into `this.<name>`.
+            // When the class extends a base, the constructor also
+            // forwards positional args via `: base(...)` so the
+            // sealed-class discriminated-union pattern works.
+            if !primary_ctor_params.is_empty() {
+                for p in primary_ctor_params {
+                    let cs_ty = lower_type(&p.ty);
+                    cs_members.push(CsMember::RawCode(format!(
+                        "public {} {} {{ get; }}",
+                        cs_ty, p.name
+                    )));
+                }
+                let ctor_params: Vec<String> = primary_ctor_params
+                    .iter()
+                    .map(|p| format!("{} {}", lower_type(&p.ty), p.name))
+                    .collect();
+                let mut ctor_lines = vec![format!(
+                    "public {}({})",
+                    name,
+                    ctor_params.join(", ")
+                )];
+                ctor_lines.push("{".into());
+                for p in primary_ctor_params {
+                    ctor_lines.push(format!("    this.{0} = {0};", p.name));
+                }
+                ctor_lines.push("}".into());
+                cs_members.push(CsMember::RawCode(ctor_lines.join("\n")));
+            }
             let callable_signatures = collect_callable_signatures(members);
+            let member_type_env = collect_member_type_env(members);
             for m in members {
                 match m {
                     Member::Field { .. } => cs_members.extend(lower_field_member(m)),
@@ -412,7 +447,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                     Member::Func { is_operator: true, name: op_name, params, return_ty, body, .. } => {
                         cs_members.extend(lower_operator_member(op_name, name, params, return_ty, body));
                     }
-                    Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
+                    Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures, Some(&member_type_env))),
                     Member::IntrinsicFunc { visibility, name: fname, params, return_ty, code, span, .. } => {
                         cs_members.push(lower_intrinsic_func(*visibility, fname, params, return_ty.as_ref(), code, *span));
                     }
@@ -479,25 +514,86 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
             (lower_data_class(name, fields, members), vec![])
         }
         Decl::Enum { name, params, entries, .. } => {
-            let mut cs_members = Vec::new();
-            for entry in entries {
-                cs_members.push(CsMember::RawCode(format!("{},", entry.name)));
-            }
-            let enum_class = CsClass {
-                attributes: vec![],
-                modifiers: "public enum".into(),
-                name: name.clone(),
-                base_class: None,
-                interfaces: vec![],
-                where_clauses: vec![],
-                members: cs_members,
-            };
-            let extra_types = if params.is_empty() {
-                vec![]
+            // Issue #35: when ANY entry carries a Rust-style payload
+            // (`Ok(value: Int)`), lower the whole declaration as a
+            // sealed abstract class hierarchy (a discriminated
+            // union). Otherwise emit a plain C# enum.
+            let has_payload = entries.iter().any(|e| !e.payload.is_empty());
+            if has_payload {
+                let base_class = CsClass {
+                    attributes: vec![],
+                    modifiers: "public abstract".into(),
+                    name: name.clone(),
+                    base_class: None,
+                    interfaces: vec![],
+                    where_clauses: vec![],
+                    members: vec![CsMember::RawCode(format!(
+                        "private {}() {{ }}",
+                        name
+                    ))],
+                };
+                let mut variant_classes: Vec<CsClass> = Vec::new();
+                for entry in entries {
+                    let mut variant_members = Vec::new();
+                    let mut ctor_params = Vec::new();
+                    let mut ctor_assigns = Vec::new();
+                    for field in &entry.payload {
+                        let cs_ty = lower_type(&field.ty);
+                        variant_members.push(CsMember::RawCode(format!(
+                            "public {} {} {{ get; }}",
+                            cs_ty, field.name
+                        )));
+                        ctor_params.push(format!("{} {}", cs_ty, field.name));
+                        ctor_assigns.push(format!("        this.{0} = {0};", field.name));
+                    }
+                    let ctor_lines = if entry.payload.is_empty() {
+                        format!("    public {}() {{ }}", entry.name)
+                    } else {
+                        let mut lines = vec![format!(
+                            "    public {}({})",
+                            entry.name,
+                            ctor_params.join(", ")
+                        )];
+                        lines.push("    {".into());
+                        for line in &ctor_assigns {
+                            lines.push(line.clone());
+                        }
+                        lines.push("    }".into());
+                        lines.join("\n")
+                    };
+                    variant_members.push(CsMember::RawCode(ctor_lines));
+                    variant_classes.push(CsClass {
+                        attributes: vec![],
+                        modifiers: "public sealed".into(),
+                        name: entry.name.clone(),
+                        base_class: Some(name.clone()),
+                        interfaces: vec![],
+                        where_clauses: vec![],
+                        members: variant_members,
+                    });
+                }
+                (base_class, variant_classes)
             } else {
-                vec![lower_parameterized_enum_extensions(name, params, entries)]
-            };
-            (enum_class, extra_types)
+                let mut cs_members = Vec::new();
+                for entry in entries {
+                    cs_members.push(CsMember::RawCode(format!("{},", entry.name)));
+                }
+                let enum_class = CsClass {
+                    attributes: vec![],
+                    modifiers: "public enum".into(),
+                    name: name.clone(),
+                    base_class: None,
+                    interfaces: vec![],
+                    where_clauses: vec![],
+                    members: cs_members,
+                };
+                let extra_types = if params.is_empty() {
+                    vec![]
+                } else {
+                    vec![lower_parameterized_enum_extensions(name, params, entries)]
+                };
+                (enum_class, extra_types)
+            }
         }
         Decl::Interface { name, extends, members, .. } => {
             let mut cs_members = Vec::new();
@@ -646,6 +742,7 @@ fn lower_data_class(name: &str, fields: &[Param], members: &[Member]) -> CsClass
     // operator overloads / methods inside the data class can call
     // each other and reference the synthesized fields.
     let callable_signatures = collect_callable_signatures(members);
+    let member_type_env = scoped_type_env(Some(&collect_member_type_env(members)), fields);
 
     for field in fields {
         cs_members.push(CsMember::Field {
@@ -676,7 +773,7 @@ fn lower_data_class(name: &str, fields: &[Param], members: &[Member]) -> CsClass
                     op_name, name, params, return_ty, body, &owner_field_names,
                 ));
             }
-            Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
+            Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures, Some(&member_type_env))),
             Member::Property { name: pname, ty, mutability, getter, setter, is_serialize, target_annotations, .. } => {
                 cs_members.extend(lower_property_member_with_targets(
                     pname,
@@ -710,6 +807,7 @@ fn lower_data_class(name: &str, fields: &[Param], members: &[Member]) -> CsClass
 fn lower_struct(name: &str, fields: &[Param], members: &[Member], is_ref: bool) -> CsClass {
     let mut cs_members = Vec::new();
     let callable_signatures = collect_callable_signatures(members);
+    let member_type_env = scoped_type_env(Some(&collect_member_type_env(members)), fields);
 
     // Public fields
     for field in fields {
@@ -758,7 +856,7 @@ fn lower_struct(name: &str, fields: &[Param], members: &[Member], is_ref: bool) 
             Member::Func { is_operator: true, name: op_name, params, return_ty, body, .. } => {
                 cs_members.extend(lower_operator_member(op_name, name, params, return_ty, body));
             }
-            Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures)),
+            Member::Func { .. } => cs_members.push(lower_func_member(m, &callable_signatures, Some(&member_type_env))),
             Member::Property { name: pname, ty, mutability, getter, setter, is_serialize, target_annotations, .. } => {
                 cs_members.extend(lower_property_member_with_targets(
                     pname,
@@ -1288,16 +1386,16 @@ fn collect_component_init(members: &[Member]) -> (Vec<FieldInfo>, Vec<FieldInfo>
     for m in members {
         match m {
             Member::Require { name, ty, .. } => {
-                require.push(FieldInfo { name: name.clone(), ty_str: lower_type(ty) });
+                require.push(FieldInfo { name: name.clone(), ty_str: lower_type(&strip_nullable_type(ty)) });
             }
             Member::Optional { name, ty, .. } => {
-                optional.push(FieldInfo { name: name.clone(), ty_str: lower_type(ty) });
+                optional.push(FieldInfo { name: name.clone(), ty_str: lower_type(&strip_nullable_type(ty)) });
             }
             Member::Child { name, ty, .. } => {
-                child.push(FieldInfo { name: name.clone(), ty_str: lower_type(ty) });
+                child.push(FieldInfo { name: name.clone(), ty_str: lower_type(&strip_nullable_type(ty)) });
             }
             Member::Parent { name, ty, .. } => {
-                parent.push(FieldInfo { name: name.clone(), ty_str: lower_type(ty) });
+                parent.push(FieldInfo { name: name.clone(), ty_str: lower_type(&strip_nullable_type(ty)) });
             }
             Member::Pool { name, item_type, capacity, max_size, .. } => {
                 let item_ty_str = lower_type(item_type);
@@ -1322,6 +1420,40 @@ fn collect_component_init(members: &[Member]) -> (Vec<FieldInfo>, Vec<FieldInfo>
 #[derive(Debug, Clone)]
 struct CallableSignature {
     params: Vec<TypeRef>,
+}
+
+type LoweringTypeEnv = HashMap<String, TypeRef>;
+type LoweringAliasEnv = HashMap<String, String>;
+
+#[derive(Debug, Clone)]
+struct LoweringSmartCastBinding {
+    name: String,
+    ty: TypeRef,
+    alias: String,
+}
+
+thread_local! {
+    static LOWERING_TYPE_ENV_STACK: RefCell<Vec<LoweringTypeEnv>> = RefCell::new(Vec::new());
+    static LOWERING_SMART_CAST_ALIAS_STACK: RefCell<Vec<LoweringAliasEnv>> = RefCell::new(Vec::new());
+}
+
+struct LoweringTypeEnvGuard;
+struct LoweringAliasEnvGuard;
+
+impl Drop for LoweringTypeEnvGuard {
+    fn drop(&mut self) {
+        LOWERING_TYPE_ENV_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
+}
+
+impl Drop for LoweringAliasEnvGuard {
+    fn drop(&mut self) {
+        LOWERING_SMART_CAST_ALIAS_STACK.with(|stack| {
+            stack.borrow_mut().pop();
+        });
+    }
 }
 
 fn collect_callable_signatures(members: &[Member]) -> HashMap<String, CallableSignature> {
@@ -1378,6 +1510,372 @@ fn collect_callable_signatures(members: &[Member]) -> HashMap<String, CallableSi
     }
 
     signatures
+}
+
+fn with_lowering_type_env<R>(env: LoweringTypeEnv, f: impl FnOnce() -> R) -> R {
+    LOWERING_TYPE_ENV_STACK.with(|stack| {
+        stack.borrow_mut().push(env);
+    });
+    let guard = LoweringTypeEnvGuard;
+    let result = f();
+    drop(guard);
+    result
+}
+
+fn current_lowering_type_env() -> Option<LoweringTypeEnv> {
+    LOWERING_TYPE_ENV_STACK.with(|stack| stack.borrow().last().cloned())
+}
+
+fn with_lowering_alias_env<R>(env: LoweringAliasEnv, f: impl FnOnce() -> R) -> R {
+    LOWERING_SMART_CAST_ALIAS_STACK.with(|stack| {
+        stack.borrow_mut().push(env);
+    });
+    let guard = LoweringAliasEnvGuard;
+    let result = f();
+    drop(guard);
+    result
+}
+
+fn current_lowering_alias_env() -> Option<LoweringAliasEnv> {
+    LOWERING_SMART_CAST_ALIAS_STACK.with(|stack| stack.borrow().last().cloned())
+}
+
+fn current_smart_cast_alias(name: &str) -> Option<String> {
+    LOWERING_SMART_CAST_ALIAS_STACK.with(|stack| {
+        stack
+            .borrow()
+            .last()
+            .and_then(|env| env.get(name).cloned())
+    })
+}
+
+fn scoped_type_env(base: Option<&LoweringTypeEnv>, params: &[Param]) -> LoweringTypeEnv {
+    let mut env = base.cloned().unwrap_or_default();
+    for param in params {
+        env.insert(param.name.clone(), param.ty.clone());
+    }
+    env
+}
+
+fn collect_member_type_env(members: &[Member]) -> LoweringTypeEnv {
+    let mut env = LoweringTypeEnv::new();
+    for member in members {
+        match member {
+            Member::SerializeField { name, ty, .. }
+            | Member::Require { name, ty, .. }
+            | Member::Optional { name, ty, .. }
+            | Member::Child { name, ty, .. }
+            | Member::Parent { name, ty, .. }
+            | Member::Property { name, ty, .. }
+            | Member::BindProperty { name, ty, .. } => {
+                env.insert(name.clone(), ty.clone());
+            }
+            Member::Field {
+                name,
+                ty: Some(ty),
+                ..
+            } => {
+                env.insert(name.clone(), ty.clone());
+            }
+            _ => {}
+        }
+    }
+    env
+}
+
+fn record_local_type_hint(type_env: &mut LoweringTypeEnv, stmt: &Stmt) {
+    match stmt {
+        Stmt::ValDecl {
+            name,
+            ty: Some(ty),
+            ..
+        }
+        | Stmt::VarDecl {
+            name,
+            ty: Some(ty),
+            ..
+        } => {
+            type_env.insert(name.clone(), ty.clone());
+        }
+        _ => {}
+    }
+}
+
+fn lower_stmt_block_with_context(
+    stmts: &[Stmt],
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+    expected_return_ty: Option<&TypeRef>,
+) -> Vec<CsStmt> {
+    let mut lowered = Vec::new();
+    let mut type_env = current_lowering_type_env().unwrap_or_default();
+    for stmt in stmts {
+        lowered.push(with_lowering_type_env(type_env.clone(), || {
+            lower_stmt_with_context(stmt, callable_signatures, expected_return_ty)
+        }));
+        record_local_type_hint(&mut type_env, stmt);
+    }
+    lowered
+}
+
+fn resolve_expr_type_from_current_env(expr: &Expr) -> Option<TypeRef> {
+    current_lowering_type_env().and_then(|env| resolve_expr_type_from_env(expr, &env))
+}
+
+fn resolve_expr_type_from_env(expr: &Expr, type_env: &LoweringTypeEnv) -> Option<TypeRef> {
+    match expr {
+        Expr::Ident(name, _) => type_env.get(name).cloned(),
+        Expr::MemberAccess { receiver, name, .. } | Expr::SafeCall { receiver, name, .. }
+            if matches!(receiver.as_ref(), Expr::This(_)) =>
+        {
+            type_env.get(name).cloned()
+        }
+        Expr::NonNullAssert { expr, .. } => resolve_expr_type_from_env(expr, type_env),
+        _ => None,
+    }
+}
+
+fn type_ref_base_name(ty: &TypeRef) -> &str {
+    match ty {
+        TypeRef::Simple { name, .. }
+        | TypeRef::Generic { name, .. }
+        | TypeRef::Qualified { name, .. } => name.as_str(),
+        TypeRef::Tuple { .. } => "Tuple",
+        TypeRef::Function { .. } => "Function",
+    }
+}
+
+fn smart_cast_alias_stem(ty: &TypeRef) -> String {
+    let mut stem: String = type_ref_base_name(ty)
+        .chars()
+        .filter(|ch| ch.is_ascii_uppercase())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    if stem.is_empty() {
+        stem = type_ref_base_name(ty)
+            .chars()
+            .find(|ch| ch.is_ascii_alphanumeric())
+            .map(|ch| ch.to_ascii_lowercase().to_string())
+            .unwrap_or_else(|| "sc".into());
+    }
+    stem
+}
+
+fn lower_smart_cast_binding(expr: &Expr, ty: &TypeRef) -> Option<LoweringSmartCastBinding> {
+    let Expr::Ident(name, _) = expr else {
+        return None;
+    };
+    let base_ty = strip_nullable_type(ty);
+    Some(LoweringSmartCastBinding {
+        name: name.clone(),
+        ty: base_ty.clone(),
+        alias: format!("_{}_{}", smart_cast_alias_stem(&base_ty), name),
+    })
+}
+
+fn merge_lowering_smart_cast_bindings(
+    bindings: &mut Vec<LoweringSmartCastBinding>,
+    new_bindings: Vec<LoweringSmartCastBinding>,
+) {
+    for binding in new_bindings {
+        if let Some(existing) = bindings.iter_mut().find(|existing| existing.name == binding.name) {
+            *existing = binding;
+        } else {
+            bindings.push(binding);
+        }
+    }
+}
+
+fn with_smart_cast_lowering_bindings<R>(
+    bindings: &[LoweringSmartCastBinding],
+    f: impl FnOnce() -> R,
+) -> R {
+    if bindings.is_empty() {
+        return f();
+    }
+
+    let mut type_env = current_lowering_type_env().unwrap_or_default();
+    let mut alias_env = current_lowering_alias_env().unwrap_or_default();
+    for binding in bindings {
+        type_env.insert(binding.name.clone(), binding.ty.clone());
+        alias_env.insert(binding.name.clone(), binding.alias.clone());
+    }
+
+    with_lowering_type_env(type_env, || with_lowering_alias_env(alias_env, f))
+}
+
+fn lower_condition_expr_with_smart_casts(
+    expr: &Expr,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> (String, Vec<LoweringSmartCastBinding>) {
+    match expr {
+        Expr::Binary { left, op: BinOp::And, right, .. } => {
+            let (left_str, mut bindings) = lower_condition_expr_with_smart_casts(left, callable_signatures);
+            let (right_str, right_bindings) = with_smart_cast_lowering_bindings(&bindings, || {
+                lower_condition_expr_with_smart_casts(right, callable_signatures)
+            });
+            merge_lowering_smart_cast_bindings(&mut bindings, right_bindings);
+            (format!("{} && {}", left_str, right_str), bindings)
+        }
+        Expr::Is { expr: inner, ty, .. } => {
+            let receiver = lower_expr_with_expected_type(inner, None, callable_signatures);
+            if let Some(binding) = lower_smart_cast_binding(inner, ty) {
+                (
+                    format!("{} is {} {}", receiver, lower_type(ty), binding.alias),
+                    vec![binding],
+                )
+            } else {
+                (format!("{} is {}", receiver, lower_type(ty)), Vec::new())
+            }
+        }
+        _ => (lower_expr_with_expected_type(expr, None, callable_signatures), Vec::new()),
+    }
+}
+
+fn lower_assignment_target_expr(
+    target: &Expr,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> String {
+    match target {
+        Expr::Ident(name, _) => map_sugar_ident(name),
+        _ => lower_expr_with_expected_type(target, None, callable_signatures),
+    }
+}
+
+fn type_ref_is_string(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Simple { name, .. } => name == "String",
+        TypeRef::Qualified { qualifier, name, .. } => qualifier == "System" && name == "String",
+        _ => false,
+    }
+}
+
+fn bind_target_name_looks_stringy(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with("text") || lower.ends_with("label")
+}
+
+fn bind_target_looks_stringy(target: &Expr) -> bool {
+    match target {
+        Expr::Ident(name, _) => bind_target_name_looks_stringy(name),
+        Expr::MemberAccess { receiver, name, .. } | Expr::SafeCall { receiver, name, .. } => {
+            bind_target_name_looks_stringy(name) || bind_target_looks_stringy(receiver)
+        }
+        _ => false,
+    }
+}
+
+fn lower_bind_value_for_target(
+    value_expr: &str,
+    source_ty: Option<&TypeRef>,
+    target: &Expr,
+) -> String {
+    if source_ty.is_some_and(type_ref_is_string) || !bind_target_looks_stringy(target) {
+        return value_expr.to_string();
+    }
+
+    if source_ty.is_some() {
+        format!("{}.ToString()", value_expr)
+    } else {
+        value_expr.to_string()
+    }
+}
+
+fn lower_non_null_assert_expr(
+    expr: &Expr,
+    expected_type: Option<&TypeRef>,
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> String {
+    // Issue #43: the `!!` operator must throw a runtime exception when
+    // the inner expression is null, not merely suppress C# warnings.
+    // The previous lowering to `expr!` used the C# null-forgiving
+    // operator which still lets a null value through and produces a
+    // `NullReferenceException` only at the *next* dereference, with
+    // no descriptive message. Emit a `?? throw new System.NullReferenceException("expr")`
+    // form so the assertion fires at the assertion site itself.
+    let lowered = lower_expr_with_expected_type(expr, expected_type, callable_signatures);
+    let descriptor = non_null_assert_descriptor(expr);
+    // Escape any double quotes in the descriptor so the C# string stays valid.
+    let descriptor_lit = descriptor.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "({} ?? throw new System.NullReferenceException(\"`{}` was null\"))",
+        lowered, descriptor_lit
+    )
+}
+
+// Best-effort human-readable description of a non-null asserted
+// expression, used as the exception message. For simple identifier
+// and member-access chains we reuse the source spelling; for
+// complex expressions we fall back to a generic "value" label.
+fn non_null_assert_descriptor(expr: &Expr) -> String {
+    match expr {
+        Expr::Ident(name, _) => name.clone(),
+        Expr::This(_) => "this".into(),
+        Expr::MemberAccess { receiver, name, .. } => {
+            format!("{}.{}", non_null_assert_descriptor(receiver), name)
+        }
+        Expr::SafeCall { receiver, name, .. } => {
+            format!("{}?.{}", non_null_assert_descriptor(receiver), name)
+        }
+        Expr::Call { receiver, name, .. } => {
+            if let Some(recv) = receiver {
+                format!("{}.{}()", non_null_assert_descriptor(recv), name)
+            } else {
+                format!("{}()", name)
+            }
+        }
+        Expr::NonNullAssert { expr, .. } => non_null_assert_descriptor(expr),
+        _ => "value".into(),
+    }
+}
+
+fn type_supports_length_sugar(ty: &TypeRef) -> bool {
+    matches!(
+        type_ref_base_name(ty),
+        "Array" | "NativeArray" | "Span" | "ReadOnlySpan" | "String"
+    )
+}
+
+fn type_supports_count_sugar(ty: &TypeRef) -> bool {
+    matches!(
+        type_ref_base_name(ty),
+        "List"
+            | "IList"
+            | "ICollection"
+            | "IReadOnlyCollection"
+            | "HashSet"
+            | "Queue"
+            | "Stack"
+            | "Dictionary"
+            | "IDictionary"
+            | "IReadOnlyDictionary"
+            | "Map"
+            | "MutableList"
+            | "MutableMap"
+            | "Set"
+            | "MutableSet"
+    )
+}
+
+fn type_supports_exception_member_sugar(ty: &TypeRef) -> bool {
+    let base = type_ref_base_name(ty);
+    if base == "Exception" || base.ends_with("Exception") {
+        return true;
+    }
+    matches!(ty, TypeRef::Qualified { qualifier, name, .. } if qualifier == "System" && (name == "Exception" || name.ends_with("Exception")))
+}
+
+fn lowered_member_name_with_env(receiver: &Expr, name: &str) -> Option<&'static str> {
+    let receiver_ty = resolve_expr_type_from_current_env(receiver)?;
+    match name {
+        "length" if type_supports_length_sugar(&receiver_ty) => Some("Length"),
+        "count" if type_supports_count_sugar(&receiver_ty) => Some("Count"),
+        "message" if type_supports_exception_member_sugar(&receiver_ty) => Some("Message"),
+        "stackTrace" if type_supports_exception_member_sugar(&receiver_ty) => Some("StackTrace"),
+        "innerException" if type_supports_exception_member_sugar(&receiver_ty) => Some("InnerException"),
+        "helpLink" if type_supports_exception_member_sugar(&receiver_ty) => Some("HelpLink"),
+        "targetSite" if type_supports_exception_member_sugar(&receiver_ty) => Some("TargetSite"),
+        _ => None,
+    }
 }
 
 fn lower_awake(
@@ -1513,7 +2011,9 @@ fn lower_awake(
     // shared ComponentCtx (Sprint 3 needed for bind continuous push).
     let _ = callable_signatures;
     if let Some(awake_block) = user_awake {
-        let lowered = lower_stmts_with_ctx(&awake_block.stmts, listen_ctx, None);
+        let lowered = with_lowering_type_env(listen_ctx.member_types.clone(), || {
+            lower_stmts_with_ctx(&awake_block.stmts, listen_ctx, None)
+        });
         body.extend(lowered);
     }
 
@@ -1684,7 +2184,9 @@ fn lower_lifecycle_with_ctx(
 ) -> CsMember {
     let method_name = lifecycle_method_name(kind);
     let cs_params: Vec<CsParam> = params.iter().map(cs_param_from).collect();
-    let body = lower_stmts_with_ctx(&body_block.stmts, ctx, None);
+    let body = with_lowering_type_env(scoped_type_env(Some(&ctx.member_types), params), || {
+        lower_stmts_with_ctx(&body_block.stmts, ctx, None)
+    });
     CsMember::Method {
         attributes: vec![],
         modifiers: "private".into(),
@@ -1718,7 +2220,11 @@ fn lifecycle_method_name(kind: LifecycleKind) -> &'static str {
 
 // ── Function lowering ───────────────────────────────────────────
 
-fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableSignature>) -> CsMember {
+fn lower_func_member(
+    m: &Member,
+    callable_signatures: &HashMap<String, CallableSignature>,
+    base_type_env: Option<&LoweringTypeEnv>,
+) -> CsMember {
     match m {
         Member::Func { visibility, is_static, is_override, is_abstract, is_open, is_async, annotations, name, type_params, where_clauses, params, return_ty, body, .. } => {
             let inner_ret = return_ty.as_ref().map(|t| lower_type(t)).unwrap_or("void".into());
@@ -1756,20 +2262,19 @@ fn lower_func_member(m: &Member, callable_signatures: &HashMap<String, CallableS
                 ));
             }
 
-            let cs_body = match body {
-                FuncBody::Block(block) => {
-                    block.stmts
-                        .iter()
-                        .map(|stmt| lower_stmt_with_context(stmt, Some(callable_signatures), return_ty.as_ref()))
-                        .collect()
+            let cs_body = with_lowering_type_env(scoped_type_env(base_type_env, params), || {
+                match body {
+                    FuncBody::Block(block) => {
+                        lower_stmt_block_with_context(&block.stmts, Some(callable_signatures), return_ty.as_ref())
+                    }
+                    FuncBody::ExprBody(expr) => {
+                        vec![CsStmt::Return(
+                            Some(lower_expr_with_expected_type(expr, return_ty.as_ref(), Some(callable_signatures))),
+                            Some(expr_span(expr)),
+                        )]
+                    }
                 }
-                FuncBody::ExprBody(expr) => {
-                    vec![CsStmt::Return(
-                        Some(lower_expr_with_expected_type(expr, return_ty.as_ref(), Some(callable_signatures))),
-                        Some(expr_span(expr)),
-                    )]
-                }
-            };
+            });
 
             // Build method name with optional type parameters
             let cs_name = lower_func_name_with_generics(name, type_params);
@@ -1932,17 +2437,19 @@ fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
                 ));
             }
 
-            let cs_body = match body {
-                FuncBody::Block(block) => {
-                    lower_stmts_with_ctx(&block.stmts, ctx, return_ty.as_ref())
+            let cs_body = with_lowering_type_env(scoped_type_env(Some(&ctx.member_types), params), || {
+                match body {
+                    FuncBody::Block(block) => {
+                        lower_stmts_with_ctx(&block.stmts, ctx, return_ty.as_ref())
+                    }
+                    FuncBody::ExprBody(expr) => {
+                        vec![CsStmt::Return(
+                            Some(lower_expr_with_expected_type(expr, return_ty.as_ref(), Some(&ctx.callable_signatures))),
+                            Some(expr_span(expr)),
+                        )]
+                    }
                 }
-                FuncBody::ExprBody(expr) => {
-                    vec![CsStmt::Return(
-                        Some(lower_expr_with_expected_type(expr, return_ty.as_ref(), Some(&ctx.callable_signatures))),
-                        Some(expr_span(expr)),
-                    )]
-                }
-            };
+            });
 
             // Build method name with optional type parameters
             let cs_name = lower_func_name_with_generics(name, type_params);
@@ -1977,7 +2484,9 @@ fn lower_coroutine_with_ctx(
 ) -> CsMember {
     let ps: Vec<CsParam> = params.iter().map(cs_param_from).collect();
 
-    let cs_body = lower_stmts_with_ctx(&body.stmts, ctx, None);
+    let cs_body = with_lowering_type_env(scoped_type_env(Some(&ctx.member_types), params), || {
+        lower_stmts_with_ctx(&body.stmts, ctx, None)
+    });
 
     // Language 5, Sprint 1: choose the lowered return type from an
     // explicit `: Seq<T>` / `: IEnumerator(<T>)` / `: IEnumerable(<T>)`
@@ -2042,11 +2551,9 @@ fn lower_coroutine(
 ) -> CsMember {
     let ps: Vec<CsParam> = params.iter().map(cs_param_from).collect();
 
-    let cs_body: Vec<CsStmt> = body
-        .stmts
-        .iter()
-        .map(|stmt| lower_stmt_with_context(stmt, Some(callable_signatures), None))
-        .collect();
+    let cs_body = with_lowering_type_env(scoped_type_env(None, params), || {
+        lower_stmt_block_with_context(&body.stmts, Some(callable_signatures), None)
+    });
 
     CsMember::Method {
         attributes: vec![],
@@ -2249,8 +2756,32 @@ fn lower_stmt_with_context(
                 AssignOp::ModAssign => "%=",
                 AssignOp::NullCoalesceAssign => "??=",
             };
+            // Issue #42: `cam?.enabled = false` cannot be lowered to a
+            // ternary on the LHS — C# forbids assigning to a
+            // conditional expression. Rewrite the whole statement as
+            // `if (cam != null) { cam.enabled = false; }` so the
+            // generated C# is valid and preserves the null-safe
+            // semantics.
+            if let Expr::SafeCall { receiver, name, .. } = target {
+                let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
+                let member_name = lowered_member_name_with_env(receiver, name)
+                    .unwrap_or(name.as_str())
+                    .to_string();
+                let value_str = lower_expr_with_expected_type(value, None, callable_signatures);
+                return CsStmt::If {
+                    cond: format!("{} != null", recv),
+                    then_body: vec![CsStmt::Assignment {
+                        target: format!("{}.{}", recv, member_name),
+                        op: op_str.into(),
+                        value: value_str,
+                        source_span,
+                    }],
+                    else_body: None,
+                    source_span,
+                };
+            }
             CsStmt::Assignment {
-                target: lower_expr_with_expected_type(target, None, callable_signatures),
+                target: lower_assignment_target_expr(target, callable_signatures),
                 op: op_str.into(),
                 value: lower_expr_with_expected_type(value, None, callable_signatures),
                 source_span,
@@ -2274,25 +2805,20 @@ fn lower_stmt_with_context(
             CsStmt::Expr(lower_expr_with_expected_type(expr, None, callable_signatures), source_span)
         }
         Stmt::If { cond, then_block, else_branch, .. } => {
+            let (cond_str, smart_cast_bindings) = lower_condition_expr_with_smart_casts(cond, callable_signatures);
             let else_body = else_branch.as_ref().map(|eb| match eb {
                 ElseBranch::ElseBlock(block) => {
-                    block
-                        .stmts
-                        .iter()
-                        .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
-                        .collect()
+                    lower_stmt_block_with_context(&block.stmts, callable_signatures, expected_return_ty)
                 }
                 ElseBranch::ElseIf(if_stmt) => {
                     vec![lower_stmt_with_context(if_stmt, callable_signatures, expected_return_ty)]
                 }
             });
             CsStmt::If {
-                cond: lower_expr_with_expected_type(cond, None, callable_signatures),
-                then_body: then_block
-                    .stmts
-                    .iter()
-                    .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
-                    .collect(),
+                cond: cond_str,
+                then_body: with_smart_cast_lowering_bindings(&smart_cast_bindings, || {
+                    lower_stmt_block_with_context(&then_block.stmts, callable_signatures, expected_return_ty)
+                }),
                 else_body,
                 source_span,
             }
@@ -2353,11 +2879,9 @@ fn lower_stmt_with_context(
                         }
                     };
                     let body: Vec<CsStmt> = match &b.body {
-                        WhenBody::Block(bl) => bl
-                            .stmts
-                            .iter()
-                            .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
-                            .collect(),
+                        WhenBody::Block(bl) => {
+                            lower_stmt_block_with_context(&bl.stmts, callable_signatures, expected_return_ty)
+                        }
                         WhenBody::Expr(e) => vec![CsStmt::Expr(
                             lower_expr_with_expected_type(e, None, callable_signatures),
                             Some(expr_span(e)),
@@ -2374,11 +2898,9 @@ fn lower_stmt_with_context(
                 let mut result: Option<CsStmt> = None;
                 for b in branches.iter().rev() {
                     let body: Vec<CsStmt> = match &b.body {
-                        WhenBody::Block(bl) => bl
-                            .stmts
-                            .iter()
-                            .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
-                            .collect(),
+                        WhenBody::Block(bl) => {
+                            lower_stmt_block_with_context(&bl.stmts, callable_signatures, expected_return_ty)
+                        }
                         WhenBody::Expr(e) => vec![CsStmt::Expr(
                             lower_expr_with_expected_type(e, None, callable_signatures),
                             Some(expr_span(e)),
@@ -2481,28 +3003,42 @@ fn lower_stmt_with_context(
         }
         Stmt::For { var_name, iterable, body, .. } => {
             // Check if iterable is a range expression
-            if let Expr::Range { start, end, inclusive, step, .. } = iterable {
+            if let Expr::Range { start, end, inclusive, descending, step, .. } = iterable {
                 let start_str = lower_expr(start);
                 let end_str = lower_expr_with_expected_type(end, None, callable_signatures);
-                let cond = if *inclusive {
+                let cond = if *descending {
+                    if *inclusive {
+                        format!("{} >= {}", var_name, end_str)
+                    } else {
+                        format!("{} > {}", var_name, end_str)
+                    }
+                } else if *inclusive {
                     format!("{} <= {}", var_name, end_str)
                 } else {
                     format!("{} < {}", var_name, end_str)
                 };
                 let incr = if let Some(s) = step {
-                    format!("{} += {}", var_name, lower_expr_with_expected_type(s, None, callable_signatures))
+                    let step_str = lower_expr_with_expected_type(s, None, callable_signatures);
+                    if *descending {
+                        format!("{} -= {}", var_name, step_str)
+                    } else {
+                        format!("{} += {}", var_name, step_str)
+                    }
+                } else if *descending {
+                    format!("{}--", var_name)
                 } else {
                     format!("{}++", var_name)
                 };
+                // Issue #41: the induction variable type must match the
+                // range bound expression types. `0.0..1.0 step 0.1`
+                // needs `float f`, not `int f`. Fall back to `int` for
+                // ranges over integer literals or unknown shapes.
+                let induction_ty = infer_range_induction_type(start, end, step.as_deref());
                 CsStmt::For {
-                    init: format!("int {} = {}", var_name, start_str),
+                    init: format!("{} {} = {}", induction_ty, var_name, start_str),
                     cond,
                     incr,
-                    body: body
-                        .stmts
-                        .iter()
-                        .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
-                        .collect(),
+                    body: lower_stmt_block_with_context(&body.stmts, callable_signatures, expected_return_ty),
                     source_span,
                 }
             } else {
@@ -2510,11 +3046,7 @@ fn lower_stmt_with_context(
                     ty: "var".into(),
                     name: var_name.clone(),
                     iterable: lower_expr_with_expected_type(iterable, None, callable_signatures),
-                    body: body
-                        .stmts
-                        .iter()
-                        .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
-                        .collect(),
+                    body: lower_stmt_block_with_context(&body.stmts, callable_signatures, expected_return_ty),
                     source_span,
                 }
             }
@@ -2522,11 +3054,7 @@ fn lower_stmt_with_context(
         Stmt::While { cond, body, .. } => {
             CsStmt::While {
                 cond: lower_expr_with_expected_type(cond, None, callable_signatures),
-                body: body
-                    .stmts
-                    .iter()
-                    .map(|stmt| lower_stmt_with_context(stmt, callable_signatures, expected_return_ty))
-                    .collect(),
+                body: lower_stmt_block_with_context(&body.stmts, callable_signatures, expected_return_ty),
                 source_span,
             }
         }
@@ -2608,23 +3136,23 @@ fn lower_stmt_with_context(
             lower_destructure_val(pattern, init, source_span)
         }
         Stmt::Try { try_block, catches, finally_block, .. } => {
-            let try_body: Vec<CsStmt> = try_block.stmts.iter()
-                .map(|s| lower_stmt_with_context(s, callable_signatures, expected_return_ty))
-                .collect();
+            let try_body = lower_stmt_block_with_context(&try_block.stmts, callable_signatures, expected_return_ty);
             let cs_catches: Vec<CsCatchClause> = catches.iter()
                 .map(|c| CsCatchClause {
                     exception_type: lower_type(&c.ty),
                     name: c.name.clone(),
-                    body: c.body.stmts.iter()
-                        .map(|s| lower_stmt_with_context(s, callable_signatures, expected_return_ty))
-                        .collect(),
+                    body: {
+                        let mut catch_env = current_lowering_type_env().unwrap_or_default();
+                        catch_env.insert(c.name.clone(), c.ty.clone());
+                        with_lowering_type_env(catch_env, || {
+                            lower_stmt_block_with_context(&c.body.stmts, callable_signatures, expected_return_ty)
+                        })
+                    },
                 })
                 .collect();
-            let finally_body = finally_block.as_ref().map(|fb|
-                fb.stmts.iter()
-                    .map(|s| lower_stmt_with_context(s, callable_signatures, expected_return_ty))
-                    .collect()
-            );
+            let finally_body = finally_block
+                .as_ref()
+                .map(|fb| lower_stmt_block_with_context(&fb.stmts, callable_signatures, expected_return_ty));
             CsStmt::TryCatch {
                 try_body,
                 catches: cs_catches,
@@ -3028,17 +3556,30 @@ fn lower_expr_with_expected_type(
             // inside a verbatim string only `"` requires escaping (as `""`).
             // Single-line strings continue to use the regular form so
             // existing snapshot tests stay green.
+            //
+            // Issue #34: the regular path must re-escape every C#
+            // metacharacter (`\\`, `"`, `\t`, `\0`, ...) before
+            // wrapping in `"..."`. The lexer stores the *unescaped*
+            // payload, so a literal containing `\"` round-trips as a
+            // raw `"` byte and would close the C# string prematurely.
             if s.contains('\n') || s.contains('\r') {
                 format!("@\"{}\"", s.replace('"', "\"\""))
             } else {
-                format!("\"{}\"", s)
+                format!("\"{}\"", escape_csharp_string_literal(s))
             }
         }
         Expr::StringInterp { parts, .. } => {
             let mut result = String::from("$\"");
             for part in parts {
                 match part {
-                    StringPart::Literal(s) => result.push_str(s),
+                    // Issue #34: literal segments inside an interpolated
+                    // string must also re-escape `"` and `\\`. The
+                    // braces `{`/`}` additionally need doubling so the
+                    // C# interpolation parser does not eat a literal
+                    // brace as the start of an expression hole.
+                    StringPart::Literal(s) => {
+                        result.push_str(&escape_csharp_interp_literal(s));
+                    }
                     StringPart::Expr(e) => {
                         result.push('{');
                         result.push_str(&lower_expr_with_expected_type(e, None, callable_signatures));
@@ -3051,7 +3592,9 @@ fn lower_expr_with_expected_type(
         }
         Expr::BoolLit(b, _) => if *b { "true" } else { "false" }.into(),
         Expr::Null(_) => "null".into(),
-        Expr::Ident(name, _) => map_sugar_ident(name),
+        Expr::Ident(name, _) => {
+            current_smart_cast_alias(name).unwrap_or_else(|| map_sugar_ident(name))
+        }
         Expr::This(_) => "this".into(),
         Expr::Binary { left, op, right, .. } => {
             if *op == BinOp::In {
@@ -3108,32 +3651,16 @@ fn lower_expr_with_expected_type(
                 ("Time", "deltaTime") => "Time.deltaTime".into(),
                 // Duration sugar: expr.s → just expr (seconds value)
                 (_, "s") => recv.to_string(),
-                // Issue #11: PrSM uses camelCase `length` and `count` for
-                // collection sizes; the corresponding C# members on
-                // arrays, NativeArray<T>, Span<T>, Length-supporting
-                // types use PascalCase. Map them so the lowered C# is
-                // valid against any standard collection type.
-                (_, "length") => format!("{}.Length", recv),
-                (_, "count") => format!("{}.Count", recv),
-                // Issue #30: System.Exception members are PascalCase in
-                // C# (`Message`, `StackTrace`, `Source`, `HelpLink`,
-                // `InnerException`, `Data`, `TargetSite`). PrSM uses
-                // camelCase for member access; forward the well-known
-                // exception members to their C# counterparts so
-                // `e.message` lowers to `e.Message`. The mapping is
-                // safe because no Unity API exposes a camelCase
-                // `message`/`stackTrace`/etc. on the same receiver path.
-                (_, "message") => format!("{}.Message", recv),
-                (_, "stackTrace") => format!("{}.StackTrace", recv),
-                (_, "innerException") => format!("{}.InnerException", recv),
-                (_, "helpLink") => format!("{}.HelpLink", recv),
-                (_, "targetSite") => format!("{}.TargetSite", recv),
+                _ if lowered_member_name_with_env(receiver, name).is_some() => {
+                    format!("{}.{}", recv, lowered_member_name_with_env(receiver, name).unwrap())
+                }
                 _ => format!("{}.{}", recv, name),
             }
         }
         Expr::SafeCall { receiver, name, .. } => {
             let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
-            format!("({} != null ? {}.{} : null)", recv, recv, pascal_case(name))
+            let member_name = lowered_member_name_with_env(receiver, name).unwrap_or(name.as_str());
+            format!("({} != null ? {}.{} : null)", recv, recv, member_name)
         }
         Expr::SafeMethodCall { receiver, name, type_args, args, .. } => {
             // SafeMethodCall in expression context — use null-conditional operator
@@ -3144,7 +3671,7 @@ fn lower_expr_with_expected_type(
             format!("{}?.{}{}({})", recv, method, ta_str, args_str.join(", "))
         }
         Expr::NonNullAssert { expr, .. } => {
-            lower_expr_with_expected_type(expr, expected_type, callable_signatures)
+            lower_non_null_assert_expr(expr, expected_type, callable_signatures)
         }
         Expr::Elvis { left, right, .. } => {
             format!(
@@ -3232,10 +3759,13 @@ fn lower_expr_with_expected_type(
             )
         }
         Expr::IfExpr { cond, then_block, else_block, .. } => {
+            let (cond_str, smart_cast_bindings) = lower_condition_expr_with_smart_casts(cond, callable_signatures);
             format!(
                 "({} ? {} : {})",
-                lower_expr_with_expected_type(cond, None, callable_signatures),
-                lower_value_block_expr_with_expected(then_block, "if expression", expected_type, callable_signatures),
+                cond_str,
+                with_smart_cast_lowering_bindings(&smart_cast_bindings, || {
+                    lower_value_block_expr_with_expected(then_block, "if expression", expected_type, callable_signatures)
+                }),
                 lower_value_block_expr_with_expected(else_block, "if expression", expected_type, callable_signatures),
             )
         }
@@ -3624,8 +4154,9 @@ fn strip_nullable_type(ty: &TypeRef) -> TypeRef {
             nullable: false,
             span: *span,
         },
-        TypeRef::Tuple { types, span, .. } => TypeRef::Tuple {
+        TypeRef::Tuple { types, names, span, .. } => TypeRef::Tuple {
             types: types.clone(),
+            names: names.clone(),
             nullable: false,
             span: *span,
         },
@@ -3706,8 +4237,22 @@ fn lower_type(ty: &TypeRef) -> String {
             let base = format!("{}.{}", qualifier, name);
             if *nullable { format!("{}?", base) } else { base }
         }
-        TypeRef::Tuple { types, nullable, .. } => {
-            let inner: Vec<String> = types.iter().map(|t| lower_type(t)).collect();
+        TypeRef::Tuple { types, names, nullable, .. } => {
+            // Issue #36: emit named C# tuple types when at least one
+            // element carries a name. `(hp: Int, mp: Int)` becomes
+            // `(int hp, int mp)`. Unnamed elements stay positional
+            // (`Item1`, `Item2`, ...) per C# convention.
+            let inner: Vec<String> = types
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let cs = lower_type(t);
+                    match names.get(i).and_then(|n| n.as_ref()) {
+                        Some(n) => format!("{} {}", cs, n),
+                        None => cs,
+                    }
+                })
+                .collect();
             let base = format!("({})", inner.join(", "));
             if *nullable { format!("{}?", base) } else { base }
         }
@@ -4370,6 +4915,110 @@ fn format_float(n: f64) -> String {
     }
 }
 
+// Issue #41: figure out the C# induction-variable type for a
+// `for i in start..end [step s]` loop. We walk the bound expressions
+// and pick the widest-seen numeric literal type. Float/double
+// literals promote the result to `float`; a `Long` literal promotes
+// to `long`. Unknown shapes (identifiers, calls) fall back to `int`
+// which matches the historical behavior.
+fn infer_range_induction_type(start: &Expr, end: &Expr, step: Option<&Expr>) -> &'static str {
+    let mut ty = "int";
+    for expr in [Some(start), Some(end), step].into_iter().flatten() {
+        match range_bound_numeric_type(expr) {
+            Some("double") => return "double",
+            Some("float") => ty = promote_induction_ty(ty, "float"),
+            Some("long") => ty = promote_induction_ty(ty, "long"),
+            _ => {}
+        }
+    }
+    ty
+}
+
+fn range_bound_numeric_type(expr: &Expr) -> Option<&'static str> {
+    match expr {
+        Expr::FloatLit(_, _) => Some("float"),
+        Expr::DurationLit(_, _) => Some("float"),
+        Expr::IntLit(_, _) => Some("int"),
+        // Negated or nested arithmetic — peek through the obvious
+        // shapes so `-0.1f` still classifies as float.
+        Expr::Unary { operand, .. } => range_bound_numeric_type(operand),
+        Expr::Binary { left, right, .. } => {
+            let l = range_bound_numeric_type(left);
+            let r = range_bound_numeric_type(right);
+            match (l, r) {
+                (Some("float"), _) | (_, Some("float")) => Some("float"),
+                (Some("long"), _) | (_, Some("long")) => Some("long"),
+                (Some("int"), Some("int")) => Some("int"),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn promote_induction_ty(current: &'static str, candidate: &'static str) -> &'static str {
+    // Float > long > int (float wins so a mixed `0.0..n` still
+    // produces valid code when `n` is an Int variable).
+    match (current, candidate) {
+        (_, "float") => "float",
+        ("float", _) => "float",
+        (_, "long") => "long",
+        ("long", _) => "long",
+        _ => current,
+    }
+}
+
+// Issue #34: escape every C# metacharacter that may appear in a
+// PrSM single-line string literal so the lowered `"..."` is valid C#.
+// The lexer stores literals in their *decoded* form (with `\"` already
+// turned into a real `"` byte), so any unescaped `"`, `\\`, `\t`, `\0`
+// or control character must be re-escaped here. Newlines / CR are
+// handled separately by the verbatim path.
+fn escape_csharp_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+// Issue #34: literal text segments inside a PrSM interpolated string
+// must additionally double `{` and `}` so the C# interpolation parser
+// does not interpret a literal brace as the start of an expression hole.
+fn escape_csharp_interp_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            '{' => out.push_str("{{"),
+            '}' => out.push_str("}}"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     match c.next() {
@@ -4406,6 +5055,7 @@ struct ComponentCtx {
     next_id: usize,
     records: Vec<SubscriptionRecord>,
     callable_signatures: HashMap<String, CallableSignature>,
+    member_types: LoweringTypeEnv,
     /// Language 5, Sprint 3: every `bind X to target` site discovered
     /// while lowering lifecycle / func / coroutine bodies. Keys are the
     /// bind property name (`X`); the value tracks how many push targets
@@ -4416,11 +5066,12 @@ struct ComponentCtx {
 }
 
 impl ComponentCtx {
-    fn new(callable_signatures: HashMap<String, CallableSignature>) -> Self {
+    fn new(callable_signatures: HashMap<String, CallableSignature>, member_types: LoweringTypeEnv) -> Self {
         ComponentCtx {
             next_id: 0,
             records: Vec::new(),
             callable_signatures,
+            member_types,
             bind_to_sources: std::collections::HashSet::new(),
         }
     }
@@ -4440,8 +5091,12 @@ fn lower_stmts_with_ctx(
     expected_return_ty: Option<&TypeRef>,
 ) -> Vec<CsStmt> {
     let mut out = Vec::new();
+    let mut type_env = current_lowering_type_env().unwrap_or_default();
     for stmt in stmts {
-        out.extend(lower_stmt_with_ctx(stmt, ctx, expected_return_ty));
+        out.extend(with_lowering_type_env(type_env.clone(), || {
+            lower_stmt_with_ctx(stmt, ctx, expected_return_ty)
+        }));
+        record_local_type_hint(&mut type_env, stmt);
     }
     out
 }
@@ -4501,13 +5156,17 @@ fn lower_stmt_with_ctx(
         }
         // Recurse into control-flow so nested listens are also handled.
         Stmt::If { cond, then_block, else_branch, span, .. } => {
-            let then_body = lower_stmts_with_ctx(&then_block.stmts, ctx, expected_return_ty);
+            let (cond_str, smart_cast_bindings) =
+                lower_condition_expr_with_smart_casts(cond, Some(&ctx.callable_signatures));
+            let then_body = with_smart_cast_lowering_bindings(&smart_cast_bindings, || {
+                lower_stmts_with_ctx(&then_block.stmts, ctx, expected_return_ty)
+            });
             let else_body = else_branch.as_ref().map(|eb| match eb {
                 ElseBranch::ElseBlock(block) => lower_stmts_with_ctx(&block.stmts, ctx, expected_return_ty),
                 ElseBranch::ElseIf(if_stmt) => lower_stmt_with_ctx(if_stmt, ctx, expected_return_ty),
             });
             vec![CsStmt::If {
-                cond: lower_expr_with_expected_type(cond, None, Some(&ctx.callable_signatures)),
+                cond: cond_str,
                 then_body,
                 else_body,
                 source_span: Some(*span),
@@ -4522,13 +5181,16 @@ fn lower_stmt_with_ctx(
         Stmt::BindTo { source, target, span, .. } => {
             ctx.bind_to_sources.insert(source.clone());
             let target_str = lower_expr_with_expected_type(target, None, Some(&ctx.callable_signatures));
+            let source_ty = ctx.member_types.get(source);
+            let initial_value = lower_bind_value_for_target(&format!("this.{}", source), source_ty, target);
+            let push_value = lower_bind_value_for_target("__v", source_ty, target);
             let push_field = format!("_pushTargets_{}", source);
             vec![
                 // Initial sync — keep the v4 behavior so the UI is primed.
                 CsStmt::Assignment {
                     target: target_str.clone(),
                     op: "=".into(),
-                    value: format!("this.{}", source),
+                    value: initial_value,
                     source_span: Some(*span),
                 },
                 // Register a push callback. The lambda is created lazily
@@ -4536,7 +5198,7 @@ fn lower_stmt_with_ctx(
                 // call sites; the list is initialized to a fresh
                 // `List<Action<T>>` in the field declaration.
                 CsStmt::Expr(
-                    format!("{}.Add(__v => {} = __v)", push_field, target_str),
+                    format!("{}.Add(__v => {} = {})", push_field, target_str, push_value),
                     Some(*span),
                 ),
             ]
@@ -4593,13 +5255,9 @@ fn lower_listen_stmt(
     } else {
         format!("({})", params.join(", "))
     };
-    let body_lines: Vec<String> = body
-        .stmts
+    let body_lines: Vec<String> = lower_stmt_block_with_context(&body.stmts, callable_signatures, None)
         .iter()
-        .map(|stmt| format!(
-            "    {};",
-            stmt_to_inline(&lower_stmt_with_context(stmt, callable_signatures, None))
-        ))
+        .map(|stmt| format!("    {};", stmt_to_inline(stmt)))
         .collect();
     let lambda_body = body_lines.join("\n");
     let lambda = format!(

@@ -3543,8 +3543,9 @@ fn strip_nullable_type_ref(ty: &TypeRef) -> TypeRef {
             nullable: false,
             span: *span,
         },
-        TypeRef::Tuple { types, span, .. } => TypeRef::Tuple {
+        TypeRef::Tuple { types, names, span, .. } => TypeRef::Tuple {
             types: types.clone(),
+            names: names.clone(),
             nullable: false,
             span: *span,
         },

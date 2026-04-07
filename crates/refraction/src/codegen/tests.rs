@@ -65,6 +65,15 @@ mod e2e {
     }
 
     #[test]
+    fn test_optional_nullable_lookup_strips_nullable_generic_argument() {
+        let output = compile("component Foo : MonoBehaviour {\n  optional cam: Camera?\n}");
+        assert!(output.contains("private Camera? _cam;"));
+        assert!(output.contains("public Camera? cam => _cam;"));
+        assert!(output.contains("_cam = GetComponent<Camera>()"));
+        assert!(!output.contains("GetComponent<Camera?>()"));
+    }
+
+    #[test]
     fn test_lifecycle_update() {
         let output = compile("component Foo : MonoBehaviour {\n  update {\n    move()\n  }\n}");
         assert!(output.contains("private void Update()"));
@@ -112,6 +121,12 @@ mod e2e {
         assert!(output.contains("yield return null"));
         assert!(output.contains("yield return new WaitForFixedUpdate()"));
         assert!(output.contains("yield return new WaitUntil(() => ready)"));
+    }
+
+    #[test]
+    fn test_wait_millisecond_duration_literal() {
+        let output = compile("component Foo : MonoBehaviour {\n  coroutine test() {\n    wait 500ms\n  }\n}");
+        assert!(output.contains("yield return new WaitForSeconds(0.5f)"));
     }
 
     #[test]
@@ -1382,14 +1397,49 @@ hello world
     fn test_bind_to_statement_assigns_initial_value() {
         let src = r#"component HUD : MonoBehaviour {
   bind hp: Int = 100
+  serialize hpLabel: TextMeshProUGUI
   awake {
-    bind hp to label.text
+    bind hp to hpLabel.text
+  }
+}"#;
+        let output = compile(src);
+        // Issue #44: bind of a non-string source to a stringy target
+        // (`*.text`) must convert via `.ToString()`. Before the fix
+        // this emitted `hpLabel.text = this.hp` which produced CS0029.
+        assert!(
+            output.contains("hpLabel.text = this.hp.ToString()"),
+            "expected initial sync with ToString conversion: {}",
+            output
+        );
+        // The push-target lambda must also wrap with `.ToString()`.
+        assert!(
+            output.contains("hpLabel.text = __v.ToString()"),
+            "expected push-target lambda with ToString: {}",
+            output
+        );
+    }
+
+    // Issue #44 (cont): same lowering must hold for Float / numeric
+    // sources, not just Int. Verifies the type-aware ToString
+    // insertion isn't tied to a specific source type.
+    #[test]
+    fn test_bind_float_to_text_inserts_to_string() {
+        let src = r#"component HUD : MonoBehaviour {
+  bind speed: Float = 1.5
+  serialize speedLabel: TextMeshProUGUI
+  awake {
+    bind speed to speedLabel.text
   }
 }"#;
         let output = compile(src);
         assert!(
-            output.contains("label.text = this.hp"),
-            "expected initial sync assignment: {}",
+            output.contains("speedLabel.text = this.speed.ToString()"),
+            "expected float bind with ToString: {}",
+            output
+        );
+        assert!(
+            output.contains("speedLabel.text = __v.ToString()"),
+            "expected float push lambda with ToString: {}",
             output
         );
     }
@@ -1674,6 +1724,16 @@ hello world
             "expected PlayerHUD component to lower: {}",
             output
         );
+        assert!(
+            output.contains("nameLabel.text = this.playerName"),
+            "string bind should remain a direct assignment: {}",
+            output
+        );
+        assert!(
+            !output.contains("nameLabel.text = this.playerName.ToString()"),
+            "string bind must not add a redundant ToString conversion: {}",
+            output
+        );
     }
 
     // Issue #21: a map literal assigned to a `Map<String, Int>`-typed
@@ -1723,6 +1783,27 @@ hello world
         );
     }
 
+    #[test]
+    fn test_if_is_smart_cast_lowers_with_pattern_alias() {
+        let src = "component Probe : MonoBehaviour {\n  func handle(c: Collider) {\n    if c is BoxCollider {\n      log(\"size: ${c.size}\")\n    }\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("if (c is BoxCollider _bc_c)"),
+            "expected smart-cast pattern variable in if-condition: {}",
+            output
+        );
+        assert!(
+            output.contains("Debug.Log($\"size: {_bc_c.size}\")"),
+            "expected smart-cast alias usage inside if-body: {}",
+            output
+        );
+        assert!(
+            !output.contains("Debug.Log($\"size: {c.size}\")"),
+            "lowered output must not keep the wide receiver inside the narrowed block: {}",
+            output
+        );
+    }
+
     // Issue #30: PrSM `e.message` member access on a System.Exception
     // lowers to PascalCase `e.Message`. Other Exception members
     // (`stackTrace`, `innerException`, `helpLink`, `targetSite`) get
@@ -1739,6 +1820,22 @@ hello world
         assert!(
             !output.contains("e.message"),
             "lowered output must not contain camelCase `e.message`: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_non_exception_message_member_stays_camelcase() {
+        let src = "component Probe : MonoBehaviour {\n  data class LogState(message: String)\n  val logger: LogState = LogState(\"hi\")\n  func go() {\n    log(logger.message)\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("logger.message"),
+            "expected non-exception member to remain camelCase: {}",
+            output
+        );
+        assert!(
+            !output.contains("logger.Message"),
+            "non-exception member sugar must not rewrite to PascalCase: {}",
             output
         );
     }
@@ -1886,6 +1983,22 @@ hello world
         assert!(
             !output.contains("arr.length"),
             "lowered output must not contain camelCase `length`: {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_safe_call_property_preserves_non_sugar_camelcase_member() {
+        let src = "component Probe : MonoBehaviour {\n  optional cam: Camera?\n  func go() {\n    val depth = cam?.depth ?: 0.0\n    log(\"$depth\")\n  }\n}";
+        let output = compile(src);
+        assert!(
+            output.contains("cam.depth"),
+            "expected safe-call property to preserve Camera.depth: {}",
+            output
+        );
+        assert!(
+            !output.contains("cam.Depth"),
+            "safe-call property must not rewrite Camera.depth to PascalCase: {}",
             output
         );
     }
@@ -2192,7 +2305,8 @@ hello world
     }
 
     // Issue #13: throw expression with a variable target must NOT receive
-    // a `new` prefix. `throw cached!!` should forward the variable verbatim.
+    // a `new` prefix. `throw cached!!` should forward the variable
+    // (post-#43, wrapped in a runtime null-check `?? throw` clause).
     #[test]
     fn test_throw_expression_variable() {
         let src = r#"using System
@@ -2202,14 +2316,45 @@ component Probe : MonoBehaviour {
   }
 }"#;
         let output = compile(src);
+        // The variable `cached` must be the thrown value (via the
+        // `!!` runtime check), never wrapped with a stray `new`.
         assert!(
-            output.contains("throw cached"),
-            "throw of a variable should forward verbatim: {}",
+            output.contains("cached ??"),
+            "throw of a variable should reference `cached` directly: {}",
             output
         );
         assert!(
             !output.contains("throw new cached"),
             "throw of a variable must not be wrapped with `new` (invalid C#): {}",
+            output
+        );
+    }
+
+    #[test]
+    fn test_non_null_assert_is_preserved_in_member_access() {
+        let src = "component Probe : MonoBehaviour {\n  optional cam: Camera?\n  func go() {\n    val fov = cam!!.fieldOfView\n  }\n}";
+        let output = compile(src);
+        // Issue #43: `!!` lowers to a runtime null check using
+        // `?? throw new System.NullReferenceException(...)`, not the
+        // C# null-forgiving operator (which only suppresses warnings).
+        assert!(
+            output.contains("?? throw new System.NullReferenceException"),
+            "expected non-null assertion to lower to runtime throw: {}",
+            output
+        );
+        assert!(
+            output.contains("`cam` was null"),
+            "expected descriptive null message: {}",
+            output
+        );
+        assert!(
+            output.contains(".fieldOfView"),
+            "expected member access still emitted: {}",
+            output
+        );
+        assert!(
+            !output.contains("var fov = cam.fieldOfView"),
+            "lowering must not drop the non-null assertion: {}",
             output
         );
     }
@@ -2321,8 +2466,13 @@ component Probe : MonoBehaviour {
             output
         );
         assert!(
-            output.contains("_pushTargets_hp.Add(__v => label.text = __v)"),
-            "expected push registration: {}",
+            output.contains("label.text = this.hp.ToString()"),
+            "expected initial string conversion for text bind target: {}",
+            output
+        );
+        assert!(
+            output.contains("_pushTargets_hp.Add(__v => label.text = __v.ToString())"),
+            "expected push registration to stringify non-string values for text targets: {}",
             output
         );
         assert!(
@@ -2528,6 +2678,459 @@ component Probe : MonoBehaviour {
         assert!(
             output.contains("#elif UNITY_ANDROID"),
             "expected #elif android: {}",
+            output
+        );
+    }
+
+    // Issue #48: `wait 500ms` (millisecond duration literal) must
+    // parse and lower to `yield return new WaitForSeconds(0.5f);`.
+    #[test]
+    fn test_wait_500ms_parses_and_lowers() {
+        let src = r#"component Probe : MonoBehaviour {
+  coroutine sequence(): Seq<Unit> {
+    wait 500ms
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("WaitForSeconds(0.5f)"),
+            "expected `WaitForSeconds(0.5f)` for `wait 500ms`: {}",
+            output
+        );
+    }
+
+    // Issue #39: `val data = ...` and `var data = ...` must parse
+    // even though `data` lexes as the `Data` keyword (used in
+    // `data class`). Likewise for any other keyword that may
+    // legitimately appear as a variable name in binding position.
+    #[test]
+    fn test_val_data_keyword_parses_as_identifier() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    val data = 42
+    log("$data")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("var data = 42") || output.contains("int data = 42"),
+            "expected `data` to lower as a regular variable: {}",
+            output
+        );
+    }
+
+    // Issue #38: a `state machine` block with multiple `state`
+    // declarations must parse without an E189 false positive on
+    // the second / third state. Before the fix the parser bailed
+    // out after the first state and reparsed the rest as new
+    // top-level declarations.
+    #[test]
+    fn test_state_machine_multi_state_parses() {
+        let src = r#"component Door : MonoBehaviour {
+  state machine doorState {
+    state Closed {
+      on open => Open
+      on lock => Locked
+    }
+    state Open {
+      on close => Closed
+    }
+    state Locked {
+      on unlock => Closed
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            !output.contains("E189"),
+            "must not raise E189 inside multi-state machine: {}",
+            output
+        );
+        assert!(
+            output.contains("Closed") && output.contains("Open") && output.contains("Locked"),
+            "expected all three states to be lowered: {}",
+            output
+        );
+    }
+
+    // Issue #37: `class Circle(radius: Float) : Shape` (primary
+    // constructor on a class, the lang-4 sealed discriminated union
+    // shorthand) must parse and lower to a C# class with an
+    // auto-generated constructor that initializes each field.
+    #[test]
+    fn test_class_primary_ctor_parses_and_lowers() {
+        let src = r#"sealed class Shape {
+  class Circle(radius: Float) : Shape
+  class Rect(width: Float, height: Float) : Shape
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public sealed class Shape"),
+            "expected sealed base class: {}",
+            output
+        );
+        assert!(
+            output.contains("public float radius"),
+            "expected Circle.radius property: {}",
+            output
+        );
+        assert!(
+            output.contains("public Circle(float radius)"),
+            "expected auto-generated Circle ctor: {}",
+            output
+        );
+        assert!(
+            output.contains("public Rect(float width, float height)"),
+            "expected auto-generated Rect ctor: {}",
+            output
+        );
+    }
+
+    // Issue #36: a named tuple type `(hp: Int, mp: Int)` must
+    // parse and lower to a C# named tuple `(int hp, int mp)`.
+    // Before the fix the `parse_type` tuple branch rejected
+    // `<ident>:` with E100.
+    #[test]
+    fn test_named_tuple_type_lowers_to_csharp_named_tuple() {
+        let src = r#"component Probe : MonoBehaviour {
+  func getStats(): (hp: Int, mp: Int) {
+    return (100, 50)
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("(int hp, int mp)"),
+            "expected named C# tuple return type: {}",
+            output
+        );
+    }
+
+    // Issue #35: enum entries with Rust-style sum-type payload
+    // (`Ok(value: Int)`) must parse and lower to a discriminated
+    // union (sealed abstract base + sealed variants). Before the
+    // fix the parser rejected the `<ident>:` shape with E100.
+    #[test]
+    fn test_enum_named_payload_parses_and_lowers() {
+        let src = r#"enum Result {
+  Ok(value: Int),
+  Err(message: String)
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("public abstract class Result"),
+            "expected sealed abstract base class: {}",
+            output
+        );
+        assert!(
+            output.contains("public sealed class Ok : Result"),
+            "expected sealed Ok variant: {}",
+            output
+        );
+        assert!(
+            output.contains("public sealed class Err : Result"),
+            "expected sealed Err variant: {}",
+            output
+        );
+        assert!(
+            output.contains("public int value"),
+            "expected `int value` payload field: {}",
+            output
+        );
+        assert!(
+            output.contains("public string message"),
+            "expected `string message` payload field: {}",
+            output
+        );
+    }
+
+    // Issue #33: the `unlisten` statement must accept the `!!`
+    // non-null assertion suffix (documented in docs/en/idioms.md).
+    // Before the fix the parser required a bare identifier and
+    // rejected `unlisten skipToken!!` with E100.
+    #[test]
+    fn test_unlisten_with_non_null_assert_parses() {
+        let src = r#"component Probe : MonoBehaviour {
+  var skipToken: ListenToken? = null
+  func go() {
+    if skipToken != null {
+      unlisten skipToken!!
+      skipToken = null
+    }
+  }
+}"#;
+        // Must parse + lower without panicking; the unlisten-without-
+        // matching-listen path emits a `/* error: */` comment which
+        // is sufficient for this test.
+        let output = compile(src);
+        assert!(
+            !output.contains("expected identifier after 'unlisten'"),
+            "parser must accept `unlisten <ident>!!`: {}",
+            output
+        );
+    }
+
+    // Issue #33 (cont): `unlisten this.field` should also parse.
+    #[test]
+    fn test_unlisten_with_this_prefix_parses() {
+        let src = r#"component Probe : MonoBehaviour {
+  var tk: ListenToken? = null
+  func go() {
+    unlisten this.tk
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            !output.contains("expected identifier after 'unlisten'"),
+            "parser must accept `unlisten this.field`: {}",
+            output
+        );
+    }
+
+    // Issue #47: `length`/`count`/`message` sugar is type-gated and
+    // must NOT fire for members that happen to share the name on
+    // other types. `Camera.depth` is a camelCase Unity field —
+    // reading `cam?.depth` must stay `cam.depth`, not `cam.Depth`.
+    // Also `cam.enabled` must remain as-is (Camera has `.enabled`).
+    #[test]
+    fn test_camera_depth_is_not_pascal_cased() {
+        let src = r#"component Probe : MonoBehaviour {
+  optional cam: Camera?
+  func go() {
+    val depth = cam?.depth ?: 0.0
+    log("$depth")
+  }
+}"#;
+        let output = compile(src);
+        // Neither `cam.Depth` nor `cam?.Depth` should appear — only
+        // the lowercase form.
+        assert!(
+            !output.contains(".Depth"),
+            "Camera.depth must not be rewritten to `.Depth`: {}",
+            output
+        );
+        assert!(
+            output.contains("cam.depth") || output.contains("cam?.depth"),
+            "expected `cam.depth` (lowercase) in output: {}",
+            output
+        );
+    }
+
+    // Issue #47 (cont): `length` sugar must still fire for arrays,
+    // strings, and span types where C# actually spells the member
+    // `Length` — verifies we haven't regressed on the sugar rewrite
+    // while fixing the over-application.
+    #[test]
+    fn test_array_length_sugar_still_fires() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    val arr: Array<Int> = [1, 2, 3]
+    val n = arr.length
+    log("$n")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("arr.Length"),
+            "expected `.Length` sugar for array: {}",
+            output
+        );
+    }
+
+    // Issue #42: `cam?.enabled = false` (safe-call assignment)
+    // must lower to a null-guarded `if` statement, not an invalid
+    // rvalue-ternary assignment. Before the fix the output was
+    // `(cam != null ? cam.Enabled : null) = false;` which C#
+    // rejects (cannot assign to a ternary).
+    #[test]
+    fn test_safe_call_assignment_lowers_to_if_guard() {
+        let src = r#"component Probe : MonoBehaviour {
+  optional cam: Camera?
+  func go() {
+    cam?.enabled = false
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("if (cam != null)"),
+            "expected `if (cam != null)` guard: {}",
+            output
+        );
+        assert!(
+            output.contains("cam.enabled = false"),
+            "expected direct `cam.enabled = false` inside the guard: {}",
+            output
+        );
+        assert!(
+            !output.contains(") = false"),
+            "must not assign to an rvalue ternary: {}",
+            output
+        );
+    }
+
+    // Issue #34: a single-line PrSM string literal containing an
+    // escaped double quote must lower to a C# literal that re-escapes
+    // the inner `"`. Before the fix the lexer's decoded payload
+    // (`escape " quote`) was emitted verbatim, producing invalid C#
+    // (`"escape " quote"`).
+    #[test]
+    fn test_string_literal_escapes_inner_quote() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    log("escape \" quote")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains(r#"\" quote"#),
+            "expected re-escaped inner quote: {}",
+            output
+        );
+        assert!(
+            !output.contains(r#""escape " quote""#),
+            "lowered string must not contain unescaped inner quote: {}",
+            output
+        );
+    }
+
+    // Issue #34 (cont): backslashes must double up; otherwise a
+    // Windows path or escape sequence smashes the C# string.
+    #[test]
+    fn test_string_literal_escapes_backslash() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    log("c:\\temp\\file.txt")
+  }
+}"#;
+        let output = compile(src);
+        // The PrSM source contains `\\` (two chars) which the lexer
+        // decodes to a single backslash byte. The lowering must
+        // re-escape it to `\\`.
+        assert!(
+            output.contains(r#"c:\\temp\\file.txt"#),
+            "expected re-escaped backslashes: {}",
+            output
+        );
+    }
+
+    // Issue #34 (cont): an interpolated string literal segment with
+    // a literal `{` must double the brace so the C# interpolation
+    // parser does not treat it as the start of an expression.
+    #[test]
+    fn test_string_interp_escapes_braces_and_quotes() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go(name: String) {
+    log("hello {literal} \"$name\"")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("{{literal}}"),
+            "expected doubled `{{{{` for literal brace inside interpolated string: {}",
+            output
+        );
+        assert!(
+            output.contains(r#"\""#),
+            "expected escaped inner quote inside interpolated string: {}",
+            output
+        );
+    }
+
+    // Issue #40: a `for i in 10 downTo 0` loop must lower to a
+    // descending C# `for` (`i >= 0; i--`), not the ascending shape
+    // produced by `..` and `until`. Before this fix the parser
+    // discarded the direction and the lowering emitted `i <= 0; i++`,
+    // which silently never executed the body when start > end.
+    #[test]
+    fn test_for_loop_downto_lowers_descending() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    for i in 10 downTo 0 {
+      log("$i")
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("i >= 0"),
+            "expected `i >= 0` for descending range: {}",
+            output
+        );
+        assert!(
+            output.contains("i--"),
+            "expected `i--` for descending range: {}",
+            output
+        );
+        assert!(
+            !output.contains("i <= 0"),
+            "should NOT emit ascending `i <= 0` for downTo: {}",
+            output
+        );
+    }
+
+    // Issue #41: a `for f in 0.0..1.0 step 0.1` loop must declare
+    // the induction variable as `float`, not `int`. Before the fix
+    // the lowering hard-coded `int f` which would not compile against
+    // the `0.0f`/`0.1f` initial/step values.
+    #[test]
+    fn test_for_loop_float_range_induction_is_float() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    for f in 0.0..1.0 step 0.1 {
+      log("$f")
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("float f = 0"),
+            "expected `float f` induction variable for float range: {}",
+            output
+        );
+        assert!(
+            !output.contains("int f = 0"),
+            "must not emit `int f` induction for float range: {}",
+            output
+        );
+    }
+
+    // Issue #41 (cont): an integer range must still lower to `int`.
+    #[test]
+    fn test_for_loop_int_range_induction_stays_int() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    for i in 0 until 10 {
+      log("$i")
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("int i = 0"),
+            "expected `int i` induction variable for integer range: {}",
+            output
+        );
+    }
+
+    // Issue #40 (cont): explicit `step` on a `downTo` range must
+    // subtract the step on each iteration.
+    #[test]
+    fn test_for_loop_downto_with_step_subtracts() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    for i in 100 downTo 0 step 5 {
+      log("$i")
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("i -= 5"),
+            "expected `i -= 5` for descending range with step: {}",
+            output
+        );
+        assert!(
+            output.contains("i >= 0"),
+            "expected `i >= 0` for descending range with step: {}",
             output
         );
     }

@@ -63,6 +63,12 @@ pub enum Decl {
         interfaces: Vec<String>,
         interface_spans: Vec<Span>,
         members: Vec<Member>,
+        // Issue #37: optional primary constructor parameters
+        // (`class Circle(radius: Float) : Shape`). Each parameter
+        // becomes an auto-generated public field on the class and
+        // is forwarded to the base ctor when present. Empty for the
+        // classic `class Name : Base { ... }` shape.
+        primary_ctor_params: Vec<Param>,
         span: Span,
     },
     DataClass {
@@ -167,6 +173,17 @@ pub struct EnumEntry {
     pub name: String,
     pub name_span: Span,
     pub args: Vec<Expr>,
+    // Issue #35: Rust-style sum type payload, e.g. `Ok(value: Int)`.
+    // Mutually exclusive with `args` (positional constructor args
+    // for an enum with shared params like `Sword(10, 1.5)`).
+    pub payload: Vec<EnumPayloadField>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumPayloadField {
+    pub name: String,
+    pub ty: TypeRef,
     pub span: Span,
 }
 
@@ -800,6 +817,7 @@ pub enum Expr {
         start: Box<Expr>,
         end: Box<Expr>,
         inclusive: bool,
+        descending: bool,
         step: Option<Box<Expr>>,
         span: Span,
     },
@@ -963,6 +981,11 @@ pub enum TypeRef {
     /// `(Int, String)` — tuple type (Language 4)
     Tuple {
         types: Vec<TypeRef>,
+        // Issue #36: parallel optional name for each element so
+        // `(hp: Int, mp: Int)` survives the type round-trip and the
+        // lowering can emit `(int hp, int mp)` in C#. Always the
+        // same length as `types`; `None` for unnamed elements.
+        names: Vec<Option<String>>,
         nullable: bool,
         span: Span,
     },

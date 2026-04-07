@@ -1143,6 +1143,31 @@ impl Analyzer {
         }
     }
 
+    fn analyze_condition_with_smart_casts(&mut self, expr: &Expr) -> Vec<Symbol> {
+        match expr {
+            Expr::Binary { left, op: BinOp::And, right, .. } => {
+                let mut bindings = self.analyze_condition_with_smart_casts(left);
+                self.scopes.push_scope();
+                for binding in &bindings {
+                    self.scopes.define(binding.clone());
+                }
+                let right_bindings = self.analyze_condition_with_smart_casts(right);
+                self.scopes.pop_scope();
+                merge_smart_cast_symbols(&mut bindings, right_bindings);
+                bindings
+            }
+            Expr::Is { expr: inner, ty, .. } => {
+                self.analyze_expr(inner);
+                let narrowed_ty = self.resolve_typeref(ty);
+                self.smart_cast_symbol(inner, narrowed_ty).into_iter().collect()
+            }
+            _ => {
+                self.analyze_expr(expr);
+                Vec::new()
+            }
+        }
+    }
+
     fn analyze_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::ValDecl {
@@ -1262,8 +1287,11 @@ impl Analyzer {
                 }
             }
             Stmt::If { cond, then_block, else_branch, .. } => {
-                self.analyze_expr(cond);
+                let smart_casts = self.analyze_condition_with_smart_casts(cond);
                 self.scopes.push_scope();
+                for binding in smart_casts {
+                    self.scopes.define(binding);
+                }
                 self.analyze_block(then_block);
                 self.scopes.pop_scope();
                 if let Some(eb) = else_branch {
@@ -1901,14 +1929,22 @@ impl Analyzer {
                 }
                 PrismType::External("Range".into())
             }
-            Expr::Is { expr, .. } => {
+            Expr::Is { expr, ty, .. } => {
                 self.analyze_expr(expr);
+                self.resolve_typeref(ty);
                 PrismType::Primitive(PrimitiveKind::Bool)
             }
             Expr::IfExpr { cond, then_block, else_block, .. } => {
-                self.analyze_expr(cond);
+                let smart_casts = self.analyze_condition_with_smart_casts(cond);
+                self.scopes.push_scope();
+                for binding in smart_casts {
+                    self.scopes.define(binding);
+                }
                 self.analyze_block(then_block);
+                self.scopes.pop_scope();
+                self.scopes.push_scope();
                 self.analyze_block(else_block);
+                self.scopes.pop_scope();
                 PrismType::External("var".into())
             }
             Expr::WhenExpr { subject, branches, .. } => {
@@ -2204,6 +2240,20 @@ impl Analyzer {
         self.scopes
             .lookup(name)
             .map(|symbol| (symbol.ty.clone(), symbol.definition_id))
+    }
+
+    fn smart_cast_symbol(&self, expr: &Expr, ty: PrismType) -> Option<Symbol> {
+        let Expr::Ident(name, _) = expr else {
+            return None;
+        };
+        let symbol = self.scopes.lookup(name)?.clone();
+        Some(Symbol {
+            name: symbol.name,
+            ty,
+            kind: symbol.kind,
+            mutable: symbol.mutable,
+            definition_id: symbol.definition_id,
+        })
     }
 
     fn lookup_type_symbol(&self, name: &str) -> Option<(PrismType, Option<u32>)> {
@@ -2716,6 +2766,16 @@ fn lifecycle_name(kind: LifecycleKind) -> &'static str {
     }
 }
 
+fn merge_smart_cast_symbols(bindings: &mut Vec<Symbol>, new_bindings: Vec<Symbol>) {
+    for binding in new_bindings {
+        if let Some(existing) = bindings.iter_mut().find(|existing| existing.name == binding.name) {
+            *existing = binding;
+        } else {
+            bindings.push(binding);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2749,6 +2809,15 @@ mod tests {
             analyzer.analyze_file(&file);
         }
         analyzer.diag.diagnostics
+    }
+
+    fn parse_file(input: &str) -> crate::ast::File {
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize();
+        let mut parser = Parser::new(tokens);
+        let file = parser.parse_file();
+        assert!(parser.errors().is_empty(), "Parse errors: {:?}", parser.errors());
+        file
     }
 
     fn errors(input: &str) -> Vec<Diagnostic> {
@@ -2794,6 +2863,28 @@ mod tests {
     fn test_duplicate_lifecycle() {
         let diags = errors("component Foo : MonoBehaviour {\n  update {\n  }\n  update {\n  }\n}");
         assert!(diags.iter().any(|d| d.code == "E014"));
+    }
+
+    #[test]
+    fn test_if_is_smart_cast_narrows_member_candidate() {
+        let collider = parse_file("class Collider {}\n");
+        let box_collider = parse_file("class BoxCollider : Collider {\n  val size: Float = 1.0\n}\n");
+        let probe = parse_file(
+            "component Probe : MonoBehaviour {\n  func handle(c: Collider) {\n    if c is BoxCollider {\n      log(c.size)\n    }\n  }\n}\n",
+        );
+
+        let mut analyzer = Analyzer::new();
+        analyzer.analyze_file(&collider);
+        analyzer.analyze_file(&box_collider);
+        let hir = analyzer.analyze_file_with_hir(&probe, Path::new("Probe.prsm"));
+
+        let size_ref = hir
+            .references
+            .iter()
+            .find(|reference| reference.name == "size")
+            .expect("expected smart-cast member reference");
+
+        assert_eq!(size_ref.candidate_qualified_name.as_deref(), Some("BoxCollider.size"));
     }
 
     // === E031: break/continue outside loop ===

@@ -44,6 +44,10 @@ impl Parser {
             .unwrap_or(&TokenKind::Eof)
     }
 
+    fn peek_at(&self, offset: usize) -> Option<&TokenKind> {
+        self.tokens.get(self.pos + offset).map(|t| &t.kind)
+    }
+
     fn peek_span(&self) -> Span {
         self.tokens
             .get(self.pos)
@@ -583,6 +587,27 @@ impl Parser {
             Vec::new()
         };
 
+        // Issue #37: optional primary constructor parameter list,
+        // mirroring the data-class shape so the lang-4 sealed
+        // hierarchy `class Circle(radius: Float) : Shape` parses.
+        let primary_ctor_params = if self.eat(&TokenKind::LParen) {
+            let mut params = Vec::new();
+            self.skip_newlines();
+            while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                self.eat(&TokenKind::Val);
+                self.eat(&TokenKind::Var);
+                let p = self.parse_param()?;
+                params.push(p);
+                self.skip_newlines();
+                if !self.eat(&TokenKind::Comma) { break; }
+                self.skip_newlines();
+            }
+            self.expect(&TokenKind::RParen)?;
+            params
+        } else {
+            Vec::new()
+        };
+
         let (super_class, super_class_span) = if self.eat(&TokenKind::Colon) {
             let (sc, span) = self.expect_ident()?;
             (Some(sc), Some(span))
@@ -598,10 +623,21 @@ impl Parser {
         // Optional where clauses before the class body
         let where_clauses = self.parse_where_clauses()?;
 
+        // Issue #37: when a class has primary-ctor params and no
+        // explicit body, the body block is optional. Otherwise the
+        // body is required.
         self.skip_newlines();
-        self.expect(&TokenKind::LBrace)?;
-        let members = self.parse_members()?;
-        self.expect(&TokenKind::RBrace)?;
+        let members = if self.check(&TokenKind::LBrace) {
+            self.advance();
+            let ms = self.parse_members()?;
+            self.expect(&TokenKind::RBrace)?;
+            ms
+        } else if !primary_ctor_params.is_empty() {
+            Vec::new()
+        } else {
+            self.expect(&TokenKind::LBrace)?;
+            Vec::new()
+        };
 
         Ok(Decl::Class {
             name,
@@ -616,6 +652,7 @@ impl Parser {
             interfaces,
             interface_spans,
             members,
+            primary_ctor_params,
             span: Span { start: start.start, end: self.peek_span().end },
         })
     }
@@ -801,21 +838,50 @@ impl Parser {
         while !self.check(&TokenKind::RBrace) && !self.check(&TokenKind::Eof) {
             let entry_span = self.peek_span();
             let (ename, entry_name_span) = self.expect_ident()?;
-            let args = if self.eat(&TokenKind::LParen) {
-                let mut a = Vec::new();
-                while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
-                    a.push(self.parse_expr()?);
-                    if !self.eat(&TokenKind::Comma) { break; }
+            // Issue #35: disambiguate between positional constructor
+            // args for a shared-param enum (`Sword(10, 1.5)`) and the
+            // Rust-style sum-type payload form (`Ok(value: Int)`).
+            // Peek two tokens ahead: if we see `<ident>:` right after
+            // the `(`, switch to the payload parser.
+            let (args, payload) = if self.eat(&TokenKind::LParen) {
+                self.skip_newlines();
+                let is_payload_form = matches!(self.peek(), TokenKind::Identifier(_))
+                    && matches!(self.peek_at(1), Some(TokenKind::Colon));
+                if is_payload_form {
+                    let mut fields = Vec::new();
+                    while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                        let field_start = self.peek_span();
+                        let (fname, _) = self.expect_ident()?;
+                        self.expect(&TokenKind::Colon)?;
+                        let fty = self.parse_type()?;
+                        fields.push(EnumPayloadField {
+                            name: fname,
+                            ty: fty,
+                            span: Span { start: field_start.start, end: self.peek_span().end },
+                        });
+                        self.skip_newlines();
+                        if !self.eat(&TokenKind::Comma) { break; }
+                        self.skip_newlines();
+                    }
+                    self.expect(&TokenKind::RParen)?;
+                    (Vec::new(), fields)
+                } else {
+                    let mut a = Vec::new();
+                    while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+                        a.push(self.parse_expr()?);
+                        if !self.eat(&TokenKind::Comma) { break; }
+                    }
+                    self.expect(&TokenKind::RParen)?;
+                    (a, Vec::new())
                 }
-                self.expect(&TokenKind::RParen)?;
-                a
             } else {
-                vec![]
+                (vec![], vec![])
             };
             entries.push(EnumEntry {
                 name: ename,
                 name_span: entry_name_span,
                 args,
+                payload,
                 span: Span { start: entry_span.start, end: self.peek_span().end },
             });
             self.skip_newlines();
@@ -1321,7 +1387,11 @@ impl Parser {
         let start = self.peek_span();
         let _ = self.eat_contextual("state")
             .ok_or_else(|| self.error("Expected 'state'".into()))?;
-        let (name, name_span) = self.expect_ident()?;
+        // Issue #38: state names may shadow keyword tokens (e.g.
+        // `state Open { ... }` — `Open` would lex as TokenKind::Open
+        // when the source happens to spell the name the same as a
+        // keyword, which is the canonical Door/traffic-light example).
+        let (name, name_span) = self.expect_ident_or_keyword()?;
         self.skip_newlines();
         self.expect(&TokenKind::LBrace)?;
         self.skip_newlines();
@@ -1346,9 +1416,17 @@ impl Parser {
             } else if self.check_contextual("on") {
                 let t_start = self.peek_span();
                 self.advance(); // consume 'on'
-                let (event, event_span) = self.expect_ident()?;
+                // Issue #38: state-machine event names may collide
+                // with keyword tokens (`open`, `close`, `lock`,
+                // `unlock`, etc.). Accept keyword tokens as event
+                // names by using the keyword-tolerant variant.
+                let (event, event_span) = self.expect_ident_or_keyword()?;
                 self.expect(&TokenKind::FatArrow)?;
-                let (target, target_span) = self.expect_ident()?;
+                // Target state names may also collide with keywords
+                // (e.g. `=> Open` would normally lex as `TokenKind::Open`
+                // if the user spells the state lowercased). Allow
+                // either an identifier or a keyword token.
+                let (target, target_span) = self.expect_ident_or_keyword()?;
                 self.expect_newline_or_eof();
                 transitions.push(StateTransition {
                     event,
@@ -2185,7 +2263,11 @@ impl Parser {
         }
         } // close `if !is_ref` for binding pattern guard
 
-        let (name, name_span) = self.expect_ident()?;
+        // Issue #39: accept keyword tokens as the bound name so
+        // `val data = ...`, `val class = ...` etc. parse. The
+        // keyword's normal meaning is contextual (e.g. `data class
+        // Foo`) and only matters at declaration sites.
+        let (name, name_span) = self.expect_ident_or_keyword()?;
         let ty = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type()?)
         } else {
@@ -2249,7 +2331,8 @@ impl Parser {
         } else {
             false
         };
-        let (name, name_span) = self.expect_ident()?;
+        // Issue #39: same keyword-as-identifier tolerance as `val`.
+        let (name, name_span) = self.expect_ident_or_keyword()?;
         let ty = if self.eat(&TokenKind::Colon) {
             Some(self.parse_type()?)
         } else {
@@ -2887,9 +2970,27 @@ impl Parser {
         let start = self.peek_span();
         self.advance(); // consume 'unlisten'
         self.skip_newlines();
-        let name = match self.peek().clone() {
+        // Issue #33: accept a richer token expression after `unlisten`
+        // so documented idioms like `unlisten skipToken!!`,
+        // `unlisten this.tk`, and `unlisten field?.tk` all parse. The
+        // AST still stores the base identifier (the lowering walks
+        // manual-listen records by name); we simply strip the
+        // optional `this.` prefix, trailing member hops, and
+        // non-null-assert (`!!`) / safe-call (`?.`) suffixes.
+        let base_name = match self.peek().clone() {
             TokenKind::Identifier(n) => {
                 self.advance();
+                n
+            }
+            TokenKind::This => {
+                self.advance();
+                if !self.eat(&TokenKind::Dot) {
+                    return Err(ParseError {
+                        message: "expected `.` after `this` in `unlisten`".into(),
+                        span: self.peek_span(),
+                    });
+                }
+                let (n, _) = self.expect_ident()?;
                 n
             }
             other => {
@@ -2899,9 +3000,27 @@ impl Parser {
                 });
             }
         };
+        // Consume optional postfix: chains of `.field` and `?.field`
+        // that walk further into the token expression, plus a single
+        // trailing `!!` non-null assertion. The *last* identifier is
+        // the token name the lowering pass searches for.
+        let mut token = base_name;
+        loop {
+            match self.peek().clone() {
+                TokenKind::Dot | TokenKind::QuestionDot => {
+                    self.advance();
+                    let (next, _) = self.expect_ident()?;
+                    token = next;
+                }
+                TokenKind::BangBang => {
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
         self.expect_newline_or_eof();
         Ok(Stmt::Unlisten {
-            token: name,
+            token,
             span: Span { start: start.start, end: self.peek_span().end },
         })
     }
@@ -3442,7 +3561,7 @@ impl Parser {
                     None
                 };
                 let span = Span { start: start.start, end: self.peek_span().end };
-                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: true, step, span })
+                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: true, descending: false, step, span })
             }
             TokenKind::Until => {
                 let start = left.span();
@@ -3454,7 +3573,7 @@ impl Parser {
                     None
                 };
                 let span = Span { start: start.start, end: self.peek_span().end };
-                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: false, step, span })
+                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: false, descending: false, step, span })
             }
             TokenKind::DownTo => {
                 let start = left.span();
@@ -3466,9 +3585,8 @@ impl Parser {
                     None
                 };
                 let span = Span { start: start.start, end: self.peek_span().end };
-                // downTo is a range from left to end (descending)
-                // We represent it as Range with inclusive=true and negative step semantics
-                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: true, step, span })
+                // downTo is an inclusive descending range: [left, end] iterating downward
+                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: true, descending: true, step, span })
             }
             _ => Ok(left),
         }
@@ -4269,6 +4387,23 @@ impl Parser {
 
     // ── Type parsing ─────────────────────────────────────────────
 
+    // Issue #36: parse a single tuple-type element, with the
+    // optional `name:` prefix from named tuple syntax. Returns
+    // `(Some(name), ty)` for `name: Type`, `(None, ty)` otherwise.
+    fn parse_tuple_element_type(&mut self) -> Result<(Option<String>, TypeRef), ParseError> {
+        let is_named = matches!(self.peek(), TokenKind::Identifier(_))
+            && matches!(self.peek_at(1), Some(TokenKind::Colon));
+        if is_named {
+            let (name, _) = self.expect_ident()?;
+            self.expect(&TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            Ok((Some(name), ty))
+        } else {
+            let ty = self.parse_type()?;
+            Ok((None, ty))
+        }
+    }
+
     fn parse_type(&mut self) -> Result<TypeRef, ParseError> {
         let start = self.peek_span();
 
@@ -4292,12 +4427,20 @@ impl Parser {
                 // Empty parens without => — error or treat as unit
                 return Err(self.error("Expected '=>' after '()' in type position".into()));
             }
-            let first = self.parse_type()?;
+            // Issue #36: accept an optional `name:` prefix on each
+            // element so lang-4 named tuple types
+            // (`(hp: Int, mp: Int)`) parse without E100. We detect
+            // the named form by peeking for `<ident>:` before parsing
+            // each element.
+            let (first_name, first) = self.parse_tuple_element_type()?;
             if self.check(&TokenKind::Comma) {
                 let mut types = vec![first];
+                let mut names = vec![first_name];
                 while self.eat(&TokenKind::Comma) {
                     if self.check(&TokenKind::RParen) { break; }
-                    types.push(self.parse_type()?);
+                    let (n, t) = self.parse_tuple_element_type()?;
+                    names.push(n);
+                    types.push(t);
                 }
                 self.expect(&TokenKind::RParen)?;
                 // Check for function type: (Int, Int) => Bool
@@ -4315,6 +4458,7 @@ impl Parser {
                 let nullable = self.eat(&TokenKind::Question);
                 return Ok(TypeRef::Tuple {
                     types,
+                    names,
                     nullable,
                     span: Span { start: start.start, end: self.peek_span().end },
                 });

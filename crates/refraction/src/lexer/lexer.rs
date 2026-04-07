@@ -254,6 +254,21 @@ impl Lexer {
             }
         }
 
+        // Duration suffix: `ms` for milliseconds
+        if self.peek() == Some('m')
+            && self.peek_next() == Some('s')
+            && !self
+                .source
+                .get(self.pos + 2)
+                .copied()
+                .map_or(false, |c| c.is_alphanumeric() || c == '_')
+        {
+            self.advance(); // consume 'm'
+            self.advance(); // consume 's'
+            let value: f64 = num_str.parse().unwrap_or(0.0) / 1000.0;
+            return self.make_span_token(TokenKind::DurationLiteral(value), start);
+        }
+
         // Duration suffix: 's' for seconds
         if self.peek() == Some('s')
             && !self.peek_next().map_or(false, |c| c.is_alphanumeric() || c == '_')
@@ -833,6 +848,7 @@ mod tests {
         assert_eq!(lex("1.0s"), vec![TokenKind::DurationLiteral(1.0)]);
         assert_eq!(lex("0.2s"), vec![TokenKind::DurationLiteral(0.2)]);
         assert_eq!(lex("30s"), vec![TokenKind::DurationLiteral(30.0)]);
+        assert_eq!(lex("500ms"), vec![TokenKind::DurationLiteral(0.5)]);
     }
 
     // === String literals ===
