@@ -274,3 +274,150 @@ NEWLINE         = "\n" ;
 LETTER          = "a".."z" | "A".."Z" | "_" ;
 DIGIT           = "0".."9" ;
 ```
+
+## PrSM 5 문법 추가 (PrSM 5 부터)
+
+언어 5는 위 문법을 다음 production으로 확장합니다.
+
+### 선언 한정자
+
+```ebnf
+ComponentDecl   = { Annotation } [ "partial" ] [ "singleton" ] "component" IDENT
+                  [ ":" TypeRef ] "{" { ComponentMember } "}" ;
+
+ClassDecl       = { Annotation } [ "partial" ] [ ClassMod ] "class" IDENT
+                  [ ":" TypeRef ] "{" { ClassMember } "}" ;
+
+StructDecl      = { Annotation } [ "partial" ] [ "ref" ] "struct" IDENT
+                  "(" ParamList ")" [ "{" { ClassMember } "}" ] ;
+
+NestedDecl      = ClassDecl | StructDecl | EnumDecl | DataClassDecl | InterfaceDecl ;
+
+ComponentMember = ... | NestedDecl ;
+ClassMember     = ... | NestedDecl ;
+```
+
+### 매개변수
+
+```ebnf
+Param           = [ ParamMod ] IDENT ":" TypeRef [ "=" DefaultExpr ] ;
+
+ParamMod        = "ref" | "out" | "vararg" ;
+
+DefaultExpr     = LiteralExpr | NullLiteral | "default" ;
+```
+
+### 코루틴과 yield
+
+```ebnf
+YieldStmt       = "yield" Expr NEWLINE
+                | "yield" "break" NEWLINE
+                | "yield" "return" Expr NEWLINE ;
+
+Statement       = ... | YieldStmt ;
+```
+
+### 변수 선언
+
+```ebnf
+VarDecl         = ( "val" | "var" ) [ "ref" ] IDENT [ ":" TypeRef ]
+                  "=" [ "ref" ] Expr NEWLINE ;
+```
+
+### 타입 참조
+
+```ebnf
+TypeRef         = [ "ref" ] QualifiedName [ "<" TypeRefList ">" ] [ "?" ] ;
+
+WhereConstraint = TypeRef
+                | "class"
+                | "struct"
+                | "unmanaged"
+                | "notnull"
+                | "default"
+                | "new" "(" ")" ;
+```
+
+### 어트리뷰트 타깃
+
+```ebnf
+AttrTargetDecl  = "@" AttrTarget "(" AttrName [ "," AttrArgs ] ")" NEWLINE ;
+AttrTarget      = "field" | "property" | "param" | "return" | "type" ;
+```
+
+### 전처리
+
+```ebnf
+IfDirective     = "#if" Condition Block { ElseIfDirective } [ ElseDirective ] "#endif" ;
+ElseIfDirective = "#elif" Condition Block ;
+ElseDirective   = "#else" Block ;
+Condition       = SymbolName
+                | SymbolName "(" Args ")"
+                | "!" Condition
+                | Condition "&&" Condition
+                | Condition "||" Condition
+                | "(" Condition ")" ;
+SymbolName      = "editor" | "debug" | "release" | "ios" | "android"
+                | "standalone" | "il2cpp" | "mono"
+                | "unity20223" | "unity20231" | "unity6"
+                | IDENT ;
+```
+
+### 패턴
+
+```ebnf
+Pattern         = OrPattern ;
+OrPattern       = AndPattern { "or" AndPattern } ;
+AndPattern      = NotPattern { "and" NotPattern } ;
+NotPattern      = [ "not" ] PrimaryPattern ;
+
+PrimaryPattern  = LiteralPattern
+                | RelationalPattern
+                | EnumPattern
+                | PositionalPattern
+                | PropertyPattern
+                | BindingPattern
+                | DiscardPattern ;
+
+RelationalPattern = ( "<" | ">" | "<=" | ">=" ) Expr ;
+
+PositionalPattern = TypeName "(" [ Pattern { "," Pattern } ] ")" ;
+
+PropertyPattern   = [ TypeName ] "{" [ PropPatternEntry { "," PropPatternEntry } ] "}" ;
+
+PropPatternEntry  = IDENT ":" Pattern ;
+
+DiscardPattern    = "_" ;
+```
+
+### 식
+
+```ebnf
+PostfixOp       = ... | "?[" Expr "]" ;
+
+PrimaryExpr     = ... | NameOfExpr | StackallocExpr | ThrowExpr | DiscardExpr | WithExpr ;
+
+NameOfExpr      = "nameof" "(" QualifiedIdent ")" ;
+
+StackallocExpr  = "stackalloc" "[" TypeRef "]" "(" Expr ")" ;
+
+ThrowExpr       = "throw" Expr ;
+
+DiscardExpr     = "_" ;
+
+WithExpr        = Expr "with" "{" FieldAssign { "," FieldAssign } "}" ;
+
+FieldAssign     = IDENT "=" Expr ;
+
+Arg             = [ IDENT ":" ] [ "ref" | "out" ] Expr
+                | "out" "val" IDENT
+                | "out" "var" IDENT
+                | "out" "_" ;
+```
+
+### Async backend
+
+```ebnf
+ProjectAsync    = "[" "language" "." "async" "]" NEWLINE
+                  "backend" "=" ( "\"unitask\"" | "\"task\"" | "\"auto\"" ) ;
+```

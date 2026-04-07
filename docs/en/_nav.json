@@ -64,7 +64,8 @@
       { "id": "lang-1", "title": "PrSM 1", "path": "docs/en/spec/lang-1.md" },
       { "id": "lang-2", "title": "PrSM 2", "path": "docs/en/spec/lang-2.md" },
       { "id": "lang-3", "title": "PrSM 3", "path": "docs/en/spec/lang-3.md" },
-      { "id": "lang-4", "title": "PrSM 4", "path": "docs/en/spec/lang-4.md" }
+      { "id": "lang-4", "title": "PrSM 4", "path": "docs/en/spec/lang-4.md" },
+      { "id": "lang-5", "title": "PrSM 5", "path": "docs/en/spec/lang-5.md" }
     ]
   },
   {

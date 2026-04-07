@@ -41,9 +41,9 @@ component PlayerController : MonoBehaviour {
 | 7 | `+` `-` | 왼쪽 | 덧셈/뺄셈 |
 | 8 | `*` `/` `%` | 왼쪽 | 곱셈/나눗셈/나머지 |
 | 9 | `!` `-` (단항) `await` | 오른쪽 | 단항 부정/NOT, await |
-| 10 | `.` `?.` `!!` `[]` `()` | 왼쪽 | 후위 (멤버, 안전 호출, 단언, 인덱스, 호출) |
+| 10 | `.` `?.` `!!` `[]` `?[]` `()` | 왼쪽 | 후위 (멤버, 안전 호출, 단언, 인덱스, 안전 인덱스, 호출) |
 
-`as`, `as!`, `in`은 PrSM 4에서 도입되었습니다. `await`는 `async`/`await`(PrSM 4 부터)에서 추가된 prefix 형식입니다.
+`as`, `as!`, `in`은 PrSM 4에서 도입되었습니다. `await`는 `async`/`await`(PrSM 4 부터)에서 추가된 prefix 형식입니다. `?[]`는 안전 인덱스 형식 (PrSM 5 부터)입니다.
 
 ## 대입 연산자
 
@@ -107,6 +107,50 @@ val info = "score: ${player.score + 1}"   // 식 형식
 wait 1.5s     // 1.5초 → new WaitForSeconds(1.5f)
 wait 500ms    // 500밀리초 → new WaitForSeconds(0.5f)
 ```
+
+## 전처리 디렉티브 (PrSM 5 부터)
+
+`#if` / `#elif` / `#else` / `#endif` 디렉티브는 모든 statement, member, top-level 위치에서 사용할 수 있습니다. PrSM은 자주 쓰이는 플랫폼 심볼 집합을 정의하여 대응하는 `UNITY_*` 정의로 변환합니다. 그 외 식별자는 그대로 통과됩니다.
+
+```prsm
+component Player : MonoBehaviour {
+    update {
+        move()
+
+        #if editor
+            drawDebugGizmos()
+        #endif
+
+        #if ios && !editor
+            handleHaptics()
+        #elif android
+            handleVibration()
+        #endif
+    }
+
+    #if debug
+        func logState() { log("hp=$hp, pos=${transform.position}") }
+    #endif
+}
+```
+
+규범적 심볼 매핑:
+
+| PrSM 심볼 | C# 정의 |
+|-----------|---------|
+| `editor` | `UNITY_EDITOR` |
+| `debug` | `DEBUG` |
+| `release` | `!DEBUG` |
+| `ios` | `UNITY_IOS` |
+| `android` | `UNITY_ANDROID` |
+| `standalone` | `UNITY_STANDALONE` |
+| `il2cpp` | `ENABLE_IL2CPP` |
+| `mono` | `ENABLE_MONO` |
+| `unity20223` | `UNITY_2022_3_OR_NEWER` |
+| `unity20231` | `UNITY_2023_1_OR_NEWER` |
+| `unity6` | `UNITY_6000_0_OR_NEWER` |
+
+종료되지 않은 `#if` 블록은 E151, 대응하는 `#if`가 없는 `#elif` / `#else`는 E152, 알려지지 않은 심볼은 그대로 통과되며 W034가 발생합니다.
 
 ## 형식 문법
 

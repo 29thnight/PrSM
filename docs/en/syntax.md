@@ -82,9 +82,9 @@ From lowest to highest binding power:
 | 7 | `+` `-` | Left | Additive |
 | 8 | `*` `/` `%` | Left | Multiplicative |
 | 9 | `!` `-` (unary) `await` | Right | Unary negation/not, await |
-| 10 | `.` `?.` `!!` `[]` `()` | Left | Postfix (member, safe call, assert, index, call) |
+| 10 | `.` `?.` `!!` `[]` `?[]` `()` | Left | Postfix (member, safe call, assert, index, safe index, call) |
 
-`as`, `as!`, `in` are introduced by PrSM 4. `await` is the prefix form added by `async`/`await` (since PrSM 4).
+`as`, `as!`, `in` are introduced by PrSM 4. `await` is the prefix form added by `async`/`await` (since PrSM 4). `?[]` is the safe-index form (since PrSM 5).
 
 ## Assignment operators
 
@@ -148,6 +148,50 @@ Numeric literals with a time suffix:
 wait 1.5s     // 1.5 seconds → new WaitForSeconds(1.5f)
 wait 500ms    // 500 milliseconds → new WaitForSeconds(0.5f)
 ```
+
+## Preprocessor directives (since PrSM 5)
+
+`#if` / `#elif` / `#else` / `#endif` directives may appear at any statement, member, or top-level position. PrSM defines a curated set of platform symbols that translate to the corresponding `UNITY_*` defines; any other identifier passes through verbatim.
+
+```prsm
+component Player : MonoBehaviour {
+    update {
+        move()
+
+        #if editor
+            drawDebugGizmos()
+        #endif
+
+        #if ios && !editor
+            handleHaptics()
+        #elif android
+            handleVibration()
+        #endif
+    }
+
+    #if debug
+        func logState() { log("hp=$hp, pos=${transform.position}") }
+    #endif
+}
+```
+
+The normative symbol mapping is:
+
+| PrSM symbol | C# define |
+|-------------|-----------|
+| `editor` | `UNITY_EDITOR` |
+| `debug` | `DEBUG` |
+| `release` | `!DEBUG` |
+| `ios` | `UNITY_IOS` |
+| `android` | `UNITY_ANDROID` |
+| `standalone` | `UNITY_STANDALONE` |
+| `il2cpp` | `ENABLE_IL2CPP` |
+| `mono` | `ENABLE_MONO` |
+| `unity20223` | `UNITY_2022_3_OR_NEWER` |
+| `unity20231` | `UNITY_2023_1_OR_NEWER` |
+| `unity6` | `UNITY_6000_0_OR_NEWER` |
+
+An unterminated `#if` block produces E151. `#elif` / `#else` without a matching `#if` produces E152. An unknown symbol passes through verbatim and emits W034.
 
 ## Formal grammar
 

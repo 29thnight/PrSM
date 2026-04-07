@@ -149,6 +149,60 @@ Change `version = "3"` and remove v4-only syntax (`try`/`catch`, lambdas, collec
 
 ---
 
+## PrSM 4 → PrSM 5
+
+### Activation
+
+```toml
+[language]
+version = "5"
+```
+
+`version = "5"` implicitly enables all 22 Language 5 features and the 12 limitation fixes that complete partial Language 4 features. The full feature flag list is documented in [PrSM 5](spec/lang-5.md).
+
+### What's new
+
+PrSM 5 closes the remaining Unity-relevant gaps with C# and resolves Language 4 limitations. It adds 22 syntactic features and 12 limitation fixes:
+
+| Category | Highlights |
+|----------|------------|
+| High-impact syntax | General `yield return`, attribute targets (`@field`/`@property`/`@param`/`@return`/`@type`), preprocessor directives (`#if editor`/`#if debug` etc.) |
+| Common API needs | `ref`/`out` parameters, `vararg` (params), default parameter values, named arguments, `nameof` operator, `@burst` annotation, UniTask auto-detection |
+| Pattern matching | Relational patterns (`> 80`), pattern combinators (`and`/`or`/`not`), positional patterns (`Point(x, y)`), property patterns (`{ hp: > 0 }`), `with` expression |
+| Type system | `unmanaged`/`notnull`/`default`/`new()` constraints, `ref` local and `ref` return, `ref struct`, `stackalloc`, `Span<T>` slice syntax, `partial` declarations, generalized nested declarations |
+| Tooling and DX | Discard `_`, conditional indexer `?[i]`, throw expression, LSP refactor dispatch, DAP debugger adapter |
+| Limitation fixes | `bind X to Y` continuous push, W031 (bind never read), state-machine reserved-name relaxation, `opt.linq` element type inference, `opt.structcopy` realization, optimizer CLI flag, cross-context `unlisten` resolution |
+
+### Breaking changes
+
+None. All Language 4 programs compile under Language 5 without modification. The new contextual keywords (`yield`, `partial`, `nameof`, `vararg`, `unmanaged`, `notnull`, `ref`, `stackalloc`, `with`) remain valid as identifiers in non-keyword positions.
+
+The `@burst` annotation now triggers diagnostics E137–E139 and W028 directly. If existing code relies on the Language 4 naming heuristic (`burst_*`) for Burst analysis, attach `@burst` explicitly to retain the same behavior.
+
+The `async` lowering now defaults to `Task` when the UniTask package is not detected in `Packages/manifest.json`. Projects that previously relied on UniTask being emitted unconditionally should either install the UniTask package or set `[language.async] backend = "unitask"` and accept the W035 warning.
+
+### Migration steps
+
+1. Set `version = "5"` in `.prsmproject` (or use **Window > PrSM > Project Settings**)
+2. Run `prism build` — all existing Language 4 code should compile unchanged
+3. Replace `intrinsic { yield return ...; }` blocks with native `yield` / `yield return` / `yield break`
+4. Replace `intrinsic { #if UNITY_EDITOR ... #endif }` blocks with native `#if editor` directives
+5. Replace `intrinsic` blocks for `Physics.Raycast(out var hit)` and other `out`-parameter calls with native `out val` syntax
+6. Adopt new patterns incrementally:
+   - Use relational patterns and combinators in `when` instead of nested `if` chains
+   - Convert manual `Deconstruct` use to positional patterns (`Point(x, y)`)
+   - Convert HUD update glue to `bind X to Y` (now performs continuous push)
+   - Use `@burst` annotations explicitly instead of relying on the `burst_*` naming heuristic
+7. Add `@field(serializeField)` (or just `serialize`) on auto-properties exposed in the Inspector
+8. Split large components into `partial component` declarations across multiple files
+9. Use the DAP debugger adapter from VS Code to set breakpoints directly on `.prsm` lines
+
+### Rollback
+
+Change `version = "4"` and remove v5-only syntax (`yield`, `#if`, `partial`, relational patterns, `with`, `ref` locals, `stackalloc`, `?[]`, `throw` expressions, etc.).
+
+---
+
 ## Feature flag reference
 
 | Flag | Since | Description |
@@ -192,5 +246,39 @@ Change `version = "3"` and remove v4-only syntax (`try`/`catch`, lambdas, collec
 | `error-enhancement` | PrSM 4 | Rust/Elm-style diagnostics |
 | `refactor-tools` | PrSM 4 | LSP refactoring code actions |
 | `debugger` | PrSM 4 | Flat source map generation |
+| `yield-general` | PrSM 5 | General `yield return` / `yield break` in coroutines |
+| `attribute-target` | PrSM 5 | `@field` / `@property` etc. attribute targets |
+| `preprocessor` | PrSM 5 | `#if` / `#elif` / `#else` / `#endif` directives |
+| `ref-out-params` | PrSM 5 | `ref` / `out` parameters |
+| `vararg` | PrSM 5 | `vararg` (params) parameters |
+| `default-params` | PrSM 5 | Default parameter values |
+| `named-args` | PrSM 5 | Named call arguments |
+| `nameof` | PrSM 5 | `nameof` operator |
+| `burst-annotation` | PrSM 5 | `@burst` annotation |
+| `unitask-detect` | PrSM 5 | UniTask auto-detection |
+| `bind-push` | PrSM 5 | bind X to Y continuous push |
+| `bind-unread-warn` | PrSM 5 | bind W031 implementation |
+| `state-name-relax` | PrSM 5 | State machine reserved name allowance |
+| `opt-linq-types` | PrSM 5 | opt.linq element type inference |
+| `opt-structcopy-ref` | PrSM 5 | opt.structcopy ref readonly realization |
+| `optimizer-cli` | PrSM 5 | optimizer driver auto-wire and CLI |
+| `unlisten-cross` | PrSM 5 | cross-context unlisten resolution |
+| `relational-pattern` | PrSM 5 | relational pattern |
+| `pattern-combinator` | PrSM 5 | and / or / not pattern combinators |
+| `positional-pattern` | PrSM 5 | positional pattern |
+| `property-pattern` | PrSM 5 | property pattern |
+| `with-expr` | PrSM 5 | with expression |
+| `unmanaged-constraint` | PrSM 5 | unmanaged / notnull / default constraints |
+| `ref-local` | PrSM 5 | ref local and ref return |
+| `ref-struct` | PrSM 5 | ref struct declaration |
+| `stackalloc` | PrSM 5 | stackalloc expression |
+| `span-slice` | PrSM 5 | span / array range slicing |
+| `partial` | PrSM 5 | partial class / component / struct |
+| `nested-decl` | PrSM 5 | generalized nested declarations |
+| `discard` | PrSM 5 | discard `_` expression / pattern |
+| `safe-index` | PrSM 5 | conditional indexer `?[i]` |
+| `throw-expr` | PrSM 5 | throw expression |
+| `lsp-refactor-dispatch` | PrSM 5 | LSP refactor code action dispatch |
+| `dap-adapter` | PrSM 5 | DAP debug adapter |
 
 Setting `version = "N"` implicitly enables all features for that version and below.

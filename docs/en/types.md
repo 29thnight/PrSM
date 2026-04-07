@@ -168,6 +168,76 @@ val enemies: EnemyList = []
 
 Aliases shall not form cycles (E126) and shall not shadow built-in types (E127).
 
+## `unmanaged` and other generic constraints (since PrSM 5)
+
+PrSM 5 extends the Language 3 generic constraints with `unmanaged`, `notnull`, `default`, and `new()`. The `unmanaged` constraint requires `T` to be a value type with no managed references at any depth — the standard constraint required for Burst-compatible generic methods.
+
+```prsm
+@burst
+func sum<T>(arr: NativeArray<T>): T where T : unmanaged, INumber<T> {
+    var total = T.Zero
+    for i in 0..arr.length {
+        total += arr[i]
+    }
+    return total
+}
+```
+
+```csharp
+[BurstCompile]
+public T sum<T>(NativeArray<T> arr) where T : unmanaged, INumber<T>
+{
+    var total = T.Zero;
+    for (int i = 0; i < arr.Length; i++) { total += arr[i]; }
+    return total;
+}
+```
+
+`unmanaged` and `class` constraints on the same parameter produces E174. `notnull` on a value type parameter produces E175.
+
+## `ref` local and `ref` return (since PrSM 5)
+
+`val ref name = ref expr` creates a read-only reference local. `var ref name = ref expr` creates a mutable reference local. A function may declare a `ref` return type to return a reference.
+
+```prsm
+struct Particles(positions: NativeArray<Float3>) {
+    func getPosition(index: Int): ref Float3 = ref positions[index]
+}
+
+func process(particles: Particles) {
+    val ref pos = ref particles.getPosition(0)
+    log("position: $pos")  // no copy
+}
+```
+
+```csharp
+public struct Particles
+{
+    public NativeArray<float3> positions;
+    public ref float3 getPosition(int index) => ref positions[index];
+}
+
+public void process(Particles particles)
+{
+    ref readonly float3 pos = ref particles.getPosition(0);
+    Debug.Log($"position: {pos}");
+}
+```
+
+`val ref` lowers to C# `ref readonly`; `var ref` lowers to C# `ref`. A `ref` local outliving its referenced storage produces E176. A `ref` return that references a local variable produces E177. A `val ref` used in a write context produces E178.
+
+## `Span<T>` and `ReadOnlySpan<T>` (since PrSM 5)
+
+`Span<T>` and `ReadOnlySpan<T>` are recognized as built-in types and may be used directly in declarations. They serve as the result type for `stackalloc` and array range slicing.
+
+```prsm
+val buffer: Span<Int> = stackalloc[Int](10)
+val arr = [1, 2, 3, 4, 5]
+val middle: Span<Int> = arr[1..4]
+```
+
+See [Operators](operators.md) for `stackalloc` and range slicing details.
+
 ## Complete type mapping reference
 
 | PrSM | C# | Category |

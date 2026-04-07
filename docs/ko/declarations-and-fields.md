@@ -448,6 +448,153 @@ component BulletSpawner : MonoBehaviour {
 
 풀은 프리팹을 위해 동일한 타입의 `serialize` 필드를 자동으로 매칭합니다. 프리팹이 없으면 E098이, `pool`이 component 외부에 있으면 E099가 발생합니다.
 
+## 프로퍼티의 어트리뷰트 타깃 (PrSM 5 부터)
+
+자동 프로퍼티에 `serialize` 한정자가 붙으면 `[field: SerializeField]` 백킹 필드로 변환됩니다 — 자동 프로퍼티를 인스펙터에 노출하면서 공개 표면은 프로퍼티로 유지하는 Unity 표준 패턴입니다. 일반 형식인 `@field(name)`, `@property(name)`, `@param(name)`, `@return(name)`, `@type(name)`을 사용하면 임의 선언의 비기본 타깃에 임의의 C# 어트리뷰트를 부착할 수 있습니다.
+
+```prsm
+component Player : MonoBehaviour {
+    serialize var hp: Int = 100
+        get
+        set { field = Mathf.clamp(value, 0, maxHp) }
+
+    @field(nonSerialized)
+    var transientCache: Map<String, Int>
+
+    @return(notNull)
+    func getTarget(): Transform = currentTarget
+}
+```
+
+```csharp
+[field: SerializeField]
+public int hp
+{
+    get;
+    set { field = Mathf.Clamp(value, 0, maxHp); }
+}
+
+[field: NonSerialized]
+public Dictionary<string, int> transientCache { get; set; }
+
+[return: NotNull]
+public Transform getTarget() => currentTarget;
+```
+
+자동 프로퍼티의 `serialize`는 `@field(serializeField)`의 편의 표기입니다. 선택한 선언이 어트리뷰트 타깃을 지원하지 않으면 E149, 자동 프로퍼티로 변환할 수 없는 액세서를 가진 프로퍼티에 `serialize`가 붙으면 E150이 발생합니다.
+
+## `partial` 선언 (PrSM 5 부터)
+
+`partial` 선언은 특정 타입에 대해 "파일당 단일 선언" 규칙을 완화합니다. 모든 부분이 동일한 식별자, `partial` 한정자, 동일한 타입 매개변수 / where clause를 공유하면 여러 파일이 같은 `partial` 선언에 기여할 수 있습니다.
+
+`Player.prsm`:
+```prsm
+partial component Player : MonoBehaviour {
+    serialize speed: Float = 5.0
+    require rb: Rigidbody
+
+    update { move() }
+}
+```
+
+`Player.combat.prsm`:
+```prsm
+partial component Player {
+    bind hp: Int = 100
+
+    func takeDamage(amount: Int) {
+        hp -= amount
+        if hp <= 0 { die() }
+    }
+}
+```
+
+컴파일러는 lowering 중 모든 부분을 결합하여 단일 C# `partial class` (또는 `partial struct`)를 출력합니다. `partial`은 컨텍스트 키워드입니다. 같은 이름의 두 선언 중 하나만 `partial`을 가지면 E184, 부분 간 타입 매개변수 불일치는 E185, 베이스 클래스 또는 인터페이스 불일치는 E186이 발생합니다.
+
+## 일반화된 nested 선언 (PrSM 5 부터)
+
+모든 `class`, `component`, `struct` 본문에 nested 타입 선언을 둘 수 있습니다. 언어 4는 `sealed class` 안에서만 nested 선언을 허용했고, 언어 5는 이를 일반화합니다.
+
+```prsm
+component Inventory : MonoBehaviour {
+    data class Slot(item: Item, count: Int)
+
+    enum SortOrder { ByName, ByValue, ByRarity }
+
+    var slots: List<Slot> = []
+    var sortOrder: SortOrder = SortOrder.ByName
+
+    func addItem(item: Item) {
+        slots.add(Slot(item, 1))
+    }
+}
+```
+
+```csharp
+public class Inventory : MonoBehaviour
+{
+    [System.Serializable]
+    public class Slot
+    {
+        public Item item;
+        public int count;
+        public Slot(Item item, int count) { this.item = item; this.count = count; }
+    }
+
+    public enum SortOrder { ByName, ByValue, ByRarity }
+    public List<Slot> slots = new List<Slot>();
+    public SortOrder sortOrder = SortOrder.ByName;
+    public void addItem(Item item) { slots.Add(new Slot(item, 1)); }
+}
+```
+
+nested `component` 선언은 금지됩니다 (E187). 컴포넌트는 top-level이어야 합니다.
+
+## `ref struct` 선언 (PrSM 5 부터)
+
+`ref struct`는 `ref` 필드를 포함할 수 있는 스택 전용 값 타입을 선언합니다. C# ref struct 제약을 따릅니다: 비-ref struct의 필드가 될 수 없고, 박싱될 수 없으며, C# 13+의 `allows ref struct` 없이는 제네릭 타입 인자로 사용할 수 없습니다.
+
+```prsm
+ref struct Slice<T>(start: Int, length: Int) {
+    func get(i: Int): T = intrinsic { return _data[start + i]; }
+}
+```
+
+```csharp
+public ref struct Slice<T>
+{
+    public int start;
+    public int length;
+    public Slice(int start, int length) { this.start = start; this.length = length; }
+    public T get(int i) { return _data[start + i]; }
+}
+```
+
+비-ref struct 또는 클래스의 필드로 선언된 `ref struct`는 E179, `allows ref struct` 없이 제네릭 타입 인자로 사용된 `ref struct`는 E180을 발생시킵니다.
+
+## `@burst` 어노테이션 (PrSM 5 부터)
+
+`@burst`는 함수나 struct를 Unity Burst 컴파일 대상으로 표시합니다. 컴파일러는 대응하는 `[BurstCompile]` 어트리뷰트를 출력하고, 언어 4의 Burst 호환성 분석기를 어노테이션 대상에 실행합니다. 어노테이션 옵션은 일치하는 어트리뷰트 인자로 변환됩니다.
+
+```prsm
+@burst
+func calculateForces(positions: NativeArray<Float3>, forces: NativeArray<Float3>) {
+    for i in 0..positions.length {
+        forces[i] = computeGravity(positions[i])
+    }
+}
+
+@burst(compileSynchronously = true)
+struct DamageJob : IJobParallelFor {
+    var damages: NativeArray<Int>
+    func execute(index: Int) {
+        damages[index] = damages[index] * 2
+    }
+}
+```
+
+언어 4의 진단 E137–E139와 W028은 이제 명명 휴리스틱(`burst_*`) 대신 `@burst` 어노테이션을 통해 발생합니다. `component`, `asset`, `interface`처럼 지원되지 않는 선언 종류에 `@burst`가 붙으면 E165가 발생합니다.
+
 ## 초기화 순서
 
 component의 초기화 순서:

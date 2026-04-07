@@ -161,6 +161,159 @@ when target {
 }
 ```
 
+### 관계 패턴 (PrSM 5 부터)
+
+관계 패턴은 주어진 연산자(`<`, `>`, `<=`, `>=`)로 subject 값과 피연산자를 비교하여 일치하면 매칭됩니다. 정수, 부동소수점, `IComparable<T>` 타입에서 사용 가능합니다.
+
+```prsm
+when hp {
+    > 80 => "Healthy"
+    > 30 => "Hurt"
+    > 0  => "Critical"
+    else => "Dead"
+}
+```
+
+```csharp
+hp switch
+{
+    > 80 => "Healthy",
+    > 30 => "Hurt",
+    > 0  => "Critical",
+    _    => "Dead",
+}
+```
+
+피연산자 타입이 subject 타입과 일치하지 않으면 E167, 이전 arm에 가려지는 후속 관계 arm은 W037을 발생시킵니다.
+
+### 패턴 결합자 (PrSM 5 부터)
+
+`and`, `or`, `not`은 패턴 대수를 형성합니다. 우선순위는 `not` > `and` > `or`입니다. 새 `or` 키워드는 언어 4의 쉼표-OR 패턴과 통합됩니다.
+
+```prsm
+when x {
+    > 0 and < 100 => "valid range"
+    is Enemy or is Boss => "hostile"
+    not null => "present"
+    else => "missing"
+}
+```
+
+```csharp
+x switch
+{
+    > 0 and < 100 => "valid range",
+    Enemy or Boss => "hostile",
+    not null => "present",
+    _ => "missing",
+}
+```
+
+`or` 패턴 arm이 서로 다른 변수를 바인딩하면 E168이 발생합니다.
+
+### 위치 패턴 (PrSM 5 부터)
+
+위치 패턴은 subject가 지정된 타입이고 각 서브 패턴이 대응하는 분해 출력과 매칭될 때 일치합니다. 언어 2의 enum payload binding을 모든 분해 가능한 타입(`data class`, `struct`, 튜플)으로 일반화합니다.
+
+```prsm
+data class Point(x: Int, y: Int)
+
+when point {
+    Point(0, 0) => "origin"
+    Point(0, _) => "on y axis"
+    Point(_, 0) => "on x axis"
+    Point(x, y) if x == y => "diagonal"
+    else => "elsewhere"
+}
+```
+
+```csharp
+point switch
+{
+    Point(0, 0) => "origin",
+    Point(0, _) => "on y axis",
+    Point(_, 0) => "on x axis",
+    Point(var x, var y) when x == y => "diagonal",
+    _ => "elsewhere",
+}
+```
+
+`data class`와 `struct`의 경우 컴파일러가 lowering 중에 `Deconstruct` 메서드를 자동 생성합니다. 위치 패턴 arity가 타입의 분해와 일치하지 않으면 E169가 발생합니다.
+
+### 프로퍼티 패턴 (PrSM 5 부터)
+
+프로퍼티 패턴은 subject가 (선택적으로 지정된) 타입이고 각 명명 프로퍼티 값이 대응하는 서브 패턴과 매칭될 때 일치합니다. 프로퍼티 이름은 공개 읽기 가능 멤버여야 합니다.
+
+```prsm
+when target {
+    Enemy { hp: > 0, level: > 10 } => "tough enemy"
+    Enemy { hp: 0 } => "dead enemy"
+    Player { isInvincible: true } => "untouchable"
+    else => "ignore"
+}
+```
+
+```csharp
+target switch
+{
+    Enemy { hp: > 0, level: > 10 } => "tough enemy",
+    Enemy { hp: 0 } => "dead enemy",
+    Player { isInvincible: true } => "untouchable",
+    _ => "ignore",
+}
+```
+
+존재하지 않는 멤버를 참조하는 프로퍼티 패턴은 E170, 읽기 불가능한 멤버는 E171을 발생시킵니다.
+
+### `with` 표현식 (PrSM 5 부터)
+
+`expr with { f = v, … }`는 지정된 필드를 교체한 `expr`의 복사본을 만듭니다. `data class`는 C# `record with` 표현식으로 변환됩니다. `struct` 선언과 Unity 내장 struct 타입은 임시 복사본 형식을 사용합니다.
+
+```prsm
+val origin = transform.position
+val grounded = origin with { y = 0.0 }
+
+data class PlayerStats(hp: Int, mp: Int, level: Int)
+val current = PlayerStats(100, 50, 5)
+val healed = current with { hp = 100 }
+val leveled = healed with { level = 6, mp = 100 }
+```
+
+```csharp
+var origin = transform.position;
+Vector3 grounded;
+{
+    var _t = origin;
+    _t.y = 0.0f;
+    grounded = _t;
+}
+
+public record PlayerStats(int hp, int mp, int level);
+var current = new PlayerStats(100, 50, 5);
+var healed = current with { hp = 100 };
+var leveled = healed with { level = 6, mp = 100 };
+```
+
+`data class`, `struct`, 알려진 Unity struct가 아닌 타입에 `with`을 사용하면 E172, 쓰기 불가능한 필드에 사용하면 E173이 발생합니다.
+
+### Discard `_` (PrSM 5 부터)
+
+`_`는 `out` 인자 위치, 분해 바인딩, `when` 패턴에서 "이 값은 의도적으로 무시된다"를 의미합니다. `_`로부터 읽기는 금지됩니다.
+
+```prsm
+physics.raycast(ray, out _)
+
+val (_, name) = getResult()
+
+when point {
+    Point(0, _) => "on x = 0"
+    Point(_, 0) => "on y = 0"
+    _ => "elsewhere"
+}
+```
+
+discard `_`로부터 읽기는 E188을 발생시킵니다.
+
 ## `try` / `catch` / `finally` (PrSM 4 부터)
 
 예외가 일급 시민이 됩니다. `throw`에서 `new` 키워드는 생략됩니다. `try`는 정확히 하나의 `catch` 절이 있을 때 표현식으로 사용할 수 있습니다.

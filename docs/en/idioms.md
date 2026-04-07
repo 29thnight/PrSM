@@ -335,3 +335,116 @@ component Enemy : MonoBehaviour, IDamageable {
 ```
 
 Use interfaces with `require` for loose coupling: `require target: IDamageable` instead of `require target: Enemy`.
+
+## PrSM 5 idioms (since PrSM 5)
+
+### Replace `intrinsic` with `yield` for streaming sequences
+
+Before PrSM 5, generating a value sequence inside a coroutine often required dropping into `intrinsic`. With general `yield`, the same logic stays in PrSM:
+
+```prsm
+coroutine spawnPositions(): Seq<Vector3> {
+    for x in 0..10 {
+        for z in 0..10 {
+            yield vec3(x, 0, z)
+        }
+    }
+}
+```
+
+### Use `serialize` on auto-properties for Inspector exposure
+
+A `serialize` modifier on a `var` with explicit `get`/`set` accessors lowers to `[field: SerializeField]`. This keeps the public surface a property while still serializing the backing field — the idiomatic Unity pattern that previously required `intrinsic` or a manual paired private field.
+
+```prsm
+component Player : MonoBehaviour {
+    serialize var hp: Int = 100
+        get
+        set { field = Mathf.clamp(value, 0, maxHp) }
+}
+```
+
+### Guard editor-only code with `#if editor`
+
+Editor-only debug helpers and gizmo drawing belong inside `#if editor` blocks instead of `intrinsic { #if UNITY_EDITOR ... #endif }`.
+
+```prsm
+update {
+    move()
+
+    #if editor
+        drawDebugGizmos()
+    #endif
+}
+```
+
+### Prefer `out val` for `Physics.Raycast`-style APIs
+
+Native `out` parameter support removes the need for `intrinsic` blocks around the most common Unity API call sites.
+
+```prsm
+if physics.raycast(ray, out val hit) {
+    log("hit ${hit.collider.name}")
+}
+```
+
+### Use relational and combinator patterns to flatten `if` chains
+
+Relational patterns and the `and`/`or`/`not` combinators turn nested `if` chains into a single `when` expression:
+
+```prsm
+val tier = when hp {
+    > 80 => "Healthy"
+    > 30 and < 80 => "Hurt"
+    > 0 => "Critical"
+    else => "Dead"
+}
+```
+
+### Split large components with `partial`
+
+Components that mix gameplay state, combat behavior, and UI binding often grow too large for a single file. `partial component` lets the same component span multiple files without breaking the one-declaration-per-file rule.
+
+```prsm
+// Player.movement.prsm
+partial component Player : MonoBehaviour {
+    serialize speed: Float = 5.0
+    update { move() }
+}
+
+// Player.combat.prsm
+partial component Player {
+    bind hp: Int = 100
+    func takeDamage(amount: Int) { hp -= amount }
+}
+```
+
+### Use `with` instead of mutable struct copies
+
+For Unity struct types, the `with` expression captures the "copy and tweak one field" pattern without manual scratch variables:
+
+```prsm
+val grounded = transform.position with { y = 0.0 }
+```
+
+### Use `nameof` instead of string literals for property notification
+
+The `nameof` operator catches typos at compile time. Combined with `bind`, the compiler now wires `OnPropertyChanged(nameof(hp))` automatically — but `nameof` is still the right tool for any handwritten event that names a member.
+
+```prsm
+event onPropertyChanged: (String) => Unit
+onPropertyChanged.invoke(nameof(hp))
+```
+
+### Annotate Burst targets with `@burst` instead of relying on naming
+
+Language 5 routes E137–E139 and W028 through the `@burst` annotation rather than the `burst_*` naming heuristic. Annotate explicitly to opt in:
+
+```prsm
+@burst
+func calculateForces(positions: NativeArray<Float3>, forces: NativeArray<Float3>) {
+    for i in 0..positions.length {
+        forces[i] = computeGravity(positions[i])
+    }
+}
+```

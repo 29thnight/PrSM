@@ -149,6 +149,76 @@ val enemies: EnemyList = []
 
 별칭은 순환을 형성할 수 없으며 (E126) 내장 타입을 가릴 수 없습니다 (E127).
 
+## `unmanaged` 와 기타 제네릭 제약 (PrSM 5 부터)
+
+PrSM 5는 언어 3의 제네릭 제약을 `unmanaged`, `notnull`, `default`, `new()`로 확장합니다. `unmanaged` 제약은 `T`가 어떤 깊이에서도 관리 참조를 갖지 않는 값 타입이어야 함을 요구하며, Burst 호환 제네릭 메서드의 표준 제약입니다.
+
+```prsm
+@burst
+func sum<T>(arr: NativeArray<T>): T where T : unmanaged, INumber<T> {
+    var total = T.Zero
+    for i in 0..arr.length {
+        total += arr[i]
+    }
+    return total
+}
+```
+
+```csharp
+[BurstCompile]
+public T sum<T>(NativeArray<T> arr) where T : unmanaged, INumber<T>
+{
+    var total = T.Zero;
+    for (int i = 0; i < arr.Length; i++) { total += arr[i]; }
+    return total;
+}
+```
+
+같은 매개변수에 `unmanaged`와 `class` 제약을 동시에 사용하면 E174, 값 타입 매개변수에 `notnull`을 사용하면 E175가 발생합니다.
+
+## `ref` 로컬과 `ref` 반환 (PrSM 5 부터)
+
+`val ref name = ref expr`은 읽기 전용 참조 로컬을 만듭니다. `var ref name = ref expr`은 가변 참조 로컬을 만듭니다. 함수는 `ref` 반환 타입을 선언해 참조를 반환할 수 있습니다.
+
+```prsm
+struct Particles(positions: NativeArray<Float3>) {
+    func getPosition(index: Int): ref Float3 = ref positions[index]
+}
+
+func process(particles: Particles) {
+    val ref pos = ref particles.getPosition(0)
+    log("position: $pos")  // 복사 없음
+}
+```
+
+```csharp
+public struct Particles
+{
+    public NativeArray<float3> positions;
+    public ref float3 getPosition(int index) => ref positions[index];
+}
+
+public void process(Particles particles)
+{
+    ref readonly float3 pos = ref particles.getPosition(0);
+    Debug.Log($"position: {pos}");
+}
+```
+
+`val ref`는 C# `ref readonly`로, `var ref`는 C# `ref`로 변환됩니다. `ref` 로컬이 참조된 저장소보다 오래 살면 E176, 로컬 변수를 참조하는 `ref` 반환은 E177, 쓰기 컨텍스트에서 사용된 `val ref`는 E178이 발생합니다.
+
+## `Span<T>` 와 `ReadOnlySpan<T>` (PrSM 5 부터)
+
+`Span<T>`와 `ReadOnlySpan<T>`는 내장 타입으로 인식되어 선언에서 직접 사용할 수 있습니다. `stackalloc`과 배열 range 슬라이싱의 결과 타입으로 사용됩니다.
+
+```prsm
+val buffer: Span<Int> = stackalloc[Int](10)
+val arr = [1, 2, 3, 4, 5]
+val middle: Span<Int> = arr[1..4]
+```
+
+`stackalloc`과 range 슬라이싱 세부 사항은 [연산자](operators.md)를 참조하세요.
+
 ## 전체 타입 매핑 참조
 
 | PrSM | C# | 분류 |

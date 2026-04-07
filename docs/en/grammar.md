@@ -274,3 +274,150 @@ NEWLINE         = "\n" ;
 LETTER          = "a".."z" | "A".."Z" | "_" ;
 DIGIT           = "0".."9" ;
 ```
+
+## PrSM 5 grammar additions (since PrSM 5)
+
+Language 5 extends the grammar above with the following productions.
+
+### Declaration modifiers
+
+```ebnf
+ComponentDecl   = { Annotation } [ "partial" ] [ "singleton" ] "component" IDENT
+                  [ ":" TypeRef ] "{" { ComponentMember } "}" ;
+
+ClassDecl       = { Annotation } [ "partial" ] [ ClassMod ] "class" IDENT
+                  [ ":" TypeRef ] "{" { ClassMember } "}" ;
+
+StructDecl      = { Annotation } [ "partial" ] [ "ref" ] "struct" IDENT
+                  "(" ParamList ")" [ "{" { ClassMember } "}" ] ;
+
+NestedDecl      = ClassDecl | StructDecl | EnumDecl | DataClassDecl | InterfaceDecl ;
+
+ComponentMember = ... | NestedDecl ;
+ClassMember     = ... | NestedDecl ;
+```
+
+### Parameters
+
+```ebnf
+Param           = [ ParamMod ] IDENT ":" TypeRef [ "=" DefaultExpr ] ;
+
+ParamMod        = "ref" | "out" | "vararg" ;
+
+DefaultExpr     = LiteralExpr | NullLiteral | "default" ;
+```
+
+### Coroutine and yield
+
+```ebnf
+YieldStmt       = "yield" Expr NEWLINE
+                | "yield" "break" NEWLINE
+                | "yield" "return" Expr NEWLINE ;
+
+Statement       = ... | YieldStmt ;
+```
+
+### Variable declarations
+
+```ebnf
+VarDecl         = ( "val" | "var" ) [ "ref" ] IDENT [ ":" TypeRef ]
+                  "=" [ "ref" ] Expr NEWLINE ;
+```
+
+### Type references
+
+```ebnf
+TypeRef         = [ "ref" ] QualifiedName [ "<" TypeRefList ">" ] [ "?" ] ;
+
+WhereConstraint = TypeRef
+                | "class"
+                | "struct"
+                | "unmanaged"
+                | "notnull"
+                | "default"
+                | "new" "(" ")" ;
+```
+
+### Attribute targets
+
+```ebnf
+AttrTargetDecl  = "@" AttrTarget "(" AttrName [ "," AttrArgs ] ")" NEWLINE ;
+AttrTarget      = "field" | "property" | "param" | "return" | "type" ;
+```
+
+### Preprocessor
+
+```ebnf
+IfDirective     = "#if" Condition Block { ElseIfDirective } [ ElseDirective ] "#endif" ;
+ElseIfDirective = "#elif" Condition Block ;
+ElseDirective   = "#else" Block ;
+Condition       = SymbolName
+                | SymbolName "(" Args ")"
+                | "!" Condition
+                | Condition "&&" Condition
+                | Condition "||" Condition
+                | "(" Condition ")" ;
+SymbolName      = "editor" | "debug" | "release" | "ios" | "android"
+                | "standalone" | "il2cpp" | "mono"
+                | "unity20223" | "unity20231" | "unity6"
+                | IDENT ;
+```
+
+### Patterns
+
+```ebnf
+Pattern         = OrPattern ;
+OrPattern       = AndPattern { "or" AndPattern } ;
+AndPattern      = NotPattern { "and" NotPattern } ;
+NotPattern      = [ "not" ] PrimaryPattern ;
+
+PrimaryPattern  = LiteralPattern
+                | RelationalPattern
+                | EnumPattern
+                | PositionalPattern
+                | PropertyPattern
+                | BindingPattern
+                | DiscardPattern ;
+
+RelationalPattern = ( "<" | ">" | "<=" | ">=" ) Expr ;
+
+PositionalPattern = TypeName "(" [ Pattern { "," Pattern } ] ")" ;
+
+PropertyPattern   = [ TypeName ] "{" [ PropPatternEntry { "," PropPatternEntry } ] "}" ;
+
+PropPatternEntry  = IDENT ":" Pattern ;
+
+DiscardPattern    = "_" ;
+```
+
+### Expressions
+
+```ebnf
+PostfixOp       = ... | "?[" Expr "]" ;
+
+PrimaryExpr     = ... | NameOfExpr | StackallocExpr | ThrowExpr | DiscardExpr | WithExpr ;
+
+NameOfExpr      = "nameof" "(" QualifiedIdent ")" ;
+
+StackallocExpr  = "stackalloc" "[" TypeRef "]" "(" Expr ")" ;
+
+ThrowExpr       = "throw" Expr ;
+
+DiscardExpr     = "_" ;
+
+WithExpr        = Expr "with" "{" FieldAssign { "," FieldAssign } "}" ;
+
+FieldAssign     = IDENT "=" Expr ;
+
+Arg             = [ IDENT ":" ] [ "ref" | "out" ] Expr
+                | "out" "val" IDENT
+                | "out" "var" IDENT
+                | "out" "_" ;
+```
+
+### Async backend
+
+```ebnf
+ProjectAsync    = "[" "language" "." "async" "]" NEWLINE
+                  "backend" "=" ( "\"unitask\"" | "\"task\"" | "\"auto\"" ) ;
+```

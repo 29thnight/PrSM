@@ -2090,10 +2090,112 @@ NN |     offending source line
 
 ---
 
-## 14 Grammar
+## 14 Language 5 addendum [lang5]
+
+The following sections summarize the normative additions introduced in PrSM Language 5 (since PrSM 5). For complete prose, examples, and lowering details, see [PrSM 5](lang-5.md). The grammar productions for these features are in [Formal Grammar](../grammar.md) under the "PrSM 5 grammar additions" section.
+
+### 14.1 Coroutines and iterators [lang5.yield]
+
+PrSM 5 extends the coroutine declaration to accept general `yield` and `yield break` statements in addition to the `wait` shortcuts. The same form is valid in any `func` whose return type is `Seq<T>`, `IEnumerator`, `IEnumerator<T>`, `IEnumerable`, or `IEnumerable<T>`. The expression `yield expr` shall produce a value assignable to the declared element type. `yield` outside such a context shall produce diagnostic **E147**.
+
+### 14.2 Attribute targets [lang5.attr]
+
+A property declaration may carry attribute target annotations of the form `@field(name)`, `@property(name)`, `@param(name)`, `@return(name)`, or `@type(name)`. The `serialize` modifier on an auto-property is normative sugar for `@field(serializeField)` and shall lower to a C# `[field: SerializeField]` backing field.
+
+### 14.3 Preprocessor directives [lang5.pp]
+
+PrSM defines a curated set of platform symbols (`editor`, `debug`, `release`, `ios`, `android`, `standalone`, `il2cpp`, `mono`, `unity20223`, `unity20231`, `unity6`) that translate to the corresponding C# preprocessor defines (`UNITY_EDITOR`, `DEBUG`, `UNITY_IOS`, etc.). `#if` blocks shall be valid in any statement, member, or top-level position. Any other identifier passes through to the generated C# verbatim and emits **W034**.
+
+### 14.4 Parameter modifiers [lang5.param]
+
+A parameter declaration may carry one of the modifiers `ref`, `out`, or `vararg`. A parameter with a default value `= expr` shall require that `expr` be a compile-time constant. All parameters with defaults shall appear after all required parameters. Only the final parameter of a function may carry `vararg`.
+
+### 14.5 Named arguments [lang5.named]
+
+A call site may specify any subset of arguments by parameter name in the form `name: expr`. Named arguments may appear in any order, but no positional argument shall follow a named argument.
+
+### 14.6 `nameof` [lang5.nameof]
+
+`nameof(x)` shall evaluate at compile time to the string `"x"`. `nameof(Type.Member)` shall evaluate to `"Member"`. The argument shall reference a real symbol; otherwise diagnostic **E163** is emitted. `nameof` is a contextual keyword.
+
+### 14.7 `@burst` annotation [lang5.burst]
+
+The `@burst` annotation marks a function or struct for Unity Burst compilation. The compiler shall emit `[BurstCompile]` and run the Burst compatibility analyzer (defined in Language 4) on the annotated definition. The annotation may carry options that lower to matching attribute arguments. Diagnostics **E137**–**E139** and **W028** from Language 4 are now triggered by the annotation rather than by a naming heuristic.
+
+### 14.8 UniTask backend selection [lang5.unitask]
+
+The compiler shall scan `Packages/manifest.json` and `.prsmproject` for the `com.cysharp.unitask` package. If present, `async func` lowers to `Cysharp.Threading.Tasks.UniTask` / `UniTask<T>`. Otherwise it shall fall back to `System.Threading.Tasks.Task` / `Task<T>`. The `[language.async] backend` option in `.prsmproject` may override the detection.
+
+### 14.9 `bind` continuous push [lang5.bind.push]
+
+A `bind X to Y` statement shall register a push target lambda `v => Y = v` and immediately invoke it once for the initial sync. The setter generated for the bind property shall iterate the push target list after `OnPropertyChanged` and shall invoke each lambda with the new value.
+
+### 14.10 W031 implementation [lang5.bind.unread]
+
+After semantic analysis completes for a component, the compiler shall scan all expressions inside the component for references to each `bind` member. A bind member with zero references (other than its own setter) shall emit warning **W031**.
+
+### 14.11 Pattern matching extensions [lang5.pattern]
+
+The `Pattern` production shall be extended with relational patterns (`> 80`), the combinators `and` / `or` / `not`, positional patterns (`Point(x, y)`), property patterns (`{ hp: > 0 }`), and the discard pattern `_`. The combinator precedence is `not` highest, then `and`, then `or`. The new `or` keyword unifies with the existing comma-OR pattern from Language 4. Property names in property patterns shall be public readable members. Reading from a discard pattern shall produce diagnostic **E188**.
+
+### 14.12 `with` expression [lang5.with]
+
+`expr with { f = v, … }` shall produce a copy of `expr` with the specified fields replaced. For `data class` types, this lowers to a C# `record with` expression. For `struct` declarations and Unity built-in struct types, this lowers to a temporary copy with field mutations. The receiver type shall be a `data class`, `struct`, or known Unity struct; otherwise diagnostic **E172** is emitted.
+
+### 14.13 Generic constraints [lang5.constraint]
+
+The `WhereConstraint` production shall be extended with `unmanaged`, `notnull`, `default`, and `new()`. The `unmanaged` constraint requires the type parameter to be a value type with no managed references at any depth. The `unmanaged` and `class` constraints shall not appear on the same parameter (E174). The `notnull` constraint shall not be applied to a value-type parameter (E175).
+
+### 14.14 `ref` locals and `ref` returns [lang5.ref]
+
+A variable declaration of the form `val ref name = ref expr` shall create a read-only reference local that lowers to C# `ref readonly`. A declaration of the form `var ref name = ref expr` shall create a mutable reference local that lowers to C# `ref`. A function may declare a `ref` return type to return a reference. The compiler shall verify that the referenced storage outlives the reference (E176, E177).
+
+### 14.15 `ref struct` [lang5.refstruct]
+
+`ref struct` shall declare a stack-only value type that may contain `ref` fields. A `ref struct` shall not be a field of a non-ref struct or class (E179) and shall not be used as a generic type argument unless the constraint is `allows ref struct` in C# 13+ (E180).
+
+### 14.16 `stackalloc` [lang5.stackalloc]
+
+`stackalloc[T](n)` shall allocate `n` elements of type `T` on the stack and return a `Span<T>`. The allocated memory shall be valid until the enclosing method returns. The result shall be assigned to a `Span<T>` or `ReadOnlySpan<T>` local or passed to a function expecting one of those types (E181). The size shall be a compile-time constant or trivially bounded expression (E182).
+
+### 14.17 Span slicing [lang5.span.slice]
+
+When the receiver is an array, `Span<T>`, `ReadOnlySpan<T>`, or any type with a `Slice(int, int)` and `Length` member, indexing with a range expression (`arr[1..4]`, `arr[2..]`, `arr[..3]`) shall produce a slice. Range slicing on a type that does not support `Slice` or a range indexer shall produce diagnostic **E183**.
+
+### 14.18 `partial` declarations [lang5.partial]
+
+A `partial` declaration relaxes the "one declaration per file" rule for that specific type. Multiple files may contribute to the same `partial` declaration as long as all parts share the same identifier, the `partial` modifier, the same kind, and matching type parameters and where clauses. `partial` is a contextual keyword. Mismatched modifiers, parameters, or base types across parts shall produce diagnostics **E184**, **E185**, **E186**.
+
+### 14.19 Generalized nested declarations [lang5.nested]
+
+Any `class`, `component`, or `struct` body may contain nested type declarations (`class`, `struct`, `enum`, `data class`, `interface`). Nested `component` declarations shall be forbidden (E187). Components shall be top-level declarations.
+
+### 14.20 Discard expression [lang5.discard]
+
+`_` in an `out` argument position, in a destructuring binding, or in a `when` pattern shall mean "this value is intentionally ignored". Reading from `_` shall produce diagnostic **E188**.
+
+### 14.21 Conditional indexer [lang5.safeindex]
+
+`arr?[i]` shall evaluate `arr`; if `arr` is `null`, the entire expression shall be `null`. Otherwise it accesses `arr[i]`. The expression lowers directly to C# `arr?[i]`.
+
+### 14.22 Throw expression [lang5.throwexpr]
+
+`throw` shall be valid in expression position in addition to its statement form. The expression `e ?: throw E("message")` shall lower to C# `e ?? throw new E("message")`.
+
+### 14.23 Tooling additions [lang5.dx]
+
+The Language Server shall dispatch `textDocument/codeAction` requests to the refactor helpers (Extract Method, Extract Component, Inline Variable, Rename Symbol, Convert to State Machine) introduced in Language 4. The VS Code extension shall register a Debug Adapter Protocol implementation that consumes the flat `.prsm.map` source maps and translates `.prsm` line breakpoints to generated `.cs` line numbers.
+
+### 14.24 Diagnostics summary [lang5.diag]
+
+PrSM 5 introduces error codes **E147**–**E188** and warning codes **W033**–**W037**. The Language 4 warning **W031** (`bind` never read) is now actually emitted. See [Error Catalog](../error-catalog.md) for the complete list and individual conditions.
+
+---
+
+## 15 Grammar
 
 The normative grammar for PrSM is defined in Extended Backus-Naur Form (EBNF). The complete grammar is maintained as a separate document.
 
-See [Formal Grammar](../grammar.md) for the full EBNF definition covering file structure, declarations, members, statements, expressions, patterns, and terminal tokens.
+See [Formal Grammar](../grammar.md) for the full EBNF definition covering file structure, declarations, members, statements, expressions, patterns, and terminal tokens. PrSM 5 grammar additions are listed in a dedicated section of the same document.
 
 The grammar document is authoritative for parser behavior. Where prose in this standard and the grammar conflict, the grammar shall take precedence.

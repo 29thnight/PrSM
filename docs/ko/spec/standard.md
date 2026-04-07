@@ -2080,10 +2080,112 @@ NN |     offending source line
 
 ---
 
-## 14 문법
+## 14 언어 5 부록 [lang5]
+
+다음 절은 PrSM 언어 5에서 도입된 규범적 추가 사항을 요약한다 (PrSM 5 부터). 완전한 산문, 예제, lowering 세부 사항은 [PrSM 5](lang-5.md)를 참조하라. 이 기능들의 문법 production은 [공식 문법](../grammar.md)의 "PrSM 5 문법 추가" 절에 있다.
+
+### 14.1 코루틴과 이터레이터 [lang5.yield]
+
+PrSM 5는 코루틴 선언을 확장하여 기존 `wait` 단축 외에 일반 `yield`와 `yield break` 문장을 받아들인다. 같은 형식이 반환 타입이 `Seq<T>`, `IEnumerator`, `IEnumerator<T>`, `IEnumerable`, `IEnumerable<T>`인 모든 `func`에서 유효하다. 식 `yield expr`은 선언된 요소 타입에 할당 가능한 값을 산출해야 한다. 이러한 컨텍스트 외부의 `yield`는 진단 **E147**을 발생시킨다.
+
+### 14.2 어트리뷰트 타깃 [lang5.attr]
+
+프로퍼티 선언은 `@field(name)`, `@property(name)`, `@param(name)`, `@return(name)`, `@type(name)` 형식의 어트리뷰트 타깃 어노테이션을 가질 수 있다. 자동 프로퍼티의 `serialize` 한정자는 `@field(serializeField)`의 규범적 편의 표기이며 C# `[field: SerializeField]` 백킹 필드로 변환되어야 한다.
+
+### 14.3 전처리 디렉티브 [lang5.pp]
+
+PrSM은 자주 쓰이는 플랫폼 심볼 집합 (`editor`, `debug`, `release`, `ios`, `android`, `standalone`, `il2cpp`, `mono`, `unity20223`, `unity20231`, `unity6`)을 정의하여 대응하는 C# 전처리 정의 (`UNITY_EDITOR`, `DEBUG`, `UNITY_IOS` 등)로 변환한다. `#if` 블록은 모든 statement, member, top-level 위치에서 유효해야 한다. 그 외 식별자는 생성된 C#에 그대로 통과되며 **W034**를 발생시킨다.
+
+### 14.4 매개변수 한정자 [lang5.param]
+
+매개변수 선언은 `ref`, `out`, `vararg` 한정자 중 하나를 가질 수 있다. 기본값 `= expr`을 가진 매개변수의 `expr`은 컴파일 타임 상수여야 한다. 기본값을 가진 매개변수는 모두 필수 매개변수 뒤에 와야 한다. 함수의 마지막 매개변수에만 `vararg`를 사용할 수 있다.
+
+### 14.5 명명 인자 [lang5.named]
+
+호출 사이트는 `name: expr` 형식으로 임의 부분 집합의 인자를 매개변수 이름으로 지정할 수 있다. 명명 인자는 임의 순서로 나타날 수 있지만 명명 인자 뒤에 위치 인자가 와서는 안 된다.
+
+### 14.6 `nameof` [lang5.nameof]
+
+`nameof(x)`는 컴파일 타임에 문자열 `"x"`로 평가되어야 한다. `nameof(Type.Member)`는 `"Member"`로 평가되어야 한다. 인자는 실제 심볼을 참조해야 하며, 그렇지 않으면 진단 **E163**이 발생한다. `nameof`는 컨텍스트 키워드이다.
+
+### 14.7 `@burst` 어노테이션 [lang5.burst]
+
+`@burst` 어노테이션은 함수나 struct를 Unity Burst 컴파일 대상으로 표시한다. 컴파일러는 `[BurstCompile]`을 출력하고 어노테이션 대상에 (언어 4에서 정의된) Burst 호환성 분석기를 실행해야 한다. 어노테이션은 일치하는 어트리뷰트 인자로 변환되는 옵션을 가질 수 있다. 언어 4의 진단 **E137**–**E139**와 **W028**은 이제 명명 휴리스틱 대신 어노테이션을 통해 발생한다.
+
+### 14.8 UniTask backend 선택 [lang5.unitask]
+
+컴파일러는 `Packages/manifest.json`과 `.prsmproject`에서 `com.cysharp.unitask` 패키지를 스캔해야 한다. 존재하면 `async func`은 `Cysharp.Threading.Tasks.UniTask` / `UniTask<T>`로 변환된다. 그렇지 않으면 `System.Threading.Tasks.Task` / `Task<T>`로 폴백한다. `.prsmproject`의 `[language.async] backend` 옵션이 감지를 재정의할 수 있다.
+
+### 14.9 `bind` 연속 푸시 [lang5.bind.push]
+
+`bind X to Y` 문장은 push target 람다 `v => Y = v`를 등록하고 초기 동기화를 위해 즉시 한 번 호출해야 한다. bind 프로퍼티에 생성된 setter는 `OnPropertyChanged` 이후 push target 리스트를 순회하고 새 값으로 각 람다를 호출해야 한다.
+
+### 14.10 W031 구현 [lang5.bind.unread]
+
+컴포넌트의 의미 분석이 끝난 후, 컴파일러는 컴포넌트 내부의 모든 표현식에서 각 `bind` 멤버 참조를 스캔해야 한다. 자기 setter 외에 참조가 0개인 bind 멤버는 경고 **W031**을 발생시켜야 한다.
+
+### 14.11 패턴 매칭 확장 [lang5.pattern]
+
+`Pattern` production은 관계 패턴 (`> 80`), 결합자 `and` / `or` / `not`, 위치 패턴 (`Point(x, y)`), 프로퍼티 패턴 (`{ hp: > 0 }`), discard 패턴 `_`로 확장되어야 한다. 결합자 우선순위는 `not`이 가장 높고, 그 다음 `and`, 그 다음 `or`이다. 새 `or` 키워드는 언어 4의 쉼표-OR 패턴과 통합된다. 프로퍼티 패턴의 프로퍼티 이름은 공개 읽기 가능 멤버여야 한다. discard 패턴으로부터 읽기는 진단 **E188**을 발생시켜야 한다.
+
+### 14.12 `with` 표현식 [lang5.with]
+
+`expr with { f = v, … }`는 지정된 필드를 교체한 `expr`의 복사본을 산출해야 한다. `data class` 타입의 경우 C# `record with` 표현식으로 변환된다. `struct` 선언과 Unity 내장 struct 타입의 경우 필드 변경을 가진 임시 복사본으로 변환된다. receiver 타입은 `data class`, `struct`, 알려진 Unity struct여야 하며, 그렇지 않으면 진단 **E172**가 발생한다.
+
+### 14.13 제네릭 제약 [lang5.constraint]
+
+`WhereConstraint` production은 `unmanaged`, `notnull`, `default`, `new()`로 확장되어야 한다. `unmanaged` 제약은 타입 매개변수가 어떤 깊이에서도 관리 참조를 갖지 않는 값 타입이어야 함을 요구한다. `unmanaged`와 `class` 제약은 같은 매개변수에 동시에 나타나서는 안 된다 (E174). `notnull` 제약은 값 타입 매개변수에 적용되어서는 안 된다 (E175).
+
+### 14.14 `ref` 로컬과 `ref` 반환 [lang5.ref]
+
+`val ref name = ref expr` 형식의 변수 선언은 C# `ref readonly`로 변환되는 읽기 전용 참조 로컬을 만들어야 한다. `var ref name = ref expr` 형식의 선언은 C# `ref`로 변환되는 가변 참조 로컬을 만들어야 한다. 함수는 `ref` 반환 타입을 선언해 참조를 반환할 수 있다. 컴파일러는 참조된 저장소가 참조보다 오래 사는지 검증해야 한다 (E176, E177).
+
+### 14.15 `ref struct` [lang5.refstruct]
+
+`ref struct`는 `ref` 필드를 포함할 수 있는 스택 전용 값 타입을 선언해야 한다. `ref struct`는 비-ref struct 또는 클래스의 필드가 되어서는 안 되며 (E179), C# 13+의 `allows ref struct` 제약 없이는 제네릭 타입 인자로 사용되어서는 안 된다 (E180).
+
+### 14.16 `stackalloc` [lang5.stackalloc]
+
+`stackalloc[T](n)`은 스택에 `T` 요소 `n`개를 할당하고 `Span<T>`를 반환해야 한다. 할당된 메모리는 enclosing 메서드가 반환할 때까지 유효해야 한다. 결과는 `Span<T>` 또는 `ReadOnlySpan<T>` 로컬에 할당되거나 그러한 타입을 받는 함수에 전달되어야 한다 (E181). 크기는 컴파일 타임 상수 또는 단순하게 한정된 식이어야 한다 (E182).
+
+### 14.17 Span 슬라이싱 [lang5.span.slice]
+
+receiver가 배열, `Span<T>`, `ReadOnlySpan<T>`, 또는 `Slice(int, int)`와 `Length` 멤버를 가진 타입일 때, range 식 (`arr[1..4]`, `arr[2..]`, `arr[..3]`)으로 인덱싱하면 슬라이스가 생성되어야 한다. `Slice` 또는 range 인덱서를 지원하지 않는 타입에 대한 range 슬라이싱은 진단 **E183**을 발생시켜야 한다.
+
+### 14.18 `partial` 선언 [lang5.partial]
+
+`partial` 선언은 특정 타입에 대해 "파일당 단일 선언" 규칙을 완화한다. 모든 부분이 동일한 식별자, `partial` 한정자, 동일한 종류, 동일한 타입 매개변수와 where clause를 공유하면 여러 파일이 같은 `partial` 선언에 기여할 수 있다. `partial`은 컨텍스트 키워드이다. 부분 간 한정자, 매개변수, 베이스 타입 불일치는 진단 **E184**, **E185**, **E186**을 발생시켜야 한다.
+
+### 14.19 일반화된 nested 선언 [lang5.nested]
+
+모든 `class`, `component`, `struct` 본문에 nested 타입 선언 (`class`, `struct`, `enum`, `data class`, `interface`)을 둘 수 있다. nested `component` 선언은 금지되어야 한다 (E187). 컴포넌트는 top-level 선언이어야 한다.
+
+### 14.20 Discard 표현식 [lang5.discard]
+
+`_`는 `out` 인자 위치, 분해 바인딩, `when` 패턴에서 "이 값은 의도적으로 무시된다"를 의미해야 한다. `_`로부터 읽기는 진단 **E188**을 발생시켜야 한다.
+
+### 14.21 조건부 인덱서 [lang5.safeindex]
+
+`arr?[i]`는 `arr`을 평가해야 한다. `arr`이 `null`이면 전체 식이 `null`이어야 한다. 그렇지 않으면 `arr[i]`에 접근한다. 식은 C# `arr?[i]`로 직접 변환된다.
+
+### 14.22 Throw 표현식 [lang5.throwexpr]
+
+`throw`는 statement 형식 외에 expression 위치에서 유효해야 한다. 식 `e ?: throw E("message")`는 C# `e ?? throw new E("message")`로 변환되어야 한다.
+
+### 14.23 도구 추가 [lang5.dx]
+
+언어 서버는 `textDocument/codeAction` 요청을 언어 4에서 도입된 refactor 헬퍼 (Extract Method, Extract Component, Inline Variable, Rename Symbol, Convert to State Machine)에 dispatch해야 한다. VS Code 확장은 flat `.prsm.map` 소스맵을 소비하고 `.prsm` 줄 brakpoint를 생성된 `.cs` 줄 번호로 변환하는 Debug Adapter Protocol 구현을 등록해야 한다.
+
+### 14.24 진단 요약 [lang5.diag]
+
+PrSM 5는 오류 코드 **E147**–**E188**과 경고 코드 **W033**–**W037**을 도입한다. 언어 4 경고 **W031** (`bind` 미사용)이 이제 실제로 발생한다. 전체 목록과 개별 조건은 [오류 카탈로그](../error-catalog.md)를 참조하라.
+
+---
+
+## 15 문법
 
 PrSM의 규범적 문법은 확장 배커스-나우르 형식(EBNF)으로 정의된다. 전체 문법은 별도의 문서로 유지 관리된다.
 
-전체 EBNF 정의는 [공식 문법](../grammar.md)을 참조하라. 파일 구조, 선언, 멤버, 문장, 표현식, 패턴, 터미널 토큰을 포괄한다.
+전체 EBNF 정의는 [공식 문법](../grammar.md)을 참조하라. 파일 구조, 선언, 멤버, 문장, 표현식, 패턴, 터미널 토큰을 포괄한다. PrSM 5 문법 추가 사항은 같은 문서의 별도 절에 나열되어 있다.
 
 문법 문서는 파서 동작에 대해 권위적이다. 이 표준의 산문과 문법이 충돌하는 경우 문법이 우선한다.

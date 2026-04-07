@@ -15,5 +15,7 @@ PrSM 언어를 정의하는 규범 문서입니다.
 | [PrSM 1](lang-1.md) | 언어 1 — 초기 릴리스 기능 |
 | [PrSM 2](lang-2.md) | 언어 2 — 패턴 매칭, listen 수명, Input System, 제네릭 추론 |
 | [PrSM 3](lang-3.md) | 언어 3 — 인터페이스, 제네릭, singleton, pool, SOLID 분석, 옵티마이저 |
+| [PrSM 4](lang-4.md) | 언어 4 — try/catch, 람다, 컬렉션 리터럴, 캐스트, 프로퍼티, struct, async, state machine, command, bind |
+| [PrSM 5](lang-5.md) | 언어 5 — yield, 어트리뷰트 타깃, 전처리, ref/out/vararg, nameof, 패턴, ref local, partial, DAP |
 
 버전 간 마이그레이션 가이드는 [v1 → v2 마이그레이션](../migration-v1-to-v2.md)을 참조하세요.

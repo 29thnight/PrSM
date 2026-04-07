@@ -167,3 +167,79 @@ val c = Vec2i(1, 2) + Vec2i(3, 4)
 ```
 
 `operator equals`는 일치하는 `GetHashCode` 오버라이드를 요구합니다 (E124).
+
+## 조건부 인덱서 `?[i]` (PrSM 5 부터)
+
+`arr?[i]`는 `arr`을 평가합니다. `arr`이 `null`이면 전체 식이 `null`입니다. 그렇지 않으면 `arr[i]`에 접근합니다. C# `arr?[i]`로 직접 변환됩니다.
+
+```prsm
+val first = inventory?.items?[0]
+```
+
+```csharp
+var first = inventory?.items?[0];
+```
+
+## Throw 표현식 (PrSM 5 부터)
+
+`throw`는 (statement 형식 외에) expression 위치에 나타날 수 있습니다. 일반적으로 elvis 연산자와 함께 필수 필드 검증에 사용됩니다.
+
+```prsm
+val rb = body ?: throw IllegalStateException("Rigidbody required")
+
+func divide(a: Int, b: Int): Int =
+    if b == 0 then throw ArgumentException("divide by zero")
+    else a / b
+```
+
+```csharp
+var rb = body ?? throw new InvalidOperationException("Rigidbody required");
+public int divide(int a, int b) => b == 0 ? throw new ArgumentException("divide by zero") : a / b;
+```
+
+## 배열과 Span의 range 슬라이싱 (PrSM 5 부터)
+
+receiver가 배열, `Span<T>`, `ReadOnlySpan<T>`, 또는 `Slice(int, int)`와 `Length` 멤버를 가진 타입일 때, range 식으로 인덱싱하면 슬라이스가 생성됩니다. 기존 range 연산자를 재사용합니다.
+
+```prsm
+val arr = [1, 2, 3, 4, 5]
+val middle = arr[1..4]      // [2, 3, 4]
+val tail = arr[2..]         // [3, 4, 5]
+val head = arr[..3]         // [1, 2, 3]
+```
+
+```csharp
+var arr = new int[] { 1, 2, 3, 4, 5 };
+var middle = arr[1..4];
+var tail = arr[2..];
+var head = arr[..3];
+```
+
+`Slice` 또는 range 인덱서를 지원하지 않는 타입에 대한 range 슬라이싱은 E183을 발생시킵니다.
+
+## `stackalloc` (PrSM 5 부터)
+
+`stackalloc[T](n)`은 스택에 `T` 요소 `n`개를 할당하고 `Span<T>`를 반환합니다. 할당된 메모리는 enclosing 메서드가 반환할 때까지 유효합니다. 결과는 `Span<T>` 로컬에 할당되거나 `Span<T>` / `ReadOnlySpan<T>`를 받는 함수에 전달되어야 합니다.
+
+```prsm
+func sumFirst10(): Int {
+    val buffer: Span<Int> = stackalloc[Int](10)
+    for i in 0..10 { buffer[i] = i }
+    var total = 0
+    for i in 0..10 { total += buffer[i] }
+    return total
+}
+```
+
+```csharp
+public int sumFirst10()
+{
+    Span<int> buffer = stackalloc int[10];
+    for (int i = 0; i < 10; i++) { buffer[i] = i; }
+    var total = 0;
+    for (int i = 0; i < 10; i++) { total += buffer[i]; }
+    return total;
+}
+```
+
+`stackalloc` 결과가 `Span<T>` 또는 `ReadOnlySpan<T>`에 할당되지 않으면 E181, 상수가 아닌 크기는 E182를 발생시킵니다.

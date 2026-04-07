@@ -168,3 +168,108 @@ val c = Vec2i(1, 2) + Vec2i(3, 4)  // Vec2i(4, 6)
 ```
 
 `operator get`과 `operator set`은 `[]` 문법을 위한 인덱서 접근을 정의합니다.
+
+## `ref` / `out` 매개변수 (PrSM 5 부터)
+
+`ref` 매개변수는 메서드가 호출자의 변수를 직접 수정할 수 있게 합니다. `out` 매개변수는 callee가 반환 전에 값을 할당하도록 요구합니다. 호출 사이트는 선언 표현식 형식으로 `out val name`을 사용합니다.
+
+```prsm
+func tryParse(input: String, out value: Int): Bool {
+    intrinsic { return int.TryParse(input, out value); }
+}
+
+if physics.raycast(ray, out val hit) {
+    log("hit ${hit.collider.name}")
+}
+```
+
+```csharp
+public bool tryParse(string input, out int value)
+{
+    return int.TryParse(input, out value);
+}
+
+if (Physics.Raycast(ray, out var hit))
+{
+    Debug.Log($"hit {hit.collider.name}");
+}
+```
+
+`ref`/`out` 인자가 매개변수 한정자와 일치하지 않으면 E153, `out` 매개변수가 모든 반환 경로 전에 할당되지 않으면 E154, `ref` 매개변수에 불변 `val`을 전달하면 E155가 발생합니다.
+
+## `vararg` 매개변수 (PrSM 5 부터)
+
+`vararg` 한정자가 붙은 매개변수는 선언된 타입의 인자를 0개 이상 받습니다. 함수의 마지막 매개변수에만 `vararg`를 사용할 수 있습니다. C#의 `params T[]`로 변환됩니다.
+
+```prsm
+func log(vararg messages: String) {
+    for msg in messages {
+        Debug.Log(msg)
+    }
+}
+
+log()
+log("loading")
+log("step 1", "step 2", "step 3")
+```
+
+```csharp
+public void log(params string[] messages)
+{
+    foreach (var msg in messages)
+    {
+        Debug.Log(msg);
+    }
+}
+```
+
+마지막이 아닌 매개변수에 `vararg`를 사용하면 E156, 단일 함수에 `vararg` 매개변수가 둘 이상이면 E157이 발생합니다.
+
+## 매개변수 기본값 (PrSM 5 부터)
+
+매개변수 선언에 `= expr`을 추가해 기본값을 지정할 수 있습니다. 기본값 식은 컴파일 타임 상수(literal, `null`, `default`, `const` 참조)여야 합니다. 기본값을 가진 매개변수는 모두 필수 매개변수 뒤에 와야 합니다.
+
+```prsm
+func instantiate(prefab: GameObject, parent: Transform? = null, worldSpace: Bool = false): GameObject {
+    return GameObject.Instantiate(prefab, parent, worldSpace)
+}
+
+instantiate(bulletPrefab)
+instantiate(bulletPrefab, weaponSocket)
+instantiate(bulletPrefab, weaponSocket, true)
+```
+
+상수가 아닌 기본값은 E158, 기본값 매개변수 뒤에 필수 매개변수가 오면 E159가 발생합니다.
+
+## 명명 인자 (PrSM 5 부터)
+
+호출 사이트에서 매개변수 이름으로 인자를 지정할 수 있습니다. 명명 인자는 임의 순서로 나타날 수 있지만 명명 인자 뒤에 위치 인자가 와서는 안 됩니다.
+
+```prsm
+GameObject.Instantiate(
+    original: bulletPrefab,
+    position: spawnPoint.position,
+    rotation: Quaternion.identity,
+    parent: bulletContainer,
+)
+```
+
+명명 인자 뒤의 위치 인자는 E160, 알려지지 않은 매개변수 이름은 E161, 같은 매개변수가 두 번 제공되면 E162가 발생합니다.
+
+## `nameof` 연산자 (PrSM 5 부터)
+
+`nameof(x)`는 컴파일 타임에 문자열 `"x"`로 평가됩니다. `nameof(Type.Member)`는 `"Member"`로 평가됩니다. 인자는 실제 심볼을 참조해야 합니다.
+
+```prsm
+component Player : MonoBehaviour {
+    require rb: Rigidbody
+
+    awake {
+        if rb == null {
+            error("Required component ${nameof(Rigidbody)} is missing")
+        }
+    }
+}
+```
+
+`nameof`는 컨텍스트 키워드입니다. 해석되지 않는 심볼은 E163, 단일 식별자 경로로 해석되지 않는 인자는 E164를 발생시킵니다.

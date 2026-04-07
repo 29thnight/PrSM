@@ -167,3 +167,79 @@ val c = Vec2i(1, 2) + Vec2i(3, 4)
 ```
 
 `operator equals` requires a matching `GetHashCode` override (E124).
+
+## Conditional indexer `?[i]` (since PrSM 5)
+
+`arr?[i]` evaluates `arr`; if `arr` is `null`, the entire expression is `null`. Otherwise it accesses `arr[i]`. Lowers directly to C# `arr?[i]`.
+
+```prsm
+val first = inventory?.items?[0]
+```
+
+```csharp
+var first = inventory?.items?[0];
+```
+
+## Throw expression (since PrSM 5)
+
+`throw` may appear in expression position (in addition to its statement form). Commonly used with the elvis operator for required field validation.
+
+```prsm
+val rb = body ?: throw IllegalStateException("Rigidbody required")
+
+func divide(a: Int, b: Int): Int =
+    if b == 0 then throw ArgumentException("divide by zero")
+    else a / b
+```
+
+```csharp
+var rb = body ?? throw new InvalidOperationException("Rigidbody required");
+public int divide(int a, int b) => b == 0 ? throw new ArgumentException("divide by zero") : a / b;
+```
+
+## Range slicing on arrays and Spans (since PrSM 5)
+
+When the receiver is an array, `Span<T>`, `ReadOnlySpan<T>`, or any type with a `Slice(int, int)` and `Length` member, indexing with a range expression produces a slice. Reuses the existing range operator.
+
+```prsm
+val arr = [1, 2, 3, 4, 5]
+val middle = arr[1..4]      // [2, 3, 4]
+val tail = arr[2..]         // [3, 4, 5]
+val head = arr[..3]         // [1, 2, 3]
+```
+
+```csharp
+var arr = new int[] { 1, 2, 3, 4, 5 };
+var middle = arr[1..4];
+var tail = arr[2..];
+var head = arr[..3];
+```
+
+Range slicing on a type without `Slice` or a range indexer produces E183.
+
+## `stackalloc` (since PrSM 5)
+
+`stackalloc[T](n)` allocates `n` elements of type `T` on the stack and returns a `Span<T>`. The allocated memory is valid until the enclosing method returns. The result must be assigned to a `Span<T>` local or passed to a function expecting `Span<T>` / `ReadOnlySpan<T>`.
+
+```prsm
+func sumFirst10(): Int {
+    val buffer: Span<Int> = stackalloc[Int](10)
+    for i in 0..10 { buffer[i] = i }
+    var total = 0
+    for i in 0..10 { total += buffer[i] }
+    return total
+}
+```
+
+```csharp
+public int sumFirst10()
+{
+    Span<int> buffer = stackalloc int[10];
+    for (int i = 0; i < 10; i++) { buffer[i] = i; }
+    var total = 0;
+    for (int i = 0; i < 10; i++) { total += buffer[i]; }
+    return total;
+}
+```
+
+A `stackalloc` result not assigned to `Span<T>` or `ReadOnlySpan<T>` produces E181. A non-constant size produces E182.

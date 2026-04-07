@@ -335,3 +335,116 @@ component Enemy : MonoBehaviour, IDamageable {
 ```
 
 느슨한 결합을 위해 `require`와 함께 interface를 사용하세요: `require target: Enemy` 대신 `require target: IDamageable`을 사용합니다.
+
+## PrSM 5 관용구 (PrSM 5 부터)
+
+### 스트리밍 시퀀스에서 `intrinsic`을 `yield`로 교체
+
+PrSM 5 이전에는 코루틴 안에서 값 시퀀스를 생성하려면 `intrinsic`으로 떨어져야 하는 경우가 많았습니다. 일반 `yield`로 같은 로직을 PrSM 안에 유지할 수 있습니다:
+
+```prsm
+coroutine spawnPositions(): Seq<Vector3> {
+    for x in 0..10 {
+        for z in 0..10 {
+            yield vec3(x, 0, z)
+        }
+    }
+}
+```
+
+### 인스펙터 노출에 자동 프로퍼티의 `serialize` 사용
+
+명시적 `get`/`set` 액세서가 있는 `var`에 `serialize` 한정자가 붙으면 `[field: SerializeField]`로 변환됩니다. 이는 공개 표면을 프로퍼티로 유지하면서 백킹 필드를 직렬화하는 Unity 표준 패턴으로, 이전에는 `intrinsic` 또는 수동 페어링된 private 필드가 필요했습니다.
+
+```prsm
+component Player : MonoBehaviour {
+    serialize var hp: Int = 100
+        get
+        set { field = Mathf.clamp(value, 0, maxHp) }
+}
+```
+
+### 에디터 전용 코드는 `#if editor`로 보호
+
+에디터 전용 디버그 헬퍼와 기즈모 드로잉은 `intrinsic { #if UNITY_EDITOR ... #endif }` 대신 `#if editor` 블록 안에 두는 것이 좋습니다.
+
+```prsm
+update {
+    move()
+
+    #if editor
+        drawDebugGizmos()
+    #endif
+}
+```
+
+### `Physics.Raycast` 류 API에서 `out val` 선호
+
+네이티브 `out` 매개변수 지원은 가장 흔한 Unity API 호출 사이트에서 `intrinsic` 블록의 필요를 제거합니다.
+
+```prsm
+if physics.raycast(ray, out val hit) {
+    log("hit ${hit.collider.name}")
+}
+```
+
+### 관계/결합자 패턴으로 `if` 체인 평탄화
+
+관계 패턴과 `and`/`or`/`not` 결합자는 중첩된 `if` 체인을 단일 `when` 표현식으로 변환합니다:
+
+```prsm
+val tier = when hp {
+    > 80 => "Healthy"
+    > 30 and < 80 => "Hurt"
+    > 0 => "Critical"
+    else => "Dead"
+}
+```
+
+### 큰 컴포넌트는 `partial`로 분할
+
+게임플레이 상태, 전투 동작, UI 바인딩이 섞인 컴포넌트는 단일 파일에 두기에 너무 커지는 경우가 많습니다. `partial component`를 사용하면 파일당 단일 선언 규칙을 깨지 않고 동일 컴포넌트를 여러 파일에 걸쳐 작성할 수 있습니다.
+
+```prsm
+// Player.movement.prsm
+partial component Player : MonoBehaviour {
+    serialize speed: Float = 5.0
+    update { move() }
+}
+
+// Player.combat.prsm
+partial component Player {
+    bind hp: Int = 100
+    func takeDamage(amount: Int) { hp -= amount }
+}
+```
+
+### 가변 struct 복사 대신 `with` 사용
+
+Unity struct 타입의 경우, `with` 표현식이 "복사하고 한 필드만 수정" 패턴을 수동 임시 변수 없이 캡처합니다:
+
+```prsm
+val grounded = transform.position with { y = 0.0 }
+```
+
+### 프로퍼티 알림에 문자열 리터럴 대신 `nameof` 사용
+
+`nameof` 연산자는 컴파일 타임에 오타를 잡아냅니다. `bind`와 결합하면 컴파일러가 `OnPropertyChanged(nameof(hp))`를 자동으로 연결하지만, 멤버를 명명하는 모든 수동 이벤트에는 여전히 `nameof`가 적합합니다.
+
+```prsm
+event onPropertyChanged: (String) => Unit
+onPropertyChanged.invoke(nameof(hp))
+```
+
+### Burst 대상은 명명 대신 `@burst`로 어노테이트
+
+언어 5는 E137–E139와 W028을 `burst_*` 명명 휴리스틱 대신 `@burst` 어노테이션을 통해 라우팅합니다. 명시적으로 어노테이트하여 옵트인하세요:
+
+```prsm
+@burst
+func calculateForces(positions: NativeArray<Float3>, forces: NativeArray<Float3>) {
+    for i in 0..positions.length {
+        forces[i] = computeGravity(positions[i])
+    }
+}
+```

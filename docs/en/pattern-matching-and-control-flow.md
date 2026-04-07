@@ -189,6 +189,159 @@ when target {
 }
 ```
 
+### Relational patterns (since PrSM 5)
+
+A relational pattern matches if the subject value compares to the operand using the specified operator (`<`, `>`, `<=`, `>=`). Permitted on integral, floating-point, and `IComparable<T>` types.
+
+```prsm
+when hp {
+    > 80 => "Healthy"
+    > 30 => "Hurt"
+    > 0  => "Critical"
+    else => "Dead"
+}
+```
+
+```csharp
+hp switch
+{
+    > 80 => "Healthy",
+    > 30 => "Hurt",
+    > 0  => "Critical",
+    _    => "Dead",
+}
+```
+
+A relational pattern operand whose type does not match the subject produces E167. A subsequent relational arm covered by an earlier arm emits W037.
+
+### Pattern combinators (since PrSM 5)
+
+`and`, `or`, and `not` form a pattern algebra with precedence `not` > `and` > `or`. The new `or` keyword unifies with the existing comma-OR pattern from Language 4.
+
+```prsm
+when x {
+    > 0 and < 100 => "valid range"
+    is Enemy or is Boss => "hostile"
+    not null => "present"
+    else => "missing"
+}
+```
+
+```csharp
+x switch
+{
+    > 0 and < 100 => "valid range",
+    Enemy or Boss => "hostile",
+    not null => "present",
+    _ => "missing",
+}
+```
+
+`or` pattern arms binding different variables produces E168.
+
+### Positional patterns (since PrSM 5)
+
+A positional pattern matches if the subject is of the specified type and each subpattern matches the corresponding deconstruction output. Generalizes Language 2 enum payload binding to all destructurable types (`data class`, `struct`, tuples).
+
+```prsm
+data class Point(x: Int, y: Int)
+
+when point {
+    Point(0, 0) => "origin"
+    Point(0, _) => "on y axis"
+    Point(_, 0) => "on x axis"
+    Point(x, y) if x == y => "diagonal"
+    else => "elsewhere"
+}
+```
+
+```csharp
+point switch
+{
+    Point(0, 0) => "origin",
+    Point(0, _) => "on y axis",
+    Point(_, 0) => "on x axis",
+    Point(var x, var y) when x == y => "diagonal",
+    _ => "elsewhere",
+}
+```
+
+For `data class` and `struct`, the compiler auto-generates a `Deconstruct` method during lowering. A positional pattern arity that does not match the type's deconstruction produces E169.
+
+### Property patterns (since PrSM 5)
+
+A property pattern matches if the subject is of the (optionally specified) type and each named property's value matches the corresponding subpattern. Property names shall be public readable members.
+
+```prsm
+when target {
+    Enemy { hp: > 0, level: > 10 } => "tough enemy"
+    Enemy { hp: 0 } => "dead enemy"
+    Player { isInvincible: true } => "untouchable"
+    else => "ignore"
+}
+```
+
+```csharp
+target switch
+{
+    Enemy { hp: > 0, level: > 10 } => "tough enemy",
+    Enemy { hp: 0 } => "dead enemy",
+    Player { isInvincible: true } => "untouchable",
+    _ => "ignore",
+}
+```
+
+A property pattern referencing a non-existent member produces E170. A non-readable member produces E171.
+
+### `with` expression (since PrSM 5)
+
+`expr with { f = v, … }` produces a copy of `expr` with the specified fields replaced. `data class` lowers to a C# `record with` expression. `struct` declarations and Unity built-in struct types use a temporary-copy form.
+
+```prsm
+val origin = transform.position
+val grounded = origin with { y = 0.0 }
+
+data class PlayerStats(hp: Int, mp: Int, level: Int)
+val current = PlayerStats(100, 50, 5)
+val healed = current with { hp = 100 }
+val leveled = healed with { level = 6, mp = 100 }
+```
+
+```csharp
+var origin = transform.position;
+Vector3 grounded;
+{
+    var _t = origin;
+    _t.y = 0.0f;
+    grounded = _t;
+}
+
+public record PlayerStats(int hp, int mp, int level);
+var current = new PlayerStats(100, 50, 5);
+var healed = current with { hp = 100 };
+var leveled = healed with { level = 6, mp = 100 };
+```
+
+`with` on a type that is not a `data class`, `struct`, or known Unity struct produces E172. `with` on a non-writable field produces E173.
+
+### Discard `_` (since PrSM 5)
+
+`_` in an `out` argument position, in a destructuring binding, or in a `when` pattern means "this value is intentionally ignored". Reading from `_` is forbidden.
+
+```prsm
+physics.raycast(ray, out _)
+
+val (_, name) = getResult()
+
+when point {
+    Point(0, _) => "on x = 0"
+    Point(_, 0) => "on y = 0"
+    _ => "elsewhere"
+}
+```
+
+Reading from a discard `_` produces E188.
+
 ## `try` / `catch` / `finally` (since PrSM 4)
 
 Exceptions are first-class. The `new` keyword is omitted on `throw`. `try` may also be used as an expression when it has exactly one `catch` clause.

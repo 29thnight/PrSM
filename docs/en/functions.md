@@ -168,3 +168,108 @@ val c = Vec2i(1, 2) + Vec2i(3, 4)  // Vec2i(4, 6)
 ```
 
 `operator get` and `operator set` define indexer access for `[]` syntax.
+
+## `ref` / `out` parameters (since PrSM 5)
+
+`ref` parameters allow a method to modify the caller's variable in place. `out` parameters require the callee to assign before returning. Call sites use `out val name` for declaration expressions.
+
+```prsm
+func tryParse(input: String, out value: Int): Bool {
+    intrinsic { return int.TryParse(input, out value); }
+}
+
+if physics.raycast(ray, out val hit) {
+    log("hit ${hit.collider.name}")
+}
+```
+
+```csharp
+public bool tryParse(string input, out int value)
+{
+    return int.TryParse(input, out value);
+}
+
+if (Physics.Raycast(ray, out var hit))
+{
+    Debug.Log($"hit {hit.collider.name}");
+}
+```
+
+A `ref`/`out` argument that does not match its parameter modifier produces E153. An `out` parameter not assigned before all return paths produces E154. A `ref` parameter passed an immutable `val` produces E155.
+
+## `vararg` parameters (since PrSM 5)
+
+A parameter declared with `vararg` accepts zero or more arguments of the declared type. Only the last parameter of a function may be `vararg`. Lowers to a C# `params T[]`.
+
+```prsm
+func log(vararg messages: String) {
+    for msg in messages {
+        Debug.Log(msg)
+    }
+}
+
+log()
+log("loading")
+log("step 1", "step 2", "step 3")
+```
+
+```csharp
+public void log(params string[] messages)
+{
+    foreach (var msg in messages)
+    {
+        Debug.Log(msg);
+    }
+}
+```
+
+A `vararg` modifier on a non-final parameter produces E156. Multiple `vararg` parameters in a single function produces E157.
+
+## Default parameter values (since PrSM 5)
+
+A parameter declaration may include `= expr` to provide a default value. The default expression must be a compile-time constant (literal, `null`, `default`, or a `const` reference). All parameters with defaults must appear after all required parameters.
+
+```prsm
+func instantiate(prefab: GameObject, parent: Transform? = null, worldSpace: Bool = false): GameObject {
+    return GameObject.Instantiate(prefab, parent, worldSpace)
+}
+
+instantiate(bulletPrefab)
+instantiate(bulletPrefab, weaponSocket)
+instantiate(bulletPrefab, weaponSocket, true)
+```
+
+A non-constant default value produces E158. A required parameter following a parameter with a default produces E159.
+
+## Named arguments (since PrSM 5)
+
+Call sites may specify arguments by parameter name. Named arguments may appear in any order, but no positional argument shall follow a named argument.
+
+```prsm
+GameObject.Instantiate(
+    original: bulletPrefab,
+    position: spawnPoint.position,
+    rotation: Quaternion.identity,
+    parent: bulletContainer,
+)
+```
+
+A positional argument after a named argument produces E160. An unknown parameter name produces E161. Providing the same parameter twice produces E162.
+
+## `nameof` operator (since PrSM 5)
+
+`nameof(x)` evaluates at compile time to the string `"x"`. `nameof(Type.Member)` evaluates to `"Member"`. The argument shall reference a real symbol.
+
+```prsm
+component Player : MonoBehaviour {
+    require rb: Rigidbody
+
+    awake {
+        if rb == null {
+            error("Required component ${nameof(Rigidbody)} is missing")
+        }
+    }
+}
+```
+
+`nameof` is a contextual keyword. An unresolved symbol produces E163. An argument that does not resolve to a single identifier path produces E164.

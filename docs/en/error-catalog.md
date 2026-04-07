@@ -613,3 +613,66 @@ PrSM 4 introduces 47 new diagnostic codes (E100–E146, W020–W032) covering ex
 | W030 | Command | `command` declared without a `canExecute` guard |
 | W031 | bind | `bind` property never read |
 | W032 | Debugger | Source map generation failed for a file (non-fatal) |
+
+---
+
+## Language 5 diagnostics (since PrSM 5)
+
+PrSM 5 introduces 42 new error codes (E147–E188) and 5 new warning codes (W033–W037) covering general `yield`, attribute targets, preprocessor directives, `ref`/`out`/`vararg`/named/default parameters, `nameof`, `@burst`, the cross-context `unlisten`, the new pattern forms (relational, combinator, positional, property), `with` expressions, generic constraints, `ref` locals, `ref struct`, `stackalloc`, span slicing, `partial` declarations, generalized nested declarations, discard, and the safe-index expression. The Language 4 warning W031 (bind never read) is now actually emitted.
+
+### Errors
+
+| Code | Feature | Condition |
+|------|---------|-----------|
+| E147 | yield | `yield` outside coroutine or iterator-returning function |
+| E148 | yield | yield value type does not match declared element type |
+| E149 | attribute target | target not supported on declaration |
+| E150 | attribute target | `serialize` on non-auto-property |
+| E151 | preprocessor | unterminated `#if` |
+| E152 | preprocessor | `#elif` / `#else` without matching `#if` |
+| E153 | ref/out | argument modifier mismatch |
+| E154 | out | parameter not assigned before all returns |
+| E155 | ref | parameter passed an immutable `val` |
+| E156 | vararg | non-final parameter |
+| E157 | vararg | multiple vararg parameters |
+| E158 | default param | non-constant default value |
+| E159 | default param | required parameter after default |
+| E160 | named arg | positional after named |
+| E161 | named arg | unknown parameter name |
+| E162 | named arg | parameter provided twice |
+| E163 | nameof | unresolved symbol |
+| E164 | nameof | not a single identifier path |
+| E165 | @burst | unsupported declaration kind |
+| E166 | unlisten | no matching listen … manual |
+| E167 | relational pattern | type mismatch |
+| E168 | or pattern | mismatched bindings |
+| E169 | positional pattern | arity mismatch |
+| E170 | property pattern | unknown member |
+| E171 | property pattern | non-readable member |
+| E172 | with | unsupported type |
+| E173 | with | non-writable field |
+| E174 | unmanaged | conflicting class constraint |
+| E175 | notnull | on value type parameter |
+| E176 | ref local | outlives referenced storage |
+| E177 | ref return | references local variable |
+| E178 | val ref | used in write context |
+| E179 | ref struct | as non-ref struct field |
+| E180 | ref struct | as generic type arg without `allows ref struct` |
+| E181 | stackalloc | result not Span |
+| E182 | stackalloc | non-constant size |
+| E183 | span slice | unsupported type |
+| E184 | partial | mismatched partial modifier |
+| E185 | partial | mismatched type parameters |
+| E186 | partial | mismatched base/interfaces |
+| E187 | nested | component nested in another type |
+| E188 | discard | reading from `_` |
+
+### Warnings
+
+| Code | Feature | Condition |
+|------|---------|-----------|
+| W033 | yield | coroutine declares `Seq<T>` but never yields T |
+| W034 | preprocessor | unknown symbol passed through verbatim |
+| W035 | UniTask | `unitask` backend requested but package not found |
+| W036 | opt.structcopy | rewritten as `ref readonly` |
+| W037 | relational pattern | unreachable subsequent arm |
