@@ -120,7 +120,7 @@ fn lower_decl(decl: &Decl) -> (CsClass, Vec<CsClass>) {
                 let pos = cs_members.len();
                 cs_members.push(lower_awake(
                     name, &require_fields, &optional_fields,
-                    &child_fields, &parent_fields, &pool_fields, user_awake, &callable_signatures,
+                    &child_fields, &parent_fields, &pool_fields, user_awake.as_ref(), &callable_signatures,
                     &mut listen_ctx,
                 ));
                 Some(pos)
@@ -1366,13 +1366,18 @@ struct PoolInfo {
     prefab_field: Option<String>,
 }
 
-fn collect_component_init(members: &[Member]) -> (Vec<FieldInfo>, Vec<FieldInfo>, Vec<FieldInfo>, Vec<FieldInfo>, Vec<PoolInfo>, Option<&Block>) {
+fn collect_component_init(members: &[Member]) -> (Vec<FieldInfo>, Vec<FieldInfo>, Vec<FieldInfo>, Vec<FieldInfo>, Vec<PoolInfo>, Option<Block>) {
     let mut require = Vec::new();
     let mut optional = Vec::new();
     let mut child = Vec::new();
     let mut parent = Vec::new();
     let mut pools = Vec::new();
-    let mut user_awake = None;
+    let mut user_awake_body: Option<Block> = None;
+    // Issue #60: member-position `listen` declarations are registered
+    // inside the generated Awake method. We lift each one into a
+    // `Stmt::Listen` and prepend the whole batch to `user_awake_body`
+    // (preserving order).
+    let mut member_listens: Vec<Stmt> = Vec::new();
 
     // First pass: collect serialize field names by type for prefab matching
     let mut serialize_by_type: HashMap<String, String> = HashMap::new();
@@ -1409,12 +1414,39 @@ fn collect_component_init(members: &[Member]) -> (Vec<FieldInfo>, Vec<FieldInfo>
                 });
             }
             Member::Lifecycle { kind: LifecycleKind::Awake, body, .. } => {
-                user_awake = Some(body);
+                user_awake_body = Some(body.clone());
+            }
+            Member::ListenDecl { event, params, lifetime, body, span } => {
+                member_listens.push(Stmt::Listen {
+                    event: event.clone(),
+                    params: params.clone(),
+                    lifetime: lifetime.clone(),
+                    bound_name: None,
+                    body: body.clone(),
+                    span: *span,
+                });
             }
             _ => {}
         }
     }
-    (require, optional, child, parent, pools, user_awake)
+    // Combine member-level listens with the user-written Awake body.
+    let combined_awake = if !member_listens.is_empty() {
+        let mut stmts = member_listens;
+        let span = if let Some(b) = &user_awake_body {
+            let b_span = b.span;
+            stmts.extend(b.stmts.iter().cloned());
+            b_span
+        } else {
+            stmts.first().map(|s| stmt_span(s)).unwrap_or_else(|| Span {
+                start: crate::lexer::token::Position { line: 0, col: 0 },
+                end: crate::lexer::token::Position { line: 0, col: 0 },
+            })
+        };
+        Some(Block { stmts, span })
+    } else {
+        user_awake_body
+    };
+    (require, optional, child, parent, pools, combined_awake)
 }
 
 #[derive(Debug, Clone)]
@@ -2306,22 +2338,62 @@ fn lower_func_annotations(annotations: &[Annotation]) -> Vec<String> {
     let mut out = Vec::new();
     for ann in annotations {
         match ann.name.as_str() {
-            "burst" => out.push("[Unity.Burst.BurstCompile]".into()),
+            "burst" => {
+                // Issue #55: `@burst(compileSynchronously = true)` etc.
+                // forward named arguments as C# attribute named properties
+                // like `[BurstCompile(CompileSynchronously = true)]`.
+                let rendered = render_annotation_args(ann, /*pascal_names*/ true);
+                if rendered.is_empty() {
+                    out.push("[Unity.Burst.BurstCompile]".into());
+                } else {
+                    out.push(format!("[Unity.Burst.BurstCompile({})]", rendered));
+                }
+            }
             // Pass-through any other annotation as a verbatim attribute.
             // The args are rendered with `lower_expr` so literal/string
             // values forward to the corresponding C# attribute argument.
             _ => {
                 let cs_name = pascal_attr_case(&ann.name);
-                if ann.args.is_empty() {
+                let rendered = render_annotation_args(ann, /*pascal_names*/ true);
+                if rendered.is_empty() {
                     out.push(format!("[{}]", cs_name));
                 } else {
-                    let rendered: Vec<String> = ann.args.iter().map(lower_expr).collect();
-                    out.push(format!("[{}({})]", cs_name, rendered.join(", ")));
+                    out.push(format!("[{}({})]", cs_name, rendered));
                 }
             }
         }
     }
     out
+}
+
+/// Issue #55: render annotation arguments with optional named-argument
+/// support. When `pascal_names` is true, the argument name is
+/// PascalCased (C# attribute property convention); when false, the name
+/// is emitted verbatim. Positional (unnamed) arguments are rendered
+/// via `lower_expr`.
+fn render_annotation_args(ann: &Annotation, pascal_names: bool) -> String {
+    if ann.args.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = ann
+        .args
+        .iter()
+        .zip(ann.arg_names.iter())
+        .map(|(value, maybe_name)| {
+            let rendered = lower_expr(value);
+            if let Some(name) = maybe_name {
+                let cs_name = if pascal_names {
+                    pascal_attr_case(name)
+                } else {
+                    name.clone()
+                };
+                format!("{} = {}", cs_name, rendered)
+            } else {
+                rendered
+            }
+        })
+        .collect();
+    parts.join(", ")
 }
 
 /// Mirror the parser-side helper that capitalizes the first character
@@ -2637,7 +2709,8 @@ fn expr_span(expr: &Expr) -> Span {
         | Expr::SafeIndexAccess { span, .. }
         | Expr::ThrowExpr { span, .. }
         | Expr::With { span, .. }
-        | Expr::StackAlloc { span, .. } => *span,
+        | Expr::StackAlloc { span, .. }
+        | Expr::TryExpr { span, .. } => *span,
     }
 }
 
@@ -2660,7 +2733,8 @@ fn member_span(member: &Member) -> Span {
         | Member::StateMachine { span, .. }
         | Member::Command { span, .. }
         | Member::BindProperty { span, .. }
-        | Member::NestedDecl { span, .. } => *span,
+        | Member::NestedDecl { span, .. }
+        | Member::ListenDecl { span, .. } => *span,
     }
 }
 
@@ -3001,9 +3075,9 @@ fn lower_stmt_with_context(
                 result.unwrap_or(CsStmt::Raw("// empty when".into(), source_span))
             }
         }
-        Stmt::For { var_name, iterable, body, .. } => {
+        Stmt::For { var_name, for_pattern, iterable, body, .. } => {
             // Check if iterable is a range expression
-            if let Expr::Range { start, end, inclusive, descending, step, .. } = iterable {
+            if let Expr::Range { start: Some(start), end: Some(end), inclusive, descending, step, .. } = iterable {
                 let start_str = lower_expr(start);
                 let end_str = lower_expr_with_expected_type(end, None, callable_signatures);
                 let cond = if *descending {
@@ -3040,6 +3114,30 @@ fn lower_stmt_with_context(
                     incr,
                     body: lower_stmt_block_with_context(&body.stmts, callable_signatures, expected_return_ty),
                     source_span,
+                }
+            } else if let Some(pattern) = for_pattern {
+                // Issue #62: `for (k, v) in pairs` — tuple destructure.
+                // An empty `type_name` signals tuple deconstruction; we
+                // emit `foreach (var (k, v) in pairs)`. Non-empty type
+                // names fall back to the legacy path which names the
+                // loop variable after the first path segment.
+                if pattern.type_name.is_empty() && pattern.bindings.len() >= 2 {
+                    let bind_list = pattern.bindings.join(", ");
+                    CsStmt::ForEach {
+                        ty: "var".into(),
+                        name: format!("({})", bind_list),
+                        iterable: lower_expr_with_expected_type(iterable, None, callable_signatures),
+                        body: lower_stmt_block_with_context(&body.stmts, callable_signatures, expected_return_ty),
+                        source_span,
+                    }
+                } else {
+                    CsStmt::ForEach {
+                        ty: "var".into(),
+                        name: var_name.clone(),
+                        iterable: lower_expr_with_expected_type(iterable, None, callable_signatures),
+                        body: lower_stmt_block_with_context(&body.stmts, callable_signatures, expected_return_ty),
+                        source_span,
+                    }
                 }
             } else {
                 CsStmt::ForEach {
@@ -3601,11 +3699,14 @@ fn lower_expr_with_expected_type(
                 // `x in range` or `x in collection`
                 let lhs = lower_expr_with_expected_type(left, None, callable_signatures);
                 return match right.as_ref() {
-                    Expr::Range { start: range_start, end: range_end, .. } => {
+                    Expr::Range { start: Some(range_start), end: Some(range_end), .. } => {
                         let lo = lower_expr_with_expected_type(range_start, None, callable_signatures);
                         let hi = lower_expr_with_expected_type(range_end, None, callable_signatures);
                         format!("{} >= {} && {} <= {}", lhs, lo, lhs, hi)
                     }
+                    // Open-ended ranges in `in` position fall back to the
+                    // collection Contains path (rare; typically only slice
+                    // contexts produce open-ended ranges).
                     _ => {
                         let rhs = lower_expr_with_expected_type(right, None, callable_signatures);
                         format!("{}.Contains({})", rhs, lhs)
@@ -3730,14 +3831,22 @@ fn lower_expr_with_expected_type(
             // `string`, so the same lowering covers every case.
             if let Expr::Range { start, end, inclusive, .. } = &**index {
                 let recv = lower_expr_with_expected_type(receiver, None, callable_signatures);
-                let lo = lower_expr_with_expected_type(start, None, callable_signatures);
-                let hi = lower_expr_with_expected_type(end, None, callable_signatures);
-                // C# `..` is exclusive on the upper bound, so an
-                // inclusive PrSM range `1..=5` becomes `1..(5 + 1)`.
-                let hi_text = if *inclusive {
-                    format!("({} + 1)", hi)
-                } else {
-                    hi
+                // Issue #58: open-ended forms — `arr[..]`, `arr[2..]`,
+                // `arr[..3]`. C# supports all three directly.
+                let lo = start
+                    .as_deref()
+                    .map(|e| lower_expr_with_expected_type(e, None, callable_signatures))
+                    .unwrap_or_default();
+                let hi_text = match end.as_deref() {
+                    Some(hi_expr) => {
+                        let hi = lower_expr_with_expected_type(hi_expr, None, callable_signatures);
+                        if *inclusive {
+                            format!("({} + 1)", hi)
+                        } else {
+                            hi
+                        }
+                    }
+                    None => String::new(),
                 };
                 return format!("{}[{}..{}]", recv, lo, hi_text);
             }
@@ -3747,9 +3856,18 @@ fn lower_expr_with_expected_type(
                 lower_expr_with_expected_type(index, None, callable_signatures),
             )
         }
-        Expr::Range { start, .. } => {
+        Expr::Range { start, end, .. } => {
             // Ranges are handled in for-loop lowering; this is a fallback
-            lower_expr_with_expected_type(start, None, callable_signatures)
+            // path used by e.g. `val r = 0..10` outside for-loop position.
+            // Open-ended ranges are only meaningful in slice position —
+            // emit an empty string for the missing side.
+            if let Some(s) = start.as_deref() {
+                return lower_expr_with_expected_type(s, None, callable_signatures);
+            }
+            if let Some(e) = end.as_deref() {
+                return lower_expr_with_expected_type(e, None, callable_signatures);
+            }
+            String::new()
         }
         Expr::Is { expr, ty, .. } => {
             format!(
@@ -3892,11 +4010,27 @@ fn lower_expr_with_expected_type(
                 lower_expr_with_expected_type(expr, None, callable_signatures),
             )
         }
-        Expr::Tuple { elements, .. } => {
-            let parts: Vec<String> = elements
-                .iter()
-                .map(|e| lower_expr_with_expected_type(e, None, callable_signatures))
-                .collect();
+        Expr::Tuple { elements, names, .. } => {
+            // Issue #61: `(hp: 100, mp: 50)` lowers to a C# named tuple
+            // literal `(hp: 100, mp: 50)`. If any element is unnamed, the
+            // C# compiler would reject mixing — fall back to positional
+            // form in that case. All-named or all-unnamed are supported.
+            let all_named = names.iter().all(Option::is_some) && !names.is_empty();
+            let parts: Vec<String> = if all_named {
+                elements
+                    .iter()
+                    .zip(names.iter())
+                    .map(|(e, n)| {
+                        let value = lower_expr_with_expected_type(e, None, callable_signatures);
+                        format!("{}: {}", n.as_deref().unwrap_or(""), value)
+                    })
+                    .collect()
+            } else {
+                elements
+                    .iter()
+                    .map(|e| lower_expr_with_expected_type(e, None, callable_signatures))
+                    .collect()
+            };
             format!("({})", parts.join(", "))
         }
         Expr::ListLit { elements, .. } => {
@@ -4014,7 +4148,61 @@ fn lower_expr_with_expected_type(
             let size_str = lower_expr_with_expected_type(size, None, callable_signatures);
             format!("stackalloc {}[{}]", ty, size_str)
         }
+        // Issue #49: `try { expr } catch (e: T) { expr }` as expression.
+        // Lowered to an immediately-invoked lambda that wraps a C# try/
+        // catch and returns the last expression of whichever arm ran.
+        // Each block's last statement is treated as the result
+        // expression (matching the existing if/when expression form).
+        Expr::TryExpr { try_block, catches, .. } => {
+            let try_body = lower_try_expr_arm(&try_block.stmts, callable_signatures);
+            let catch_bodies: Vec<String> = catches
+                .iter()
+                .map(|c| {
+                    let arm = lower_try_expr_arm(&c.body.stmts, callable_signatures);
+                    format!(
+                        "catch ({} {}) {{ {} }}",
+                        lower_type(&c.ty),
+                        c.name,
+                        arm
+                    )
+                })
+                .collect();
+            format!(
+                "((System.Func<object>)(() => {{ try {{ {} }} {} }}))()",
+                try_body,
+                catch_bodies.join(" ")
+            )
+        }
     }
+}
+
+/// Issue #49: lower a try/catch arm block body into a flat sequence of
+/// C# statements where the *last* expression is wrapped in `return`.
+/// The caller embeds the result inside a `try` / `catch` body.
+fn lower_try_expr_arm(
+    stmts: &[Stmt],
+    callable_signatures: Option<&HashMap<String, CallableSignature>>,
+) -> String {
+    if stmts.is_empty() {
+        return "return default(object);".into();
+    }
+    let mut out_lines: Vec<String> = Vec::new();
+    for (i, s) in stmts.iter().enumerate() {
+        let is_last = i + 1 == stmts.len();
+        if is_last {
+            if let Stmt::Expr { expr, .. } = s {
+                let value = lower_expr_with_expected_type(expr, None, callable_signatures);
+                out_lines.push(format!("return ({});", value));
+                continue;
+            }
+        }
+        let cs = lower_stmt_with_context(s, callable_signatures, None);
+        let lines = cs_stmt_to_lines(&cs, 0);
+        for line in lines {
+            out_lines.push(line.trim_start().to_string());
+        }
+    }
+    out_lines.join(" ")
 }
 
 /// Heuristic: infer a C# type name for an expression literal.
@@ -4856,11 +5044,14 @@ fn map_type_name(name: &str) -> String {
 }
 
 fn lower_annotation(ann: &Annotation) -> String {
-    if ann.args.is_empty() {
+    // Issue #55: forward named annotation arguments (e.g.
+    // `@burst(compileSynchronously = true)`) as C# attribute named
+    // properties.
+    let rendered = render_annotation_args(ann, /*pascal_names*/ true);
+    if rendered.is_empty() {
         format!("[{}]", capitalize(&ann.name))
     } else {
-        let args: Vec<String> = ann.args.iter().map(|a| lower_expr(a)).collect();
-        format!("[{}({})]", capitalize(&ann.name), args.join(", "))
+        format!("[{}({})]", capitalize(&ann.name), rendered)
     }
 }
 
@@ -5512,8 +5703,8 @@ fn expr_uses_new_input(expr: &Expr) -> bool {
                 })
         }
         Expr::Range { start, end, step, .. } => {
-            expr_uses_new_input(start)
-                || expr_uses_new_input(end)
+            start.as_ref().map_or(false, |s| expr_uses_new_input(s))
+                || end.as_ref().map_or(false, |e| expr_uses_new_input(e))
                 || step.as_ref().map_or(false, |s| expr_uses_new_input(s))
         }
         Expr::StringInterp { parts, .. } => parts.iter().any(|p| {

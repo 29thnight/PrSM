@@ -99,7 +99,16 @@ namespace Prism.Editor
                 }
 
                 string value = trimmed.Substring(eq + 1).Trim();
-                if (value.StartsWith("\"") && value.EndsWith("\""))
+                // Issue #79: strip inline `# comment` tail before the
+                // quote handling. TOML's lexical rules treat `#` as the
+                // start of a comment except inside a string literal, so
+                // we walk the value tracking quote state and cut off
+                // the first unquoted `#`. The old code simply trimmed
+                // and then pattern-matched quote pairs, so a trailing
+                // `# default` defeated the quote check and returned
+                // the comment as part of the value.
+                value = StripTomlInlineComment(value).Trim();
+                if (value.StartsWith("\"") && value.EndsWith("\"") && value.Length >= 2)
                 {
                     value = value.Substring(1, value.Length - 2);
                 }
@@ -107,6 +116,33 @@ namespace Prism.Editor
             }
 
             return null;
+        }
+
+        /// Issue #79: strip a trailing `# comment` from a TOML value while
+        /// respecting string-literal quoting. The `#` character is only a
+        /// comment when it sits outside a `"..."` run; characters inside a
+        /// string literal must survive unchanged.
+        internal static string StripTomlInlineComment(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+            bool inString = false;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c == '"' && (i == 0 || value[i - 1] != '\\'))
+                {
+                    inString = !inString;
+                    continue;
+                }
+                if (!inString && c == '#')
+                {
+                    return value.Substring(0, i).TrimEnd();
+                }
+            }
+            return value;
         }
 
         internal static string NormalizeCompilerPath(string compilerPath)

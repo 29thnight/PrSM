@@ -98,6 +98,37 @@ test('grammar covers every v4 keyword', () => {
     }
 });
 
+// Issue #78: `start` belongs in the lifecycle-keywords pattern so it
+// gets scoped as keyword.other (alongside awake / update / onEnable)
+// rather than keyword.control (wait / listen / unlisten / …).
+test('grammar lifecycle pattern includes start', () => {
+    // Find the lifecycle-keywords block and assert `start` is
+    // present inside its `match` regex.
+    const lifecycleBlockMatch = grammarText.match(/"lifecycle-keywords":[\s\S]*?"match":\s*"([^"]+)"/);
+    assert.ok(
+        lifecycleBlockMatch,
+        'lifecycle-keywords block not found in prsm.tmLanguage.json',
+    );
+    const lifecycleRegex = lifecycleBlockMatch![1];
+    assert.ok(
+        /\bstart\b/.test(lifecycleRegex),
+        `start must appear in the lifecycle-keywords match, got: ${lifecycleRegex}`,
+    );
+    // And `start` must NOT still be present in the keyword.control
+    // regex that groups stop/stopAll/listen/unlisten — otherwise we
+    // get a double-classification mismatch.
+    const controlRegexes = [...grammarText.matchAll(/"keyword\.control\.prsm",\s*"match":\s*"([^"]+)"/g)];
+    for (const match of controlRegexes) {
+        const regex = match[1];
+        if (regex.includes('wait') && regex.includes('stopAll')) {
+            assert.ok(
+                !/\bstart\b/.test(regex),
+                `start must NOT appear in the keyword.control.prsm wait/stop/stopAll regex (duplicates lifecycle scope): ${regex}`,
+            );
+        }
+    }
+});
+
 test('grammar covers every v5 keyword', () => {
     for (const kw of v5Keywords) {
         assert.ok(

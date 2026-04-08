@@ -177,7 +177,10 @@ fn main() {
             }
         }
         Commands::Version => {
-            println!("prism 0.1.0");
+            // Read the version from the cargo package manifest so bumps
+            // through `scripts/bump-version.sh` propagate automatically
+            // without editing this file each release.
+            println!("prism {}", env!("CARGO_PKG_VERSION"));
             println!("Refraction compiler for PrSM - Unity-first scripting language");
             println!("Backend: C# source generation");
         }
@@ -208,11 +211,19 @@ fn main() {
             };
 
             if json {
+                // Issue #81: align the CLI envelope with Unity's
+                // `PrismJsonReport` schema. `project` is left blank for
+                // single-file compiles (there is no project concept
+                // here); `output_dir` echoes the CLI flag so Unity can
+                // discover the generated path. `compiled` and `outputs`
+                // are compile-only fields.
                 print_json(serde_json::json!({
+                    "project": "",
                     "files": report.files,
                     "compiled": report.compiled,
                     "errors": report.errors,
                     "warnings": report.warnings,
+                    "output_dir": output_dir.map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
                     "diagnostics": report.diagnostics,
                     "outputs": compiled_outputs_to_json(&report.file_results),
                 }));
@@ -253,11 +264,21 @@ fn main() {
             let report = driver::check_paths(&files);
 
             if json {
+                // Issue #81: align with the Unity `PrismJsonReport`
+                // schema. `check` is a type-check only mode so
+                // `compiled` is always 0 and `outputs` is empty, but
+                // both fields must still be present so `JsonUtility.
+                // FromJson<PrismJsonReport>()` on the Unity side sees
+                // the same shape it would see from `compile`.
                 print_json(serde_json::json!({
+                    "project": "",
                     "files": report.files,
+                    "compiled": 0,
                     "errors": report.errors,
                     "warnings": report.warnings,
+                    "output_dir": "",
                     "diagnostics": report.diagnostics,
+                    "outputs": Vec::<serde_json::Value>::new(),
                 }));
             } else {
                 print_text_diagnostics(&report, false);

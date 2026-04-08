@@ -87,7 +87,15 @@ pub fn default_step_filters() -> Vec<String> {
 /// it is silently skipped.
 pub fn flatten_source_map(map: &SourceMapFile) -> DebugSourceMap {
     let mut mappings: Vec<DebugMapping> = Vec::new();
-    if let Some(decl) = &map.declaration {
+    // Issue #71: iterate every top-level type declaration. Fall back
+    // to the legacy `declaration` field for source maps produced by
+    // older compilers (or JSON blobs deserialized without the new
+    // `declarations` field).
+    if !map.declarations.is_empty() {
+        for decl in &map.declarations {
+            push_anchor_mappings(decl, &mut mappings);
+        }
+    } else if let Some(decl) = &map.declaration {
         push_anchor_mappings(decl, &mut mappings);
     }
     for member in &map.members {
@@ -117,17 +125,33 @@ fn push_anchor_mappings(anchor: &SourceMapAnchor, out: &mut Vec<DebugMapping>) {
 }
 
 fn push_pair(src: SourceMapSpan, gen: SourceMapSpan, out: &mut Vec<DebugMapping>) {
-    let src_lines = src.line..=src.end_line.max(src.line);
-    let gen_lines = gen.line..=gen.end_line.max(gen.line);
-    let src_count = (src.end_line.saturating_sub(src.line)) as usize + 1;
-    let gen_count = (gen.end_line.saturating_sub(gen.line)) as usize + 1;
-    let pair_count = src_count.min(gen_count).max(1);
+    let src_lines: Vec<u32> = (src.line..=src.end_line.max(src.line)).collect();
+    let gen_lines: Vec<u32> = (gen.line..=gen.end_line.max(gen.line)).collect();
+    let src_count = src_lines.len();
+    let gen_count = gen_lines.len();
+    if src_count == 0 || gen_count == 0 {
+        out.push(DebugMapping {
+            prsm_line: src.line,
+            cs_line: gen.line,
+        });
+        return;
+    }
 
-    let src_vec: Vec<u32> = src_lines.collect();
-    let gen_vec: Vec<u32> = gen_lines.collect();
+    // Issue #73: when a one-line PrSM statement lowers to multi-line C#
+    // (or vice versa), the old `min(src, gen)` stopped after the first
+    // pair and left the remaining lines unreachable from the debugger.
+    // Emit one mapping per generated line, repeating the last PrSM line
+    // when we run out (so every generated line has a PrSM backreference).
+    // Similarly, emit one mapping per source line when the source span
+    // is longer than the generated span (the reverse direction).
+    let pair_count = src_count.max(gen_count);
     for i in 0..pair_count {
-        let src_line = src_vec.get(i).copied().unwrap_or(src.line);
-        let cs_line = gen_vec.get(i).copied().unwrap_or(gen.line);
+        let src_line = src_lines.get(i).copied().unwrap_or_else(|| {
+            *src_lines.last().unwrap_or(&src.line)
+        });
+        let cs_line = gen_lines.get(i).copied().unwrap_or_else(|| {
+            *gen_lines.last().unwrap_or(&gen.line)
+        });
         out.push(DebugMapping {
             prsm_line: src_line,
             cs_line,
@@ -226,19 +250,21 @@ mod tests {
     }
 
     fn rich_map() -> SourceMapFile {
+        let player_decl = SourceMapAnchor {
+            kind: "Type".into(),
+            name: "Player".into(),
+            qualified_name: "Player".into(),
+            source_span: span_pair(1, 30),
+            generated_span: Some(span_pair(5, 90)),
+            generated_name_span: None,
+            segments: vec![],
+        };
         SourceMapFile {
             version: 1,
             source_file: PathBuf::from("src/Player.prsm"),
             generated_file: PathBuf::from("Generated/Player.cs"),
-            declaration: Some(SourceMapAnchor {
-                kind: "Type".into(),
-                name: "Player".into(),
-                qualified_name: "Player".into(),
-                source_span: span_pair(1, 30),
-                generated_span: Some(span_pair(5, 90)),
-                generated_name_span: None,
-                segments: vec![],
-            }),
+            declaration: Some(player_decl.clone()),
+            declarations: vec![player_decl],
             members: vec![SourceMapAnchor {
                 kind: "Func".into(),
                 name: "Update".into(),
@@ -289,6 +315,75 @@ mod tests {
         assert!(!should_step_into("__opt_prev_label_text_hp", &filters));
         assert!(should_step_into("Update", &filters));
         assert!(should_step_into("ComputeDamage", &filters));
+    }
+
+    // Issue #73: push_pair must emit one mapping per generated line
+    // even when the source span is shorter. This keeps breakpoints on
+    // multi-line lowerings reachable.
+    #[test]
+    fn push_pair_emits_one_mapping_per_generated_line_when_span_shorter() {
+        let src = SourceMapSpan { line: 10, col: 1, end_line: 10, end_col: 1 };
+        let gen = SourceMapSpan { line: 20, col: 1, end_line: 23, end_col: 1 };
+        let mut out = Vec::new();
+        push_pair(src, gen, &mut out);
+        assert_eq!(out.len(), 4);
+        // Every generated line 20..=23 must be present.
+        for cs_line in 20..=23 {
+            assert!(out.iter().any(|m| m.cs_line == cs_line));
+        }
+        // They all map back to the single source line.
+        assert!(out.iter().all(|m| m.prsm_line == 10));
+    }
+
+    // Issue #73: conversely, a multi-line source span that lowers to
+    // one generated line must still emit one mapping per source line.
+    #[test]
+    fn push_pair_emits_one_mapping_per_source_line_when_gen_shorter() {
+        let src = SourceMapSpan { line: 5, col: 1, end_line: 7, end_col: 1 };
+        let gen = SourceMapSpan { line: 20, col: 1, end_line: 20, end_col: 1 };
+        let mut out = Vec::new();
+        push_pair(src, gen, &mut out);
+        assert_eq!(out.len(), 3);
+        for prsm_line in 5..=7 {
+            assert!(out.iter().any(|m| m.prsm_line == prsm_line));
+        }
+        assert!(out.iter().all(|m| m.cs_line == 20));
+    }
+
+    // Issue #71: flatten_source_map walks every declaration in the
+    // `declarations` vector, not just the primary one.
+    #[test]
+    fn flatten_source_map_walks_all_declarations() {
+        let decl_a = SourceMapAnchor {
+            kind: "Type".into(),
+            name: "A".into(),
+            qualified_name: "A".into(),
+            source_span: span_pair(1, 3),
+            generated_span: Some(span_pair(10, 12)),
+            generated_name_span: None,
+            segments: vec![],
+        };
+        let decl_b = SourceMapAnchor {
+            kind: "Type".into(),
+            name: "B".into(),
+            qualified_name: "B".into(),
+            source_span: span_pair(5, 7),
+            generated_span: Some(span_pair(20, 22)),
+            generated_name_span: None,
+            segments: vec![],
+        };
+        let map = SourceMapFile {
+            version: 1,
+            source_file: PathBuf::from("src/Pair.prsm"),
+            generated_file: PathBuf::from("Generated/Pair.cs"),
+            declaration: Some(decl_a.clone()),
+            declarations: vec![decl_a, decl_b],
+            members: vec![],
+        };
+        let flat = flatten_source_map(&map);
+        // Both declaration's source→generated pairs should appear.
+        assert!(flat.mappings.iter().any(|m| m.prsm_line == 1 && m.cs_line == 10));
+        assert!(flat.mappings.iter().any(|m| m.prsm_line == 5 && m.cs_line == 20));
     }
 
     #[test]

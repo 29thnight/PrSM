@@ -20,6 +20,13 @@ pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     errors: Vec<ParseError>,
+    /// Issue #50: disables trailing-lambda call desugar inside control-flow
+    /// condition positions (`if expr { body }`, `while expr { body }`,
+    /// `for v in expr { body }`, `when expr { ... }`). Without this flag,
+    /// the parser would try to interpret the control-flow body `{` as a
+    /// trailing-lambda argument on the preceding call, breaking every
+    /// existing `if foo() { ... }` example.
+    no_trailing_lambda: bool,
 }
 
 impl Parser {
@@ -28,7 +35,18 @@ impl Parser {
             tokens,
             pos: 0,
             errors: Vec::new(),
+            no_trailing_lambda: false,
         }
+    }
+
+    /// Issue #50: run `f` with `no_trailing_lambda` temporarily set to
+    /// true. Used by `if` / `while` / `for` / `when` subject parsing.
+    fn with_no_trailing_lambda<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let prev = self.no_trailing_lambda;
+        self.no_trailing_lambda = true;
+        let result = f(self);
+        self.no_trailing_lambda = prev;
+        result
     }
 
     pub fn errors(&self) -> &[ParseError] {
@@ -353,8 +371,104 @@ impl Parser {
             TokenKind::TypeAlias => self.parse_type_alias(),
             TokenKind::Struct => self.parse_struct(),
             TokenKind::Extend => self.parse_extension(),
-            _ => Err(self.error(format!("Expected declaration (component, singleton, asset, class, enum, attribute, interface, typealias, struct, extend), found {:?}", self.peek()))),
+            // Issue #59: top-level `func` / `const` / `coroutine`. Wrap
+            // the parsed member in a synthetic `Globals` partial class.
+            // The partial modifier lets multiple files contribute to the
+            // same `Globals` class, so `const MAX_HEALTH = 100` in A.prsm
+            // and `func getName() = "Alice"` in B.prsm merge into one
+            // `public static partial class Globals { ... }` in C#.
+            TokenKind::Func | TokenKind::Const | TokenKind::Coroutine => {
+                self.parse_top_level_item_as_globals(annotations)
+            }
+            _ => Err(self.error(format!("Expected declaration (component, singleton, asset, class, enum, attribute, interface, typealias, struct, extend, func, const, coroutine), found {:?}", self.peek()))),
         }
+    }
+
+    /// Issue #59: wrap a top-level `func` / `const` / `coroutine` in a
+    /// synthetic `partial class Globals` so the existing Class lowering
+    /// path handles them. The member is marked `public static` where
+    /// applicable. If the file declares multiple items (currently
+    /// unsupported — enforced by `parse_file`'s S5.1 check), each
+    /// lands in its own Globals decl; the driver-level merge is future
+    /// work.
+    fn parse_top_level_item_as_globals(
+        &mut self,
+        annotations: Vec<Annotation>,
+    ) -> Result<Decl, ParseError> {
+        let start = self.peek_span();
+        let member = match self.peek().clone() {
+            TokenKind::Func => {
+                // Parse as `public static func name(...)`. `parse_func_with_annotations`
+                // consumes the `func` token and calls `parse_func_inner_ext`.
+                self.parse_func_with_annotations(Visibility::Public, false, annotations.clone())
+                    .and_then(|m| match m {
+                        Member::Func {
+                            name,
+                            name_span,
+                            type_params,
+                            where_clauses,
+                            params,
+                            return_ty,
+                            body,
+                            is_operator,
+                            is_async,
+                            is_override,
+                            is_abstract,
+                            is_open,
+                            annotations,
+                            span,
+                            ..
+                        } => Ok(Member::Func {
+                            visibility: Visibility::Public,
+                            is_static: true,
+                            is_override,
+                            is_abstract,
+                            is_open,
+                            is_operator,
+                            is_async,
+                            annotations,
+                            name,
+                            name_span,
+                            type_params,
+                            where_clauses,
+                            params,
+                            return_ty,
+                            body,
+                            span,
+                        }),
+                        other => Ok(other),
+                    })?
+            }
+            TokenKind::Const | TokenKind::Fixed => {
+                // Parse `const NAME: Type = literal` as a public static
+                // field on the Globals class.
+                self.parse_val_var_field_with_static(Visibility::Public, true)?
+            }
+            TokenKind::Coroutine => {
+                self.parse_coroutine()?
+            }
+            _ => unreachable!("parse_top_level_item_as_globals called with wrong token"),
+        };
+        // Consume optional trailing newlines after the member body.
+        self.skip_newlines();
+        let span = Span { start: start.start, end: self.peek_span().end };
+        let name_span = start;
+        Ok(Decl::Class {
+            name: "Globals".to_string(),
+            name_span,
+            is_abstract: false,
+            is_sealed: false,
+            is_partial: true,
+            type_params: vec![],
+            where_clauses: vec![],
+            super_class: None,
+            super_class_span: None,
+            interfaces: vec![],
+            interface_spans: vec![],
+            members: vec![member],
+            primary_ctor_params: vec![],
+            span,
+        })
     }
 
     fn parse_interface(&mut self) -> Result<Decl, ParseError> {
@@ -713,15 +827,20 @@ impl Parser {
                 let saved = self.pos;
                 self.advance(); // consume comma
                 if let TokenKind::Identifier(next_name) = self.peek().clone() {
-                    let saved2 = self.pos;
-                    self.advance(); // consume ident
+                    self.advance(); // consume ident — pos is now AFTER the ident
                     if self.check(&TokenKind::Colon) {
-                        // This is a new where clause — backtrack
+                        // This is a new where clause — backtrack fully so the
+                        // outer loop re-enters `parse_where_clauses` with the
+                        // comma intact.
                         self.pos = saved;
                         break;
                     } else {
-                        // This is another constraint on the same type param
-                        self.pos = saved2; // stay after ident
+                        // Issue #54: previously we reset `self.pos` back to
+                        // the identifier, which left the parser stuck —
+                        // subsequent iterations would re-see the same ident
+                        // and `expect(LBrace)` in the caller would fail.
+                        // Keep `self.pos` AFTER the ident so the next comma
+                        // (if any) or `{` is observed correctly.
                         constraints.push(next_name);
                     }
                 } else {
@@ -1044,6 +1163,26 @@ impl Parser {
                     _ => Err(self.error(format!("Expected member after visibility, found {:?}", self.peek()))),
                 }
             }
+            TokenKind::Listen => {
+                // Issue #60: member-position `listen event [until X] { ... }`.
+                // Parse with the existing statement parser and repackage
+                // the result as a `Member::ListenDecl`. The lifecycle
+                // modifier is preserved so `until disable` / `until destroy`
+                // behave the same as the body-level form.
+                let listen_stmt = self.parse_listen_stmt()?;
+                if let Stmt::Listen { event, params, lifetime, body, span, .. } = listen_stmt {
+                    return Ok(Member::ListenDecl {
+                        event,
+                        params,
+                        lifetime,
+                        body,
+                        span,
+                    });
+                }
+                return Err(self.error(
+                    "internal: parse_listen_stmt returned a non-Listen statement".into()
+                ));
+            }
             TokenKind::Static => {
                 self.advance(); // consume 'static'
                 match self.peek().clone() {
@@ -1123,16 +1262,28 @@ impl Parser {
             // `return` keyword token was rejected and the second member's
             // declaration was misparsed as a top-level decl.
             let (name, _) = self.expect_ident_or_keyword()?;
-            let args = if self.eat(&TokenKind::LParen) {
-                let mut a = Vec::new();
+            // Issue #55: annotation arguments accept the same `name = expr`
+            // and `name: expr` named forms as call arguments. We parse each
+            // element as a `parse_call_arg`, which uses the same precedence
+            // rules as function calls, and store the name alongside the
+            // positional expression.
+            let (args, arg_names) = if self.eat(&TokenKind::LParen) {
+                let mut exprs = Vec::new();
+                let mut names: Vec<Option<String>> = Vec::new();
+                self.skip_newlines();
                 while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
-                    a.push(self.parse_expr()?);
+                    let arg = self.parse_call_arg()?;
+                    names.push(arg.name);
+                    exprs.push(arg.value);
+                    self.skip_newlines();
                     if !self.eat(&TokenKind::Comma) { break; }
+                    self.skip_newlines();
                 }
+                self.skip_newlines();
                 self.expect(&TokenKind::RParen)?;
-                a
+                (exprs, names)
             } else {
-                vec![]
+                (vec![], vec![])
             };
             let ann_span = Span { start: start.start, end: self.peek_span().end };
 
@@ -1165,7 +1316,7 @@ impl Parser {
                     });
                 }
             } else {
-                annotations.push(Annotation { name, args, span: ann_span });
+                annotations.push(Annotation { name, args, arg_names, span: ann_span });
             }
             self.skip_newlines();
         }
@@ -2376,7 +2527,9 @@ impl Parser {
     fn parse_if_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek_span();
         self.advance(); // consume 'if'
-        let cond = self.parse_expr()?;
+        // Issue #50: suppress trailing-lambda desugar inside the condition
+        // so the `{ ... }` body is not misread as a lambda arg.
+        let cond = self.with_no_trailing_lambda(|p| p.parse_expr())?;
         self.skip_newlines();
         let then_block = self.parse_block()?;
 
@@ -2406,7 +2559,9 @@ impl Parser {
         self.advance(); // consume 'when'
 
         let subject = if !self.check(&TokenKind::LBrace) && !self.check(&TokenKind::Newline) {
-            Some(self.parse_expr()?)
+            // Issue #50: the `when` body `{` must not be consumed as a
+            // trailing-lambda argument on the subject expression.
+            Some(self.with_no_trailing_lambda(|p| p.parse_expr())?)
         } else {
             None
         };
@@ -2433,11 +2588,12 @@ impl Parser {
     fn parse_when_branch(&mut self) -> Result<WhenBranch, ParseError> {
         let start = self.peek_span();
 
-        // v2/v5: parse the first pattern, then optionally extend with `and`/comma combinators.
+        // v2/v5: parse the first pattern, then optionally extend with `and`/`or`/comma combinators.
         let first_pattern = self.parse_pattern_atom()?;
 
         // v5 Sprint 4: `pattern and pattern` combinator. Parse iteratively
         // so chains like `> 0 and < 100 and != 50` left-associate naturally.
+        // `and` binds tighter than `or`, mirroring boolean algebra.
         let mut combined = first_pattern;
         while self.check_contextual("and") {
             self.advance();
@@ -2450,10 +2606,45 @@ impl Parser {
             };
         }
 
+        // Issue #52: pattern `or` combinator — `is Enemy or is Boss`,
+        // `< 0 or > 1000`, etc. Collected into the existing `WhenPattern::Or`
+        // variant (same shape as the comma form) so downstream switch
+        // emission reuses the same path. We also re-enter the `and` loop
+        // after each `or` so `a or b and c` parses as `a or (b and c)`.
+        let mut or_patterns: Vec<WhenPattern> = Vec::new();
+        while self.check_contextual("or") {
+            self.advance();
+            let mut next = self.parse_pattern_atom()?;
+            while self.check_contextual("and") {
+                self.advance();
+                let right = self.parse_pattern_atom()?;
+                let span = Span { start: start.start, end: self.peek_span().end };
+                next = WhenPattern::And {
+                    left: Box::new(next),
+                    right: Box::new(right),
+                    span,
+                };
+            }
+            or_patterns.push(next);
+        }
+        let combined = if !or_patterns.is_empty() {
+            let mut patterns = vec![combined];
+            patterns.extend(or_patterns);
+            WhenPattern::Or {
+                span: Span { start: start.start, end: self.peek_span().end },
+                patterns,
+            }
+        } else {
+            combined
+        };
+
         // v4: OR pattern — if we see ',' and then another pattern (not '=>'),
         // collect multiple patterns into a single Or wrapper.
         let pattern = if self.check(&TokenKind::Comma) && !matches!(combined, WhenPattern::Else | WhenPattern::Range { .. }) {
-            let mut patterns = vec![combined];
+            let mut patterns = match combined {
+                WhenPattern::Or { patterns, .. } => patterns,
+                other => vec![other],
+            };
             while self.eat(&TokenKind::Comma) {
                 self.skip_newlines();
                 let next = self.parse_pattern_atom()?;
@@ -2772,13 +2963,60 @@ impl Parser {
                 bindings: bp.bindings,
                 span: bp.span,
             }))
+        } else if self.check(&TokenKind::LParen) {
+            // Issue #62: `for (k, v) in pairs` — tuple destructuring loop.
+            // Matches the existing `val (a, b) = expr` shape: an empty
+            // `type_name` signals tuple deconstruction to lowering.
+            let pat_start = self.peek_span();
+            let saved = self.pos;
+            self.advance(); // consume '('
+            let mut bindings: Vec<String> = Vec::new();
+            let mut ok = true;
+            loop {
+                self.skip_newlines();
+                if self.check_contextual("_") {
+                    bindings.push("_".into());
+                    self.advance();
+                } else if let TokenKind::Identifier(name) = self.peek().clone() {
+                    bindings.push(name);
+                    self.advance();
+                } else {
+                    ok = false;
+                    break;
+                }
+                self.skip_newlines();
+                if !self.eat(&TokenKind::Comma) { break; }
+            }
+            if ok && self.eat(&TokenKind::RParen) && bindings.len() >= 2 {
+                let pat_span = Span {
+                    start: pat_start.start,
+                    end: self.peek_span().end,
+                };
+                // Use the first binding as the loop variable name (semantic
+                // analyzer expects a non-empty var_name for scope bookkeeping).
+                // Lowering detects `type_name == ""` and emits a C# tuple
+                // deconstruction pattern instead.
+                let first = bindings[0].clone();
+                (first, pat_span, Some(DestructurePattern {
+                    type_name: String::new(),
+                    bindings,
+                    span: pat_span,
+                }))
+            } else {
+                // Not a tuple destructure — restore and fall back.
+                self.pos = saved;
+                let (n, s) = self.expect_ident()?;
+                (n, s, None)
+            }
         } else {
             let (n, s) = self.expect_ident()?;
             (n, s, None)
         };
 
         self.expect(&TokenKind::In)?;
-        let iterable = self.parse_expr()?;
+        // Issue #50: suppress trailing-lambda in the iterable so the
+        // loop body `{` is not misread as a lambda arg.
+        let iterable = self.with_no_trailing_lambda(|p| p.parse_expr())?;
         self.skip_newlines();
         let body = self.parse_block()?;
         Ok(Stmt::For {
@@ -2794,7 +3032,8 @@ impl Parser {
     fn parse_while_stmt(&mut self) -> Result<Stmt, ParseError> {
         let start = self.peek_span();
         self.advance(); // consume 'while'
-        let cond = self.parse_expr()?;
+        // Issue #50: same cond-context trailing-lambda suppression as `if`.
+        let cond = self.with_no_trailing_lambda(|p| p.parse_expr())?;
         self.skip_newlines();
         let body = self.parse_block()?;
         Ok(Stmt::While {
@@ -2885,7 +3124,10 @@ impl Parser {
         self.advance(); // consume 'listen'
         // Use parse_additive (not parse_expr) to avoid consuming `until` as a range operator.
         // listen events are always simple member-access expressions like `button.onClick`.
-        let event = self.parse_additive()?;
+        // Issue #50: the `{ ... }` that follows an event is the listen body,
+        // not a trailing lambda — suppress the trailing-lambda desugar
+        // while parsing the event expression.
+        let event = self.with_no_trailing_lambda(|p| p.parse_additive())?;
 
         // Parse optional lifetime modifier before the body block:
         //   listen event until disable { … }   → UntilDisable
@@ -3062,6 +3304,50 @@ impl Parser {
             try_block,
             catches,
             finally_block,
+            span: Span { start: start.start, end: self.peek_span().end },
+        })
+    }
+
+    /// Issue #49: `try { expr } catch (e: T) { expr }` in expression
+    /// position. The lang-4 spec requires exactly one catch clause for
+    /// the expression form. `finally` is not permitted here (use the
+    /// statement form).
+    fn parse_try_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.peek_span();
+        self.advance(); // consume 'try'
+        self.skip_newlines();
+        let try_block = self.parse_block()?;
+
+        let mut catches = Vec::new();
+        while self.check(&TokenKind::Catch) {
+            let catch_start = self.peek_span();
+            self.advance(); // consume 'catch'
+            // `catch (e: T)` — the expression form is strict about the
+            // shape (no bare `catch { ... }`).
+            self.expect(&TokenKind::LParen)?;
+            let (name, _) = self.expect_ident()?;
+            self.expect(&TokenKind::Colon)?;
+            let ty = self.parse_type()?;
+            self.expect(&TokenKind::RParen)?;
+            self.skip_newlines();
+            let body = self.parse_block()?;
+            catches.push(CatchClause {
+                name,
+                ty,
+                body,
+                span: Span { start: catch_start.start, end: self.peek_span().end },
+            });
+        }
+
+        if catches.is_empty() {
+            return Err(self.error(
+                "try expression requires at least one catch clause".into(),
+            ));
+        }
+
+        Ok(Expr::TryExpr {
+            try_block,
+            catches,
             span: Span { start: start.start, end: self.peek_span().end },
         })
     }
@@ -3287,7 +3573,11 @@ impl Parser {
             None
         };
         self.expect(&TokenKind::Eq)?;
-        let init = self.parse_expr()?;
+        // Issue #50: the optional `{ body }` after `use x = expr` is the
+        // use statement body, not a trailing lambda — suppress trailing-
+        // lambda desugar while parsing the initializer so `use s = openFile() { log(s) }`
+        // keeps the braces for the body.
+        let init = self.with_no_trailing_lambda(|p| p.parse_expr())?;
 
         let body = if has_val {
             // `use val ...` — declaration form, no body
@@ -3375,7 +3665,8 @@ impl Parser {
     fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.peek_span();
         self.advance(); // consume 'if'
-        let cond = self.parse_expr()?;
+        // Issue #50: same condition-context trailing-lambda suppression.
+        let cond = self.with_no_trailing_lambda(|p| p.parse_expr())?;
         self.skip_newlines();
         let then_block = self.parse_block()?;
 
@@ -3404,7 +3695,8 @@ impl Parser {
         self.advance(); // consume 'when'
 
         let subject = if !self.check(&TokenKind::LBrace) && !self.check(&TokenKind::Newline) {
-            Some(Box::new(self.parse_expr()?))
+            // Issue #50: trailing-lambda suppression — see parse_when_stmt.
+            Some(Box::new(self.with_no_trailing_lambda(|p| p.parse_expr())?))
         } else {
             None
         };
@@ -3441,6 +3733,9 @@ impl Parser {
         while self.check(&TokenKind::Elvis) {
             let start = left.span();
             self.advance();
+            // Issue #56: allow newline(s) after the infix operator so that
+            // wrapped expressions like `a ?:\n  b` continue correctly.
+            self.skip_newlines();
             let right = self.parse_or()?;
             let span = Span { start: start.start, end: right.span().end };
             left = Expr::Elvis {
@@ -3457,6 +3752,7 @@ impl Parser {
         while self.check(&TokenKind::PipePipe) {
             let start = left.span();
             self.advance();
+            self.skip_newlines();
             let right = self.parse_and()?;
             let span = Span { start: start.start, end: right.span().end };
             left = Expr::Binary { left: Box::new(left), op: BinOp::Or, right: Box::new(right), span };
@@ -3469,6 +3765,7 @@ impl Parser {
         while self.check(&TokenKind::AmpAmp) {
             let start = left.span();
             self.advance();
+            self.skip_newlines();
             let right = self.parse_equality()?;
             let span = Span { start: start.start, end: right.span().end };
             left = Expr::Binary { left: Box::new(left), op: BinOp::And, right: Box::new(right), span };
@@ -3486,6 +3783,7 @@ impl Parser {
             };
             let start = left.span();
             self.advance();
+            self.skip_newlines();
             let right = self.parse_comparison()?;
             let span = Span { start: start.start, end: right.span().end };
             left = Expr::Binary { left: Box::new(left), op, right: Box::new(right), span };
@@ -3504,6 +3802,7 @@ impl Parser {
                 TokenKind::Is => {
                     let start = left.span();
                     self.advance();
+                    self.skip_newlines();
                     let ty = self.parse_type()?;
                     let span = Span { start: start.start, end: self.peek_span().end };
                     left = Expr::Is { expr: Box::new(left), ty, span };
@@ -3512,6 +3811,7 @@ impl Parser {
                 TokenKind::As => {
                     let start = left.span();
                     self.advance(); // consume 'as'
+                    self.skip_newlines();
                     // Check for force cast: as! Type
                     if self.check(&TokenKind::Bang) {
                         self.advance(); // consume '!'
@@ -3530,6 +3830,7 @@ impl Parser {
                 TokenKind::In => {
                     let start = left.span();
                     self.advance();
+                    self.skip_newlines();
                     let right = self.parse_range()?;
                     let span = Span { start: start.start, end: right.span().end };
                     left = Expr::Binary { left: Box::new(left), op: BinOp::In, right: Box::new(right), span };
@@ -3539,6 +3840,7 @@ impl Parser {
             };
             let start = left.span();
             self.advance();
+            self.skip_newlines();
             let right = self.parse_range()?;
             let span = Span { start: start.start, end: right.span().end };
             left = Expr::Binary { left: Box::new(left), op, right: Box::new(right), span };
@@ -3554,31 +3856,46 @@ impl Parser {
             TokenKind::DotDot => {
                 let start = left.span();
                 self.advance();
-                let end = self.parse_additive()?;
+                // Issue #58: open-ended upper form `a..`. If the next
+                // token terminates the range context, skip the upper
+                // parse and record `end = None`.
+                let end = if self.range_upper_missing() {
+                    None
+                } else {
+                    Some(Box::new(self.parse_additive()?))
+                };
                 let step = if self.eat(&TokenKind::Step) {
                     Some(Box::new(self.parse_additive()?))
                 } else {
                     None
                 };
                 let span = Span { start: start.start, end: self.peek_span().end };
-                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: true, descending: false, step, span })
+                Ok(Expr::Range { start: Some(Box::new(left)), end, inclusive: true, descending: false, step, span })
             }
             TokenKind::Until => {
                 let start = left.span();
                 self.advance();
-                let end = self.parse_additive()?;
+                let end = if self.range_upper_missing() {
+                    None
+                } else {
+                    Some(Box::new(self.parse_additive()?))
+                };
                 let step = if self.eat(&TokenKind::Step) {
                     Some(Box::new(self.parse_additive()?))
                 } else {
                     None
                 };
                 let span = Span { start: start.start, end: self.peek_span().end };
-                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: false, descending: false, step, span })
+                Ok(Expr::Range { start: Some(Box::new(left)), end, inclusive: false, descending: false, step, span })
             }
             TokenKind::DownTo => {
                 let start = left.span();
                 self.advance();
-                let end = self.parse_additive()?;
+                let end = if self.range_upper_missing() {
+                    None
+                } else {
+                    Some(Box::new(self.parse_additive()?))
+                };
                 let step = if self.eat(&TokenKind::Step) {
                     Some(Box::new(self.parse_additive()?))
                 } else {
@@ -3586,10 +3903,27 @@ impl Parser {
                 };
                 let span = Span { start: start.start, end: self.peek_span().end };
                 // downTo is an inclusive descending range: [left, end] iterating downward
-                Ok(Expr::Range { start: Box::new(left), end: Box::new(end), inclusive: true, descending: true, step, span })
+                Ok(Expr::Range { start: Some(Box::new(left)), end, inclusive: true, descending: true, step, span })
             }
             _ => Ok(left),
         }
+    }
+
+    /// Issue #58: detect whether the range-operator upper bound is
+    /// missing. A missing upper bound is indicated by `]` (index slice),
+    /// `)` (closing paren), `,` (tuple / call arg list), `}` (block),
+    /// newline, or EOF. Valid upper-bound expressions always start with
+    /// a prefix that is none of those.
+    fn range_upper_missing(&self) -> bool {
+        matches!(
+            self.peek(),
+            TokenKind::RBracket
+                | TokenKind::RParen
+                | TokenKind::RBrace
+                | TokenKind::Comma
+                | TokenKind::Newline
+                | TokenKind::Eof
+        )
     }
 
     fn parse_additive(&mut self) -> Result<Expr, ParseError> {
@@ -3602,6 +3936,7 @@ impl Parser {
             };
             let start = left.span();
             self.advance();
+            self.skip_newlines();
             let right = self.parse_multiplicative()?;
             let span = Span { start: start.start, end: right.span().end };
             left = Expr::Binary { left: Box::new(left), op, right: Box::new(right), span };
@@ -3620,6 +3955,7 @@ impl Parser {
             };
             let start = left.span();
             self.advance();
+            self.skip_newlines();
             let right = self.parse_unary()?;
             let span = Span { start: start.start, end: right.span().end };
             left = Expr::Binary { left: Box::new(left), op, right: Box::new(right), span };
@@ -3659,14 +3995,50 @@ impl Parser {
         let mut expr = self.parse_primary()?;
 
         loop {
+            // Issue #57: leading-dot chain continuation across newlines.
+            // When the current token is a newline AND the next non-newline
+            // token is `.` or `?.`, consume the newline(s) so the postfix
+            // loop can pick up the continuation. This must NOT consume
+            // newlines unconditionally — doing so would merge unrelated
+            // statements. We only skip when a dot-start continuation is
+            // actually pending.
+            if matches!(self.peek(), TokenKind::Newline) {
+                let mut look = self.pos;
+                while look < self.tokens.len()
+                    && matches!(self.tokens[look].kind, TokenKind::Newline)
+                {
+                    look += 1;
+                }
+                if look < self.tokens.len()
+                    && matches!(
+                        self.tokens[look].kind,
+                        TokenKind::Dot | TokenKind::QuestionDot
+                    )
+                {
+                    self.pos = look;
+                } else {
+                    break;
+                }
+            }
             match self.peek().clone() {
                 TokenKind::Dot => {
                     self.advance();
+                    // Issue #57: trailing-dot chain continuation —
+                    // `list.\n  where(...)`. Skip newlines after the dot so
+                    // the identifier on the next line is picked up.
+                    self.skip_newlines();
                     let (name, name_span) = self.expect_ident()?;
 
                     // Check if this is a method call: expr.name(args)
                     if self.check(&TokenKind::LParen) || self.check(&TokenKind::Lt) {
-                        let (type_args, args) = self.parse_call_args()?;
+                        let (type_args, mut args) = self.parse_call_args()?;
+                        // Issue #50: trailing lambda after positional args —
+                        // `xs.fold(0) { acc, x => acc + x }`. Suppressed in
+                        // control-flow condition positions.
+                        if !self.no_trailing_lambda && self.check(&TokenKind::LBrace) {
+                            let lambda = self.parse_brace_expr()?;
+                            args.push(Arg { name: None, call_modifier: ArgMod::None, value: lambda });
+                        }
                         let span = Span { start: expr.span().start, end: self.peek_span().end };
                         expr = Expr::Call {
                             receiver: Some(Box::new(expr)),
@@ -3674,6 +4046,21 @@ impl Parser {
                             name_span,
                             type_args,
                             args,
+                            span,
+                        };
+                    } else if !self.no_trailing_lambda && self.check(&TokenKind::LBrace) {
+                        // Issue #50: trailing-lambda call with no explicit
+                        // parenthesized args — `list.filter { it > 10 }`.
+                        // Parse the brace expression as the sole argument.
+                        let lambda = self.parse_brace_expr()?;
+                        let arg = Arg { name: None, call_modifier: ArgMod::None, value: lambda };
+                        let span = Span { start: expr.span().start, end: self.peek_span().end };
+                        expr = Expr::Call {
+                            receiver: Some(Box::new(expr)),
+                            name,
+                            name_span,
+                            type_args: vec![],
+                            args: vec![arg],
                             span,
                         };
                     } else {
@@ -3688,10 +4075,15 @@ impl Parser {
                 }
                 TokenKind::QuestionDot => {
                     self.advance();
+                    self.skip_newlines();
                     let (name, name_span) = self.expect_ident()?;
 
                     if self.check(&TokenKind::LParen) || self.check(&TokenKind::Lt) {
-                        let (type_args, args) = self.parse_call_args()?;
+                        let (type_args, mut args) = self.parse_call_args()?;
+                        if !self.no_trailing_lambda && self.check(&TokenKind::LBrace) {
+                            let lambda = self.parse_brace_expr()?;
+                            args.push(Arg { name: None, call_modifier: ArgMod::None, value: lambda });
+                        }
                         let span = Span { start: expr.span().start, end: self.peek_span().end };
                         expr = Expr::SafeMethodCall {
                             receiver: Box::new(expr),
@@ -3699,6 +4091,19 @@ impl Parser {
                             name_span,
                             type_args,
                             args,
+                            span,
+                        };
+                    } else if !self.no_trailing_lambda && self.check(&TokenKind::LBrace) {
+                        // Issue #50: trailing lambda on safe method call.
+                        let lambda = self.parse_brace_expr()?;
+                        let arg = Arg { name: None, call_modifier: ArgMod::None, value: lambda };
+                        let span = Span { start: expr.span().start, end: self.peek_span().end };
+                        expr = Expr::SafeMethodCall {
+                            receiver: Box::new(expr),
+                            name,
+                            name_span,
+                            type_args: vec![],
+                            args: vec![arg],
                             span,
                         };
                     } else {
@@ -3769,7 +4174,49 @@ impl Parser {
                 }
                 TokenKind::LBracket => {
                     self.advance();
-                    let index = self.parse_expr()?;
+                    // Issue #58: open-ended range slice `arr[..3]` — the
+                    // `..` / `until` / `downTo` starts the index without
+                    // a lower bound. Synthesize an Expr::Range with
+                    // `start = None`. For `arr[..]` both bounds are None.
+                    let index = if matches!(
+                        self.peek(),
+                        TokenKind::DotDot | TokenKind::Until | TokenKind::DownTo
+                    ) {
+                        let op_tok = self.peek().clone();
+                        let op_span = self.peek_span();
+                        self.advance();
+                        let (inclusive, descending) = match op_tok {
+                            TokenKind::DotDot => (true, false),
+                            TokenKind::Until => (false, false),
+                            TokenKind::DownTo => (true, true),
+                            _ => (true, false),
+                        };
+                        let end = if self.range_upper_missing()
+                            || matches!(self.peek(), TokenKind::RBracket)
+                        {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_additive()?))
+                        };
+                        let step = if self.eat(&TokenKind::Step) {
+                            Some(Box::new(self.parse_additive()?))
+                        } else {
+                            None
+                        };
+                        Expr::Range {
+                            start: None,
+                            end,
+                            inclusive,
+                            descending,
+                            step,
+                            span: Span {
+                                start: op_span.start,
+                                end: self.peek_span().end,
+                            },
+                        }
+                    } else {
+                        self.parse_expr()?
+                    };
                     self.expect(&TokenKind::RBracket)?;
                     let span = Span { start: expr.span().start, end: self.peek_span().end };
                     expr = Expr::IndexAccess {
@@ -3784,7 +4231,12 @@ impl Parser {
                     if let Expr::Ident(name, name_span) = &expr {
                         let name = name.clone();
                         let name_span = *name_span;
-                        let (type_args, args) = self.parse_call_args()?;
+                        let (type_args, mut args) = self.parse_call_args()?;
+                        // Issue #50: trailing lambda on bare-ident call.
+                        if !self.no_trailing_lambda && self.check(&TokenKind::LBrace) {
+                            let lambda = self.parse_brace_expr()?;
+                            args.push(Arg { name: None, call_modifier: ArgMod::None, value: lambda });
+                        }
                         let span = Span { start: expr.span().start, end: self.peek_span().end };
                         expr = Expr::Call {
                             receiver: None,
@@ -3806,7 +4258,11 @@ impl Parser {
                         let name_span = *name_span;
                         // Try parsing as generic call, backtrack if not
                         let save = self.pos;
-                        if let Ok((type_args, args)) = self.try_parse_generic_call() {
+                        if let Ok((type_args, mut args)) = self.try_parse_generic_call() {
+                            if !self.no_trailing_lambda && self.check(&TokenKind::LBrace) {
+                                let lambda = self.parse_brace_expr()?;
+                                args.push(Arg { name: None, call_modifier: ArgMod::None, value: lambda });
+                            }
                             let span = Span { start: expr.span().start, end: self.peek_span().end };
                             expr = Expr::Call {
                                 receiver: None,
@@ -3833,9 +4289,12 @@ impl Parser {
     fn parse_call_args(&mut self) -> Result<(Vec<TypeRef>, Vec<Arg>), ParseError> {
         let type_args = if self.eat(&TokenKind::Lt) {
             let mut ta = Vec::new();
+            self.skip_newlines();
             while !self.check(&TokenKind::Gt) && !self.check(&TokenKind::Eof) {
                 ta.push(self.parse_type()?);
+                self.skip_newlines();
                 if !self.eat(&TokenKind::Comma) { break; }
+                self.skip_newlines();
             }
             self.expect(&TokenKind::Gt)?;
             ta
@@ -3844,12 +4303,25 @@ impl Parser {
         };
 
         self.expect(&TokenKind::LParen)?;
+        // Issue #53: allow newlines inside a call argument list so that
+        // wrapped invocations like `log(\n  "a",\n  "b"\n)` parse.
+        self.skip_newlines();
         let mut args = Vec::new();
+        // Issue #50: nested calls inside a paren arg list can have their
+        // own trailing lambdas — reset the suppression flag across the
+        // argument parse so `foo(bar.filter { it > 0 })` still works
+        // inside an if/while cond.
+        let prev_ntl = self.no_trailing_lambda;
+        self.no_trailing_lambda = false;
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
             let arg = self.parse_call_arg()?;
             args.push(arg);
+            self.skip_newlines();
             if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines();
         }
+        self.no_trailing_lambda = prev_ntl;
+        self.skip_newlines();
         self.expect(&TokenKind::RParen)?;
         Ok((type_args, args))
     }
@@ -3979,20 +4451,62 @@ impl Parser {
         // Try parsing <TypeArgs>(args)
         self.expect(&TokenKind::Lt)?;
         let mut type_args = Vec::new();
+        self.skip_newlines();
         while !self.check(&TokenKind::Gt) && !self.check(&TokenKind::Eof) {
             type_args.push(self.parse_type()?);
+            self.skip_newlines();
             if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines();
         }
         self.expect(&TokenKind::Gt)?;
         self.expect(&TokenKind::LParen)?;
+        // Issue #53: same multi-line support as parse_call_args.
+        self.skip_newlines();
         let mut args = Vec::new();
+        let prev_ntl = self.no_trailing_lambda;
+        self.no_trailing_lambda = false;
         while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
             let arg = self.parse_call_arg()?;
             args.push(arg);
+            self.skip_newlines();
             if !self.eat(&TokenKind::Comma) { break; }
+            self.skip_newlines();
         }
+        self.no_trailing_lambda = prev_ntl;
+        self.skip_newlines();
         self.expect(&TokenKind::RParen)?;
         Ok((type_args, args))
+    }
+
+    /// Issue #61: probe whether the current position begins a named tuple
+    /// element (`name:` followed by an expression-start token). Returns
+    /// the name without consuming it. The `:` token is also used for type
+    /// annotations and map literals, so we match a conservative set of
+    /// follow-tokens that can start an expression.
+    fn try_peek_tuple_element_name(&self) -> Option<String> {
+        let name = match self.peek() {
+            TokenKind::Identifier(n) => n.clone(),
+            _ => return None,
+        };
+        if !matches!(self.peek_at(1), Some(TokenKind::Colon)) {
+            return None;
+        }
+        match self.peek_at(2) {
+            Some(TokenKind::Identifier(_))
+            | Some(TokenKind::IntLiteral(_))
+            | Some(TokenKind::FloatLiteral(_))
+            | Some(TokenKind::StringLiteral(_))
+            | Some(TokenKind::StringStart(_))
+            | Some(TokenKind::BoolTrue)
+            | Some(TokenKind::BoolFalse)
+            | Some(TokenKind::Null)
+            | Some(TokenKind::This)
+            | Some(TokenKind::LParen)
+            | Some(TokenKind::LBracket)
+            | Some(TokenKind::Minus)
+            | Some(TokenKind::Bang) => Some(name),
+            _ => None,
+        }
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
@@ -4006,6 +4520,14 @@ impl Parser {
                 exception: Box::new(exc),
                 span: Span { start: span.start, end: self.peek_span().end },
             });
+        }
+        // Issue #49: `try { ... } catch (e: T) { ... }` as expression.
+        // Recognized only in expression position and requires exactly
+        // one catch clause (the lang-4 spec shape). Lowered downstream
+        // by wrapping the try block in a helper that returns the last
+        // expression of whichever arm executed.
+        if self.check(&TokenKind::Try) {
+            return self.parse_try_expr();
         }
         // v5 (deferred): `stackalloc[Type](size)` primary expression.
         // Recognized only as the contextual identifier `stackalloc`
@@ -4108,21 +4630,61 @@ impl Parser {
             }
             TokenKind::LParen => {
                 self.advance();
-                let expr = self.parse_expr()?;
+                // Issue #50: a parenthesized subexpression is a fresh
+                // lambda context — nested calls inside `(...)` may still
+                // take trailing lambdas, even when the outer context
+                // disabled them (e.g. `if (list.filter { it > 10 }).any() { ... }`).
+                let prev_ntl = self.no_trailing_lambda;
+                self.no_trailing_lambda = false;
+                // Issue #61: named tuple literal `(hp: 100, mp: 50)` —
+                // detect a leading `name:` element before committing to
+                // the positional path. The probe: an identifier followed
+                // by `:` followed by something that can start an
+                // expression. If we see that shape, parse as a named
+                // tuple. Otherwise fall through to the positional path.
+                let (first_name, first_expr) = if let Some(name) = self.try_peek_tuple_element_name() {
+                    let name_token_pos = self.pos;
+                    self.advance(); // consume name
+                    self.advance(); // consume ':'
+                    // Guard: if this is actually a type annotation on a
+                    // single expression like `(x: Int)` in an unusual
+                    // position, bail. The simple strategy — just parse an
+                    // expression — works because `:` starting a type
+                    // annotation isn't legal here; we already committed.
+                    let value = self.parse_expr()?;
+                    let _ = name_token_pos;
+                    (Some(name), value)
+                } else {
+                    let expr = self.parse_expr()?;
+                    (None, expr)
+                };
+
                 // Check if this is a tuple: (expr, expr, ...)
-                if self.check(&TokenKind::Comma) {
-                    let mut elements = vec![expr];
+                let result = if self.check(&TokenKind::Comma) {
+                    let mut elements = vec![first_expr];
+                    let mut names = vec![first_name];
                     while self.eat(&TokenKind::Comma) {
+                        self.skip_newlines();
                         if self.check(&TokenKind::RParen) { break; }
-                        elements.push(self.parse_expr()?);
+                        if let Some(name) = self.try_peek_tuple_element_name() {
+                            self.advance(); // name
+                            self.advance(); // ':'
+                            elements.push(self.parse_expr()?);
+                            names.push(Some(name));
+                        } else {
+                            elements.push(self.parse_expr()?);
+                            names.push(None);
+                        }
                     }
                     self.expect(&TokenKind::RParen)?;
                     let end = self.peek_span();
-                    Ok(Expr::Tuple { elements, span: Span { start: span.start, end: end.end } })
+                    Ok(Expr::Tuple { elements, names, span: Span { start: span.start, end: end.end } })
                 } else {
                     self.expect(&TokenKind::RParen)?;
-                    Ok(expr)
-                }
+                    Ok(first_expr)
+                };
+                self.no_trailing_lambda = prev_ntl;
+                return result;
             }
             TokenKind::LBrace => self.parse_brace_expr(),
             TokenKind::LBracket => self.parse_list_literal(),
@@ -4860,7 +5422,8 @@ impl Expr {
             | Expr::SafeIndexAccess { span, .. }
             | Expr::ThrowExpr { span, .. }
             | Expr::With { span, .. }
-            | Expr::StackAlloc { span, .. } => *span,
+            | Expr::StackAlloc { span, .. }
+            | Expr::TryExpr { span, .. } => *span,
         }
     }
 }

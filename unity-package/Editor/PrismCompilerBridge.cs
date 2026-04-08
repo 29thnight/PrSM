@@ -112,7 +112,38 @@ namespace Prism.Editor
                 {
                     string stdout = process.StandardOutput.ReadToEnd();
                     string stderr = process.StandardError.ReadToEnd();
-                    process.WaitForExit(30000);
+                    // Issue #77: capture the boolean result of WaitForExit.
+                    // If the process exceeds the timeout, `exited` is false
+                    // and accessing `ExitCode` would throw
+                    // InvalidOperationException("Process must exit before
+                    // requested information can be determined"). The old
+                    // code let that exception surface as the misleading
+                    // "Failed to run prism" error. Kill the process and
+                    // report a dedicated timeout diagnostic that preserves
+                    // whatever output we already captured.
+                    const int timeoutMs = 30000;
+                    bool exited = process.WaitForExit(timeoutMs);
+                    if (!exited)
+                    {
+                        try
+                        {
+                            if (!process.HasExited)
+                            {
+                                process.Kill();
+                            }
+                        }
+                        catch (Exception killEx)
+                        {
+                            Debug.LogWarning($"[PrSM] Failed to kill timed-out compiler process: {killEx.Message}");
+                        }
+                        result.Success = false;
+                        result.ExitCode = -1;
+                        result.Stdout = stdout;
+                        result.Stderr = $"prism compile timed out after {timeoutMs / 1000}s. "
+                            + "Large files, first-run JIT, or a stuck AV scanner may be responsible.\n"
+                            + (string.IsNullOrEmpty(stderr) ? string.Empty : $"Partial stderr: {stderr}\n");
+                        return result;
+                    }
 
                     result.ExitCode = process.ExitCode;
                     result.Stdout = stdout;

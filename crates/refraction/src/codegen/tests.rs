@@ -3134,4 +3134,290 @@ component Probe : MonoBehaviour {
             output
         );
     }
+
+    // Issue #49: `try { ... } catch (e: T) { ... }` as expression.
+    #[test]
+    fn test_try_expression_as_value() {
+        let src = r#"component Probe : MonoBehaviour {
+  func parse() {
+    val result = try { parseInt("42") } catch (e: Exception) { -1 }
+    log("$result")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("System.Func<object>"),
+            "try expression should lower to an IIFE returning object: {}",
+            output
+        );
+        assert!(
+            output.contains("catch (Exception e)"),
+            "try expression should preserve catch type: {}",
+            output
+        );
+    }
+
+    // Issue #50: trailing-lambda call `list.filter { it > 10 }`.
+    #[test]
+    fn test_trailing_lambda_bare_call() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go(list: List<Int>) {
+    list.filter { it > 10 }
+  }
+}"#;
+        let output = compile(src);
+        // Method names get PascalCased in the C# emit, so match loosely.
+        assert!(
+            output.to_lowercase().contains("list.filter"),
+            "trailing lambda call should lower to a filter method call: {}",
+            output
+        );
+        assert!(
+            output.contains("it > 10"),
+            "trailing lambda body should survive: {}",
+            output
+        );
+    }
+
+    // Issue #50 (cont): trailing lambda after positional args.
+    #[test]
+    fn test_trailing_lambda_with_positional_arg() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go(xs: List<Int>) {
+    xs.fold(0) { acc, x => acc + x }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.to_lowercase().contains("xs.fold"),
+            "trailing lambda with positional arg should still call fold: {}",
+            output
+        );
+        assert!(
+            output.contains("acc + x"),
+            "trailing lambda body should survive: {}",
+            output
+        );
+    }
+
+    // Issue #50 (cont): `if expr { body }` must NOT be misread as a
+    // trailing-lambda call on `expr`.
+    #[test]
+    fn test_if_with_method_call_keeps_body_separate() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    if isValid() {
+      log("ok")
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("if (isValid())"),
+            "if expression body must not be absorbed as trailing lambda: {}",
+            output
+        );
+    }
+
+    // Issue #52: `is Enemy or is Boss` pattern combinator.
+    #[test]
+    fn test_pattern_or_combinator_parses() {
+        let src = r#"component Probe : MonoBehaviour {
+  func classify(target: Object) {
+    when target {
+      is Enemy or is Boss => log("hostile")
+      else => log("ok")
+    }
+  }
+}"#;
+        // Parse-only: the exact C# shape depends on the switch lowering,
+        // but it must compile without errors.
+        let _ = compile(src);
+    }
+
+    // Issue #53: multi-line call arguments.
+    #[test]
+    fn test_multiline_call_arguments_parse() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    log(
+      "a",
+      "b"
+    )
+  }
+}"#;
+        let output = compile(src);
+        // `log` lowers to `Debug.Log`; the two args must survive.
+        assert!(
+            output.contains("\"a\", \"b\""),
+            "multi-line call args should fold back to single-line emit: {}",
+            output
+        );
+    }
+
+    // Issue #54: multi-constraint `where T : A, B` clauses.
+    #[test]
+    fn test_multi_constraint_where_clause_parses() {
+        let src = r#"class Registry<T> where T : MonoBehaviour, IDamageable {
+  var items: List<T> = null
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("where T : MonoBehaviour, IDamageable"),
+            "multi-constraint where clause should survive to C#: {}",
+            output
+        );
+    }
+
+    // Issue #55: `@burst(compileSynchronously = true)` named argument.
+    #[test]
+    fn test_annotation_named_argument_lowers_to_pascal() {
+        let src = r#"@burst(compileSynchronously = true)
+func calculateForces() {
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("CompileSynchronously = true"),
+            "named annotation arg should PascalCase to C# property: {}",
+            output
+        );
+    }
+
+    // Issue #56: multi-line binary expression continuation.
+    #[test]
+    fn test_multiline_binary_expression_parses() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go() {
+    val x = 1 +
+      2
+    log("$x")
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("1 + 2"),
+            "multi-line binary expr should fold to `1 + 2`: {}",
+            output
+        );
+    }
+
+    // Issue #57: method chain across newlines via leading-dot continuation.
+    #[test]
+    fn test_leading_dot_chain_across_newlines() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go(list: List<Int>) {
+    list
+      .where({ x => x > 10 })
+      .select({ x => x * 2 })
+  }
+}"#;
+        // Parse-only: the actual emission depends on method resolution.
+        let _ = compile(src);
+    }
+
+    // Issue #58: open-ended range slice `arr[2..]` and `arr[..3]`.
+    #[test]
+    fn test_open_ended_range_slice_parses() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go(arr: Array<Int>) {
+    val tail = arr[2..]
+    val head = arr[..3]
+    log("$tail $head")
+  }
+}"#;
+        let output = compile(src);
+        // `..` is inclusive in PrSM so `[..3]` becomes `[..(3 + 1)]`.
+        assert!(
+            output.contains("arr[2..]"),
+            "open-ended upper range should lower to C# range slice: {}",
+            output
+        );
+        assert!(
+            output.contains("arr[..(3 + 1)]") || output.contains("arr[..3]"),
+            "open-ended lower range should lower to C# range slice: {}",
+            output
+        );
+    }
+
+    // Issue #60: member-position `listen` declaration.
+    #[test]
+    fn test_member_listen_declaration_registers_in_awake() {
+        let src = r#"component ShopUI : MonoBehaviour {
+  require buyButton: Button
+
+  listen buyButton.onClick until disable {
+    purchaseSelectedItem()
+  }
+
+  func purchaseSelectedItem() { }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("void Awake()"),
+            "member-level listen should produce an Awake method: {}",
+            output
+        );
+        assert!(
+            output.contains("buyButton.onClick"),
+            "listen event should appear in awake body: {}",
+            output
+        );
+    }
+
+    // Issue #61: named tuple literal value `(hp: 100, mp: 50)`.
+    #[test]
+    fn test_named_tuple_literal_lowers_to_csharp_named_tuple() {
+        let src = r#"component Probe : MonoBehaviour {
+  func getStats(): (hp: Int, mp: Int) = (hp: 100, mp: 50)
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("hp: 100"),
+            "named tuple literal element should preserve name: {}",
+            output
+        );
+        assert!(
+            output.contains("mp: 50"),
+            "named tuple literal element should preserve name: {}",
+            output
+        );
+    }
+
+    // Issue #62: `for (k, v) in pairs` tuple destructure.
+    #[test]
+    fn test_for_tuple_destructure_lowers_to_foreach_with_tuple_pattern() {
+        let src = r#"component Probe : MonoBehaviour {
+  func go(pairs: List<(Int, String)>) {
+    for (k, v) in pairs {
+      log("$k: $v")
+    }
+  }
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("foreach (var (k, v) in pairs)"),
+            "for-loop tuple destructure should lower to C# tuple deconstruction: {}",
+            output
+        );
+    }
+
+    // Issue #59: top-level `func` and `const` declarations are wrapped
+    // in a synthetic `partial class Globals`.
+    #[test]
+    fn test_top_level_func_wraps_in_globals() {
+        let src = r#"func calculateForces() {
+  log("go")
+}"#;
+        let output = compile(src);
+        assert!(
+            output.contains("partial class Globals"),
+            "top-level func should wrap in Globals class: {}",
+            output
+        );
+        assert!(
+            output.contains("calculateForces"),
+            "function body must survive wrapping: {}",
+            output
+        );
+    }
 }

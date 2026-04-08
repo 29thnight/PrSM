@@ -2,7 +2,7 @@
   "name": "prsm-lang",
   "displayName": "PrSM",
   "description": "Unity-first PrSM language support for VS Code with diagnostics, snippets, script exploration, and generated C# navigation.",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "publisher": "prsm-lang",
   "icon": "icons/prsm-logo.png",
   "license": "MIT",
@@ -32,7 +32,8 @@
     "visualstudiotoolsforunity.vstuc"
   ],
   "activationEvents": [
-    "workspaceContains:**/*.prsm"
+    "workspaceContains:**/*.prsm",
+    "workspaceContains:**/*.mn"
   ],
   "main": "./dist/extension.js",
   "capabilities": {
@@ -71,7 +72,8 @@
           "prsm"
         ],
         "extensions": [
-          ".prsm"
+          ".prsm",
+          ".mn"
         ],
         "configuration": "./language-configuration.json",
         "icon": {

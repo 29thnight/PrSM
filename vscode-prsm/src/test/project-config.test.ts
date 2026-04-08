@@ -10,6 +10,7 @@ import {
     readPrismProject,
     resolveConfiguredPath,
     resolveGeneratedCsPath,
+    stripTomlInlineComment,
 } from '../project-config';
 
 function tempDir(prefix: string): string {
@@ -25,6 +26,36 @@ test('parsePrismProject reads compiler fields from fixture content', () => {
 
     assert.equal(config.compilerPath, 'tools/prism.exe');
     assert.equal(config.outputDir, 'Packages/com.prsm.generated/Runtime');
+});
+
+// Issue #79: inline `# comment` on a TOML value must be stripped
+// before the quote-pair match, otherwise `output_dir = "..." # default`
+// leaks the comment into the resolved value.
+test('stripTomlInlineComment removes trailing comment', () => {
+    assert.equal(
+        stripTomlInlineComment('"Packages/com.prsm.generated/Runtime"  # default'),
+        '"Packages/com.prsm.generated/Runtime"'
+    );
+    assert.equal(stripTomlInlineComment('"no comment"'), '"no comment"');
+    assert.equal(stripTomlInlineComment('42  # answer'), '42');
+});
+
+test('stripTomlInlineComment respects # inside string literal', () => {
+    // A hash inside the quoted value must survive.
+    assert.equal(
+        stripTomlInlineComment('"value with #hash inside"'),
+        '"value with #hash inside"'
+    );
+});
+
+test('parsePrismProject strips inline comments from values', () => {
+    const config = parsePrismProject(`
+[compiler]
+output_dir = "Packages/com.prsm.generated/Runtime"  # default
+prism_path = "tools/prism.exe"  # override
+`);
+    assert.equal(config.outputDir, 'Packages/com.prsm.generated/Runtime');
+    assert.equal(config.compilerPath, 'tools/prism.exe');
 });
 
 test('readPrismProject preserves the default compiler sentinel', () => {

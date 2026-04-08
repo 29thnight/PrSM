@@ -330,9 +330,10 @@
     },
 
     "lifecycle-keywords": {
+      "comment": "Issue #78: include `start` so the lifecycle hook `start { ... }` is scoped as keyword.other like its siblings (awake, update, onEnable, …) rather than falling through to the keyword.control group.",
       "patterns": [{
         "name": "keyword.other.prsm",
-        "match": "\\b(awake|update|fixedUpdate|lateUpdate|onEnable|onDisable|onDestroy|onTriggerEnter|onTriggerExit|onTriggerStay|onCollisionEnter|onCollisionExit|onCollisionStay)\\b"
+        "match": "\\b(awake|start|update|fixedUpdate|lateUpdate|onEnable|onDisable|onDestroy|onTriggerEnter|onTriggerExit|onTriggerStay|onCollisionEnter|onCollisionExit|onCollisionStay)\\b"
       }]
     },
 
@@ -378,7 +379,7 @@
           "match": "\\b(not|and)\\b"
         },
         { "name": "keyword.control.prsm", "match": "\\b(if|else|when|for|while|in|until|downTo|step|break|continue|is|as)\\b" },
-        { "name": "keyword.control.prsm", "match": "\\b(wait|start|stop|stopAll|listen|unlisten|try|catch|finally)\\b" },
+        { "name": "keyword.control.prsm", "match": "\\b(wait|stop|stopAll|listen|unlisten|try|catch|finally)\\b" },
         { "name": "constant.language.prsm", "match": "\\b(true|false|null|this|nextFrame|fixedFrame)\\b" }
       ]
     },

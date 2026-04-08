@@ -98,15 +98,29 @@ export function loadFlatDebugMap(generatedCsPath: string): PrismFlatDebugMap | n
 /// line. Returns `null` when no mapping exists. The match prefers an
 /// exact hit; falling back to the next mapping with `prsmLine <= line`
 /// keeps breakpoints set on a multi-line statement reachable.
+///
+/// Issue #73: when multiple mappings share the same PrSM line (because
+/// the old exact-match returned the first one — which sometimes pointed
+/// at a brace-only line where the C# debugger cannot stop), prefer the
+/// LARGEST C# line among the exact matches. This advances the breakpoint
+/// into the first executable statement of a multi-line lowering instead
+/// of landing on the method header's `{`.
 export function mapPrsmLineToCsLine(map: PrismFlatDebugMap, prsmLine: number): number | null {
     if (map.mappings.length === 0) {
         return null;
     }
-    // Exact match first.
+    // Exact match first — pick the highest C# line among all matches so
+    // we skip past brace-only lines emitted by the anchor walker.
+    let exactBest: number | null = null;
     for (const m of map.mappings) {
         if (m.prsmLine === prsmLine) {
-            return m.csLine;
+            if (exactBest === null || m.csLine > exactBest) {
+                exactBest = m.csLine;
+            }
         }
+    }
+    if (exactBest !== null) {
+        return exactBest;
     }
     // Best-effort: pick the largest mapping whose source line is <= the
     // requested line. This is what most debuggers do when a breakpoint
@@ -115,6 +129,9 @@ export function mapPrsmLineToCsLine(map: PrismFlatDebugMap, prsmLine: number): n
     for (const m of map.mappings) {
         if (m.prsmLine <= prsmLine) {
             if (best === null || m.prsmLine > best.prsmLine) {
+                best = m;
+            } else if (m.prsmLine === best.prsmLine && m.csLine > best.csLine) {
+                // Prefer the latest C# line on ties, same rationale as above.
                 best = m;
             }
         }

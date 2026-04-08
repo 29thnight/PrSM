@@ -63,6 +63,30 @@ function getSourceStem(sourcePath: string): string {
     return path.parse(sourcePath).name;
 }
 
+/**
+ * Issue #79: strip a trailing `# comment` from a TOML value while
+ * respecting string-literal quoting. The `#` character is only a
+ * comment when it sits outside a `"..."` run; characters inside a
+ * string literal must survive unchanged.
+ */
+export function stripTomlInlineComment(value: string): string {
+    if (!value) {
+        return value;
+    }
+    let inString = false;
+    for (let i = 0; i < value.length; i++) {
+        const c = value[i];
+        if (c === '"' && (i === 0 || value[i - 1] !== '\\')) {
+            inString = !inString;
+            continue;
+        }
+        if (!inString && c === '#') {
+            return value.slice(0, i).trimEnd();
+        }
+    }
+    return value;
+}
+
 export function parsePrismProject(content: string): PrismProjectConfig {
     let currentSection = '';
     const config: PrismProjectConfig = {};
@@ -84,8 +108,13 @@ export function parsePrismProject(content: string): PrismProjectConfig {
         }
 
         const key = line.slice(0, separator).trim();
-        let value = line.slice(separator + 1).trim();
-        if (value.startsWith('"') && value.endsWith('"')) {
+        // Issue #79: strip inline `# comment` tail before quote handling.
+        // The old code ran `.trim()` and then only recognized paired
+        // quotes; a trailing `# default` defeated the quote check and
+        // was returned as part of the value, breaking generated-script
+        // discovery.
+        let value = stripTomlInlineComment(line.slice(separator + 1).trim()).trim();
+        if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
             value = value.slice(1, -1);
         }
 

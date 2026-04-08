@@ -420,7 +420,16 @@ fn collect_prsm_files_recursive(dir: &Path) -> Vec<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 files.extend(collect_prsm_files_recursive(&path));
-            } else if path.extension().map_or(false, |ext| ext == "prsm") {
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                // Issue #75: accept both the current `.prsm` extension
+                // and the legacy `.mn` extension so a mixed project
+                // during migration does not silently drop files.
+                // Unity's `PrismImporter` already accepts both.
+                .map(|ext| matches!(ext, "prsm" | "mn"))
+                .unwrap_or(false)
+            {
                 files.push(path);
             }
         }

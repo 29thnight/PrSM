@@ -653,15 +653,35 @@ impl PrismLspServer {
             .get("version")
             .and_then(Value::as_i64)
             .map(|value| value as i32);
-        let text = params
+        // Issue #76: the server advertises `textDocumentSync: 1` (full
+        // sync), so every `contentChanges` entry is a full-snapshot
+        // replacement. A client that batches multiple full-snapshot
+        // changes in a single request had its earlier snapshots
+        // silently dropped — only the last one survived. We now apply
+        // each change in order. Incremental-fallback semantics (range
+        // + text) are not supported by the server, but iterating
+        // preserves at least the last replacement, which matches the
+        // historical behavior.
+        let changes = params
             .get("contentChanges")
             .and_then(Value::as_array)
-            .and_then(|changes| changes.last())
-            .and_then(|change| change.get("text"))
-            .and_then(Value::as_str)
+            .ok_or_else(|| "Missing didChange contentChanges array.".to_string())?;
+        if changes.is_empty() {
+            return Err("Empty didChange contentChanges array.".into());
+        }
+
+        let mut final_text: Option<String> = None;
+        for change in changes {
+            let Some(text) = change.get("text").and_then(Value::as_str) else {
+                // No `text` → unsupported incremental change; skip.
+                continue;
+            };
+            final_text = Some(text.to_string());
+        }
+        let text = final_text
             .ok_or_else(|| "Missing didChange contentChanges text.".to_string())?;
 
-        self.upsert_open_document(uri, version, text.to_string())?;
+        self.upsert_open_document(uri, version, text)?;
         if let Some(file_path) = file_uri_to_path(uri) {
             let normalized = normalize_path(&file_path);
             self.mark_dirty(&normalized);
@@ -1038,7 +1058,17 @@ impl PrismLspServer {
         };
 
         let report = driver::check_paths(&[check_path]);
-        let line_lengths = text.lines().map(|line| line.len()).collect::<Vec<_>>();
+        // Issue #80: the lexer counts columns in Unicode codepoints, so
+        // the per-line length used for diagnostic clamping must also be
+        // a codepoint count. The old `line.len()` returned the byte
+        // length, which over-clamped ASCII source (rare surrogate-pair
+        // cases hit the right number by accident) but mis-positioned
+        // diagnostics on CJK / emoji identifiers. Count characters to
+        // restore codepoint parity with the lexer.
+        let line_lengths = text
+            .lines()
+            .map(|line| line.chars().count())
+            .collect::<Vec<_>>();
         let diagnostics = report
             .file_results
             .first()
@@ -2039,6 +2069,12 @@ fn collect_used_namespaces_for_member(member: &Member, used_namespaces: &mut Has
         Member::NestedDecl { decl, .. } => {
             collect_used_namespaces_for_decl(decl, used_namespaces);
         }
+        // Issue #60: member-level `listen` — walk the event and body
+        // so any types referenced inside contribute to used namespaces.
+        Member::ListenDecl { event, body, .. } => {
+            collect_used_namespaces_for_expr(event, used_namespaces);
+            collect_used_namespaces_for_block(body, used_namespaces);
+        }
     }
 }
 
@@ -2341,6 +2377,15 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
             collect_used_namespaces_for_type_ref(element_ty, used_namespaces);
             collect_used_namespaces_for_expr(size, used_namespaces);
         }
+        // Issue #49: try expression — walk the try body and each catch
+        // arm so referenced types and members contribute to namespaces.
+        Expr::TryExpr { try_block, catches, .. } => {
+            collect_used_namespaces_for_block(try_block, used_namespaces);
+            for c in catches {
+                collect_used_namespaces_for_type_ref(&c.ty, used_namespaces);
+                collect_used_namespaces_for_block(&c.body, used_namespaces);
+            }
+        }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
                 if let StringPart::Expr(expr) = part {
@@ -2427,8 +2472,12 @@ fn collect_used_namespaces_for_expr(expr: &Expr, used_namespaces: &mut HashSet<S
             step,
             ..
         } => {
-            collect_used_namespaces_for_expr(start, used_namespaces);
-            collect_used_namespaces_for_expr(end, used_namespaces);
+            if let Some(start) = start {
+                collect_used_namespaces_for_expr(start, used_namespaces);
+            }
+            if let Some(end) = end {
+                collect_used_namespaces_for_expr(end, used_namespaces);
+            }
             if let Some(step) = step {
                 collect_used_namespaces_for_expr(step, used_namespaces);
             }
@@ -2606,6 +2655,9 @@ fn member_contains_intrinsic_code(member: &Member) -> bool {
         }
         // v5: nested decl — check the inner declaration's member list.
         Member::NestedDecl { decl, .. } => decl_contains_intrinsic_code(decl),
+        // Issue #60: member-level `listen` — walk the body for any
+        // embedded intrinsic code expression.
+        Member::ListenDecl { body, .. } => block_contains_intrinsic_code(body),
     }
 }
 
@@ -2764,8 +2816,8 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
             step,
             ..
         } => {
-            expr_contains_intrinsic_code(start)
-                || expr_contains_intrinsic_code(end)
+            start.as_ref().is_some_and(|s| expr_contains_intrinsic_code(s))
+                || end.as_ref().is_some_and(|e| expr_contains_intrinsic_code(e))
                 || step.as_ref().is_some_and(|step| expr_contains_intrinsic_code(step))
         }
         Expr::Is { expr, .. } => expr_contains_intrinsic_code(expr),
@@ -2796,6 +2848,11 @@ fn expr_contains_intrinsic_code(expr: &Expr) -> bool {
         }
         // v5 (deferred): stackalloc — only the size expression matters.
         Expr::StackAlloc { size, .. } => expr_contains_intrinsic_code(size),
+        // Issue #49: try expression — walk try body and catch arms.
+        Expr::TryExpr { try_block, catches, .. } => {
+            block_contains_intrinsic_code(try_block)
+                || catches.iter().any(|c| block_contains_intrinsic_code(&c.body))
+        }
         Expr::IntLit(_, _)
         | Expr::FloatLit(_, _)
         | Expr::DurationLit(_, _)
@@ -3261,6 +3318,14 @@ fn collect_expr_explicit_type_arg_actions(
         Expr::StackAlloc { size, .. } => {
             collect_expr_explicit_type_arg_actions(size, None, callable_signatures, selection_span, actions);
         }
+        // Issue #49: try expression — walk the try body and catch arms
+        // for any nested explicit type arg action surfaces.
+        Expr::TryExpr { try_block, catches, .. } => {
+            collect_block_explicit_type_arg_actions(try_block, callable_signatures, None, selection_span, actions);
+            for c in catches {
+                collect_block_explicit_type_arg_actions(&c.body, callable_signatures, None, selection_span, actions);
+            }
+        }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
                 if let StringPart::Expr(expr) = part {
@@ -3422,8 +3487,12 @@ fn collect_expr_explicit_type_arg_actions(
             }
         }
         Expr::Range { start, end, step, .. } => {
-            collect_expr_explicit_type_arg_actions(start, None, callable_signatures, selection_span, actions);
-            collect_expr_explicit_type_arg_actions(end, None, callable_signatures, selection_span, actions);
+            if let Some(start) = start {
+                collect_expr_explicit_type_arg_actions(start, None, callable_signatures, selection_span, actions);
+            }
+            if let Some(end) = end {
+                collect_expr_explicit_type_arg_actions(end, None, callable_signatures, selection_span, actions);
+            }
             if let Some(step) = step {
                 collect_expr_explicit_type_arg_actions(step, None, callable_signatures, selection_span, actions);
             }
@@ -4494,13 +4563,45 @@ fn clamp_index(value: usize, max: usize) -> usize {
 mod tests {
     use super::{
         collect_code_actions_json, collect_explicit_type_arg_actions_for_source,
-        collect_organize_usings_action_for_source, format_sidecar_hover_section,
-        merge_completion_items, parse_sidecar_args, prsm_label_for_sidecar_item,
-        requested_code_action_allows,
+        collect_organize_usings_action_for_source, diagnostic_json,
+        format_sidecar_hover_section, merge_completion_items, parse_sidecar_args,
+        prsm_label_for_sidecar_item, requested_code_action_allows,
     };
+    use crate::diagnostics::{Diagnostic, Severity};
     use crate::lexer::token::{Position, Span};
     use crate::roslyn_sidecar_protocol::{SidecarCompletionItemKind, SidecarSymbolKind, SidecarSymbolSource, UnityCompletionItem, UnityHoverResult};
     use serde_json::json;
+
+    // Issue #80: `line_lengths` passed to `diagnostic_json` must be in
+    // codepoint units (matching the lexer). When the length is stored
+    // as `chars().count()`, a diagnostic pointing at column 5 on a
+    // line containing CJK characters should NOT be clamped to the
+    // much smaller byte length. We verify the clamp math with a
+    // codepoint-based length.
+    #[test]
+    fn diagnostic_json_uses_codepoint_line_lengths() {
+        let cjk_line = "val 한글: Int = 1"; // 15 chars, 19 bytes.
+        let codepoints = cjk_line.chars().count();
+        let bytes = cjk_line.len();
+        assert!(
+            bytes > codepoints,
+            "expected more bytes than codepoints for CJK input"
+        );
+        let line_lengths = vec![codepoints];
+        let diag = Diagnostic::error(
+            "E020",
+            "test",
+            Span {
+                start: Position { line: 1, col: 5 },
+                end: Position { line: 1, col: 7 },
+            },
+        );
+        let _ = Severity::Error; // keep the import live
+        let value = diagnostic_json(&diag, &line_lengths);
+        // The column should not be clamped to a tiny byte-length value.
+        assert_eq!(value["range"]["start"]["character"], json!(4));
+        assert_eq!(value["range"]["end"]["character"], json!(6));
+    }
 
     #[test]
     fn lsp_parse_sidecar_args_json_array() {

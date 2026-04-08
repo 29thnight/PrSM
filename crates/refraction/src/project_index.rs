@@ -780,6 +780,14 @@ fn summarize_member_type_references(path: &Path, decl_name: &str, members: &[Mem
                     }
                 }
             }
+            // Issue #60: member-level `listen` — walk the event and body
+            // for any type references they might contain.
+            Member::ListenDecl { event, body, .. } => {
+                collect_expr_type_references(path, decl_name, event, &mut references);
+                for stmt in &body.stmts {
+                    collect_stmt_type_references(path, decl_name, stmt, &mut references);
+                }
+            }
         }
     }
 
@@ -1118,6 +1126,19 @@ fn collect_expr_type_references(
             collect_type_references(path, container_name, element_ty, references);
             collect_expr_type_references(path, container_name, size, references);
         }
+        // Issue #49: try expression — record catch clause types and
+        // recurse into the try and catch bodies.
+        Expr::TryExpr { try_block, catches, .. } => {
+            for stmt in &try_block.stmts {
+                collect_stmt_type_references(path, container_name, stmt, references);
+            }
+            for c in catches {
+                collect_type_references(path, container_name, &c.ty, references);
+                for stmt in &c.body.stmts {
+                    collect_stmt_type_references(path, container_name, stmt, references);
+                }
+            }
+        }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
                 if let StringPart::Expr(expr) = part {
@@ -1182,8 +1203,12 @@ fn collect_expr_type_references(
             }
         }
         Expr::Range { start, end, step, .. } => {
-            collect_expr_type_references(path, container_name, start, references);
-            collect_expr_type_references(path, container_name, end, references);
+            if let Some(start) = start {
+                collect_expr_type_references(path, container_name, start, references);
+            }
+            if let Some(end) = end {
+                collect_expr_type_references(path, container_name, end, references);
+            }
             if let Some(step) = step {
                 collect_expr_type_references(path, container_name, step, references);
             }
@@ -1550,6 +1575,10 @@ fn summarize_members(path: &Path, container_name: &str, members: &[Member]) -> V
             // nested type is enumerated separately as its own
             // declaration entry by the project index walker.
             Member::NestedDecl { .. } => return None,
+            // Issue #60: member-level `listen` declarations are lowered
+            // into the generated Awake method and do not appear as
+            // distinct project-index symbols.
+            Member::ListenDecl { .. } => return None,
         }))
         .collect()
 }

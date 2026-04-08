@@ -73,6 +73,25 @@ test('mapPrsmLineToCsLine handles exact and best-effort matches', () => {
     assert.equal(mapPrsmLineToCsLine(map, 1), null);
 });
 
+// Issue #73: when multiple mappings share the same PrSM line (because
+// a lifecycle anchor's header pointed at the method's brace line while
+// the first statement sat a few lines below), prefer the LARGEST cs
+// line among the exact matches so breakpoints land on an executable
+// statement instead of the brace.
+test('mapPrsmLineToCsLine prefers largest cs_line on exact match ties', () => {
+    const map: PrismFlatDebugMap = {
+        version: 1,
+        source: 'a.prsm',
+        generated: 'a.cs',
+        mappings: [
+            { prsmLine: 19, csLine: 20 }, // brace-only line (first)
+            { prsmLine: 19, csLine: 22 }, // executable statement line
+            { prsmLine: 19, csLine: 21 }, // intermediate line
+        ],
+    };
+    assert.equal(mapPrsmLineToCsLine(map, 19), 22);
+});
+
 test('mapCsLineToPrsmLine inverts the mapping', () => {
     const map: PrismFlatDebugMap = {
         version: 1,

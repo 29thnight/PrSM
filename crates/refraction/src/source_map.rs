@@ -10,7 +10,19 @@ pub struct SourceMapFile {
     pub version: u32,
     pub source_file: PathBuf,
     pub generated_file: PathBuf,
+    /// The primary top-level type declaration. Preserved for backward
+    /// compatibility with existing consumers; new code should read
+    /// `declarations` to correctly handle multi-type files.
     pub declaration: Option<SourceMapAnchor>,
+    /// Issue #71: every top-level type declared in this file gets its
+    /// own anchor. For a single-decl file this is a 1-element vector
+    /// containing the same anchor as `declaration`. For a multi-type
+    /// file (e.g. `enum EnemyState` + `component EnemyAI` in one
+    /// source) each declaration lands here, so stack traces can
+    /// resolve the class header for any of them and the Unity
+    /// importer can bind the MonoScript to the right type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declarations: Vec<SourceMapAnchor>,
     pub members: Vec<SourceMapAnchor>,
 }
 
@@ -78,31 +90,64 @@ pub fn build_source_map(
             .then(left.qualified_name.cmp(&right.qualified_name))
     });
 
-    let declaration_definition = definitions
+    // Issue #71: collect every top-level type declaration, not just the
+    // first one. Real shipped samples (e.g. `EnemyState.prsm`) declare
+    // both `enum EnemyState` and `component EnemyAI` in the same file,
+    // and the generated `.cs` contains both types. The old code only
+    // kept the first anchor, so the second declaration was lost from
+    // the source map and the Unity importer bound the MonoScript to
+    // the wrong type.
+    let type_definitions: Vec<&HirDefinition> = definitions
         .iter()
         .copied()
-        .find(|definition| definition.kind == HirDefinitionKind::Type);
+        .filter(|definition| definition.kind == HirDefinitionKind::Type)
+        .collect();
     let member_definitions = definitions
         .into_iter()
         .filter(|definition| definition.kind != HirDefinitionKind::Type)
         .collect::<Vec<_>>();
 
-    let declaration_generated = declaration_definition.and_then(|definition| find_declaration_anchor(&lines, definition));
-    let class_header_line = declaration_generated.as_ref().map(|anchor| anchor.header_line).unwrap_or(1);
-    let class_end_line = declaration_generated
-        .as_ref()
+    let declarations_with_anchors: Vec<(&HirDefinition, Option<GeneratedAnchor>)> = type_definitions
+        .iter()
+        .copied()
+        .map(|definition| (definition, find_declaration_anchor(&lines, definition)))
+        .collect();
+
+    // Primary declaration — the first (by sort order) top-level type.
+    // `declaration` is kept for backward compatibility with older
+    // consumers that only read a single anchor.
+    let primary = declarations_with_anchors.first();
+    let class_header_line = primary
+        .and_then(|(_, anchor)| anchor.as_ref())
+        .map(|anchor| anchor.header_line)
+        .unwrap_or(1);
+    let class_end_line = primary
+        .and_then(|(_, anchor)| anchor.as_ref())
         .map(|anchor| anchor.end_line)
         .unwrap_or(lines.len() as u32);
 
-    let declaration = declaration_definition.map(|definition| SourceMapAnchor {
+    let declaration = primary.map(|(definition, generated)| SourceMapAnchor {
         kind: definition.kind.as_str().to_string(),
         name: definition.name.clone(),
         qualified_name: definition.qualified_name.clone(),
         source_span: SourceMapSpan::from_span(definition.span),
-        generated_span: declaration_generated.as_ref().map(|anchor| anchor.generated_span),
-        generated_name_span: declaration_generated.as_ref().map(|anchor| anchor.generated_name_span),
+        generated_span: generated.as_ref().map(|anchor| anchor.generated_span),
+        generated_name_span: generated.as_ref().map(|anchor| anchor.generated_name_span),
         segments: Vec::new(),
     });
+
+    let declarations: Vec<SourceMapAnchor> = declarations_with_anchors
+        .iter()
+        .map(|(definition, generated)| SourceMapAnchor {
+            kind: definition.kind.as_str().to_string(),
+            name: definition.name.clone(),
+            qualified_name: definition.qualified_name.clone(),
+            source_span: SourceMapSpan::from_span(definition.span),
+            generated_span: generated.as_ref().map(|anchor| anchor.generated_span),
+            generated_name_span: generated.as_ref().map(|anchor| anchor.generated_name_span),
+            segments: Vec::new(),
+        })
+        .collect();
 
     let mut found_members = Vec::with_capacity(member_definitions.len());
     let mut search_from_line = class_header_line.saturating_add(1);
@@ -162,6 +207,7 @@ pub fn build_source_map(
         source_file: hir_file.path.clone(),
         generated_file: generated_file.to_path_buf(),
         declaration,
+        declarations,
         members,
     }
 }
@@ -285,6 +331,97 @@ fn build_statement_segment(
             collect_statement_segments(lines, statements, start_line, parent_qualified_name, next_segment_id)
         }
         CsStmt::Raw(code, ..) => (Vec::new(), start_line.saturating_add(raw_line_count(code))),
+        // Issue #72: `try { ... } catch (Ex e) { ... } finally { ... }` —
+        // a 12-line block that the old code treated as a single line,
+        // skewing every subsequent statement downward. Recurse into each
+        // arm and add the brace/keyword lines between them.
+        CsStmt::TryCatch { try_body, catches, finally_body, .. } => {
+            // `try` header (`try {`) occupies 1 line; the body starts
+            // on the next.
+            let (mut children, after_try) = collect_statement_segments(
+                lines,
+                try_body,
+                start_line.saturating_add(2),
+                parent_qualified_name,
+                next_segment_id,
+            );
+            // Closing brace line of the try block, then each catch.
+            let mut next_line = after_try.saturating_add(1);
+            for catch in catches {
+                // `} catch (...) {` on one line, body starts next.
+                next_line = next_line.saturating_add(1);
+                let (catch_children, after_catch) = collect_statement_segments(
+                    lines,
+                    &catch.body,
+                    next_line,
+                    parent_qualified_name,
+                    next_segment_id,
+                );
+                children.extend(catch_children);
+                next_line = after_catch.saturating_add(1);
+            }
+            if let Some(finally) = finally_body {
+                // `} finally {` on one line.
+                next_line = next_line.saturating_add(1);
+                let (finally_children, after_finally) = collect_statement_segments(
+                    lines,
+                    finally,
+                    next_line,
+                    parent_qualified_name,
+                    next_segment_id,
+                );
+                children.extend(finally_children);
+                next_line = after_finally.saturating_add(1);
+            }
+            (children, next_line)
+        }
+        // Issue #72: `using (var x = ...) { body }` — header + body +
+        // closing brace.
+        CsStmt::UseBlock { body, .. } => {
+            let (children, after_body) = collect_statement_segments(
+                lines,
+                body,
+                start_line.saturating_add(2),
+                parent_qualified_name,
+                next_segment_id,
+            );
+            (children, after_body.saturating_add(1))
+        }
+        // Issue #72: `#if COND` / `#elif` / `#else` / `#endif`. Each
+        // directive is a single line, with bodies in between.
+        CsStmt::Preprocessor { arms, else_body, .. } => {
+            let mut children: Vec<SourceMapAnchor> = Vec::new();
+            let mut next_line = start_line.saturating_add(1);
+            for (idx, arm) in arms.iter().enumerate() {
+                if idx > 0 {
+                    // `#elif` directive on its own line.
+                    next_line = next_line.saturating_add(1);
+                }
+                let (arm_children, after_arm) = collect_statement_segments(
+                    lines,
+                    &arm.body,
+                    next_line,
+                    parent_qualified_name,
+                    next_segment_id,
+                );
+                children.extend(arm_children);
+                next_line = after_arm;
+            }
+            if let Some(else_stmts) = else_body {
+                next_line = next_line.saturating_add(1); // `#else`
+                let (else_children, after_else) = collect_statement_segments(
+                    lines,
+                    else_stmts,
+                    next_line,
+                    parent_qualified_name,
+                    next_segment_id,
+                );
+                children.extend(else_children);
+                next_line = after_else;
+            }
+            // `#endif` directive.
+            (children, next_line.saturating_add(1))
+        }
         _ => (Vec::new(), start_line.saturating_add(inline_statement_line_count(statement))),
     };
 
@@ -327,6 +464,14 @@ fn inline_statement_line_count(statement: &CsStmt) -> u32 {
         CsStmt::Expr(expr, _) => rendered_line_count(expr),
         CsStmt::Return(Some(value), _) => rendered_line_count(value),
         CsStmt::YieldReturn(value, _) => rendered_line_count(value),
+        // Issue #72: `throw expr;` on a single line.
+        CsStmt::Throw(value, _) => rendered_line_count(value),
+        // Bare statements occupying exactly one line — `break;`,
+        // `continue;`, `yield break;`, bare `return;`.
+        CsStmt::Break(_)
+        | CsStmt::Continue(_)
+        | CsStmt::YieldBreak(_)
+        | CsStmt::Return(None, _) => 1,
         _ => 1,
     }
 }
@@ -372,7 +517,19 @@ fn is_anchor_kind(kind: HirDefinitionKind) -> bool {
 }
 
 fn find_declaration_anchor(lines: &[&str], definition: &HirDefinition) -> Option<GeneratedAnchor> {
-    let generated_name = generated_type_name(definition);
+    // Issue #70: try each candidate generated name in turn. For an
+    // attribute declaration we need to match both `Foo` and
+    // `FooAttribute` because the lowering auto-suffixes attribute
+    // classes with `Attribute` when the user omits the suffix.
+    for generated_name in generated_type_name_candidates(definition) {
+        if let Some(anchor) = find_declaration_anchor_for_name(lines, &generated_name) {
+            return Some(anchor);
+        }
+    }
+    None
+}
+
+fn find_declaration_anchor_for_name(lines: &[&str], generated_name: &str) -> Option<GeneratedAnchor> {
     for (index, line) in lines.iter().enumerate() {
         let header_pattern = [
             format!("class {}", generated_name),
@@ -389,7 +546,7 @@ fn find_declaration_anchor(lines: &[&str], definition: &HirDefinition) -> Option
         let header_line = (index + 1) as u32;
         let start_line = include_attribute_lines(lines, header_line, 1);
         let end_line = find_top_level_closing_line(lines, header_line).unwrap_or(lines.len() as u32);
-        let name_col = line.find(&generated_name).map(|value| value as u32 + 1)?;
+        let name_col = line.find(generated_name).map(|value| value as u32 + 1)?;
         let name_end_col = name_col + generated_name.chars().count() as u32 - 1;
 
         return Some(GeneratedAnchor {
@@ -441,7 +598,15 @@ fn find_member_anchor(
         };
 
         let header_line = line_index;
-        let start_line = include_attribute_lines(lines, header_line, start_line);
+        // Issue #74: for serialized-field properties the attribute
+        // lives above the backing field, not the property header.
+        // Use the extended walk for field anchors so `[SerializeField]`
+        // ends up inside the anchor span.
+        let start_line = if definition.kind == HirDefinitionKind::Field {
+            include_serialize_field_attribute_lines(lines, header_line, &generated_name, start_line)
+        } else {
+            include_attribute_lines(lines, header_line, start_line)
+        };
         let name_end_col = name_col + generated_name.chars().count() as u32 - 1;
         return Some(GeneratedAnchor {
             generated_span: SourceMapSpan {
@@ -465,15 +630,20 @@ fn find_member_anchor(
     None
 }
 
-fn generated_type_name(definition: &HirDefinition) -> String {
+/// Issue #70: for `attribute Foo(...)`, the compiler lowers to
+/// `class FooAttribute : System.Attribute` when the user omits the
+/// suffix. Return every candidate generated name so `find_declaration_anchor`
+/// can search for each in turn. The original implementation used
+/// `.next()` on a two-element array which always yielded the first
+/// element, making the fallback dead code.
+fn generated_type_name_candidates(definition: &HirDefinition) -> Vec<String> {
     if definition.name.ends_with("Attribute") {
-        return definition.name.clone();
+        return vec![definition.name.clone()];
     }
-
-    [definition.name.clone(), format!("{}Attribute", definition.name)]
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| definition.name.clone())
+    vec![
+        definition.name.clone(),
+        format!("{}Attribute", definition.name),
+    ]
 }
 
 fn generated_member_name(definition: &HirDefinition) -> String {
@@ -517,6 +687,52 @@ fn include_attribute_lines(lines: &[&str], header_line: u32, lower_bound: u32) -
     start
 }
 
+/// Issue #74: extended attribute-inclusion walk for serialize-field
+/// property anchors. The lowering emits the `[SerializeField]`
+/// attribute on a backing field *above* the public property, so a
+/// plain `include_attribute_lines` walk from the property header sees
+/// `private float _speed = 1.0f;` (not `[`-starting) and stops. We
+/// detect that pattern and continue walking past the backing field,
+/// picking up any attribute line that sits above it.
+fn include_serialize_field_attribute_lines(
+    lines: &[&str],
+    header_line: u32,
+    name: &str,
+    lower_bound: u32,
+) -> u32 {
+    // First, consume any attribute lines directly above the property.
+    let mut start = include_attribute_lines(lines, header_line, lower_bound);
+    // If the line above `start` looks like a backing field for this
+    // property (`private <type> _<name>`), include it and keep walking
+    // up for more attributes.
+    loop {
+        if start <= lower_bound {
+            break;
+        }
+        let prev_line = lines
+            .get(start.saturating_sub(2) as usize)
+            .copied()
+            .unwrap_or_default();
+        let trimmed = prev_line.trim_start();
+        let backing_name_patterns = [
+            format!(" _{} =", name),
+            format!(" _{};", name),
+        ];
+        let looks_like_backing = trimmed.starts_with("private ")
+            && backing_name_patterns
+                .iter()
+                .any(|p| prev_line.contains(p.as_str()));
+        if !looks_like_backing {
+            break;
+        }
+        // Consume the backing field line.
+        start -= 1;
+        // Continue up past any attributes attached to the backing field.
+        start = include_attribute_lines(lines, start, lower_bound);
+    }
+    start
+}
+
 fn find_top_level_closing_line(lines: &[&str], header_line: u32) -> Option<u32> {
     let mut depth = 0u32;
     let mut saw_open_brace = false;
@@ -548,13 +764,38 @@ fn find_top_level_closing_line(lines: &[&str], header_line: u32) -> Option<u32> 
 
 fn find_method_name_col(lines: &[&str], line_index: u32, name: &str, class_end_line: u32) -> Option<u32> {
     let line = lines.get(line_index.saturating_sub(1) as usize)?.trim_end();
+    // Skip attribute-only lines so the caller keeps walking forward.
+    if line.trim_start().starts_with('[') {
+        return None;
+    }
     let pattern = format!("{}(", name);
-    if !line.contains(&pattern) || line.ends_with(';') {
+    if !line.contains(&pattern) {
+        return None;
+    }
+    // Issue #72: an expression-bodied method ends in `;` on the same
+    // line (`public int f() => 42;`). The old check `line.ends_with(';')`
+    // rejected every expression-bodied method silently. Accept the
+    // header when the same line contains `=>` — that's the expression-
+    // body marker.
+    let is_expr_body_same_line = line.contains("=>") && line.ends_with(';');
+    if line.ends_with(';') && !is_expr_body_same_line {
         return None;
     }
 
-    let next_line = next_non_empty_line(lines, line_index.saturating_add(1), class_end_line)?;
-    if next_line.trim() != "{" {
+    // Accept one of three common header shapes:
+    //   - `public void f() { ... }`                      (brace next line)
+    //   - `public int f() => 42;`                        (expression body, same line)
+    //   - `public int f() =>\n    42;`                   (expression body, next line)
+    // For the brace case the next non-empty line must be `{`; for the
+    // expression-body case it starts with `=>` or the current line
+    // already contains it.
+    let next = next_non_empty_line(lines, line_index.saturating_add(1), class_end_line);
+    let next_opens_body = next.map(|value| value.trim()) == Some("{");
+    let next_starts_expr_body = next
+        .map(|value| value.trim_start().starts_with("=>"))
+        .unwrap_or(false);
+
+    if !next_opens_body && !is_expr_body_same_line && !next_starts_expr_body {
         return None;
     }
 
@@ -804,5 +1045,110 @@ public class Player : MonoBehaviour
             start: Position { line, col },
             end: Position { line: end_line, col: end_col },
         }
+    }
+
+    // Issue #70: `attribute Foo(...)` lowers to `class FooAttribute :
+    // System.Attribute`. The anchor walker must find the declaration
+    // even though the PrSM name is `Foo`.
+    #[test]
+    fn generated_type_name_candidates_include_attribute_suffix() {
+        let def_plain = HirDefinition {
+            id: 1,
+            name: "MyAttribute".into(),
+            qualified_name: "MyAttribute".into(),
+            kind: HirDefinitionKind::Type,
+            ty: PrismType::Primitive(PrimitiveKind::Int),
+            mutable: false,
+            file_path: PathBuf::from("Assets/MyAttribute.prsm"),
+            span: span(1, 1, 1, 5),
+        };
+        assert_eq!(
+            generated_type_name_candidates(&def_plain),
+            vec!["MyAttribute".to_string()]
+        );
+
+        let def_bare = HirDefinition {
+            id: 2,
+            name: "Foo".into(),
+            qualified_name: "Foo".into(),
+            kind: HirDefinitionKind::Type,
+            ty: PrismType::Primitive(PrimitiveKind::Int),
+            mutable: false,
+            file_path: PathBuf::from("Assets/Foo.prsm"),
+            span: span(1, 1, 1, 5),
+        };
+        assert_eq!(
+            generated_type_name_candidates(&def_bare),
+            vec!["Foo".to_string(), "FooAttribute".to_string()]
+        );
+    }
+
+    // Issue #71: a file declaring multiple top-level types must
+    // emit one anchor per declaration, not just the first.
+    #[test]
+    fn build_source_map_captures_multiple_type_declarations() {
+        let hir_file = HirFile {
+            path: PathBuf::from("Assets/EnemyState.prsm"),
+            definitions: vec![
+                definition(1, "EnemyState", "EnemyState", HirDefinitionKind::Type, span(1, 6, 1, 16)),
+                definition(2, "EnemyAI", "EnemyAI", HirDefinitionKind::Type, span(5, 11, 5, 18)),
+            ],
+            references: vec![],
+            pattern_bindings: vec![],
+            listen_sites: vec![],
+        };
+        let generated = r#"// <auto-generated>
+using UnityEngine;
+
+public enum EnemyState
+{
+    Idle,
+    Chase,
+}
+
+public class EnemyAI : MonoBehaviour
+{
+}
+"#;
+        // For the test we reuse the Player IR shape; only the
+        // declarations field of SourceMapFile is under test.
+        let map = build_source_map(&hir_file, &generated_ir(), Path::new("Generated/EnemyState.cs"), generated);
+        assert_eq!(map.declarations.len(), 2);
+        assert_eq!(map.declarations[0].name, "EnemyState");
+        assert_eq!(map.declarations[1].name, "EnemyAI");
+        // The legacy `declaration` field still points at the first
+        // declaration for backward compatibility.
+        assert_eq!(map.declaration.as_ref().map(|d| d.name.as_str()), Some("EnemyState"));
+    }
+
+    // Issue #74: the serialize-field attribute lives above the
+    // backing field, not the public property. The extended walk
+    // must include both in the anchor span.
+    #[test]
+    fn serialize_field_attribute_lines_reach_backing_field() {
+        let lines: Vec<&str> = r#"public class Player : MonoBehaviour
+{
+    [SerializeField]
+    private float _speed = 5.0f;
+    public float speed => _speed;
+}"#.lines().collect();
+        // Property header sits on line 5 (1-based).
+        let start = include_serialize_field_attribute_lines(&lines, 5, "speed", 1);
+        // Walk back past `_speed` backing field (line 4) and the
+        // `[SerializeField]` attribute (line 3) — start should land
+        // on line 3.
+        assert_eq!(start, 3);
+    }
+
+    // Issue #72: `throw`/`break`/`continue` inline statements count
+    // as exactly one line, so subsequent statements do not drift.
+    #[test]
+    fn inline_line_count_handles_throw_break_continue() {
+        use crate::lowering::csharp_ir::CsStmt;
+        assert_eq!(inline_statement_line_count(&CsStmt::Throw("new Exception(\"oops\")".into(), None)), 1);
+        assert_eq!(inline_statement_line_count(&CsStmt::Break(None)), 1);
+        assert_eq!(inline_statement_line_count(&CsStmt::Continue(None)), 1);
+        assert_eq!(inline_statement_line_count(&CsStmt::YieldBreak(None)), 1);
+        assert_eq!(inline_statement_line_count(&CsStmt::Return(None, None)), 1);
     }
 }

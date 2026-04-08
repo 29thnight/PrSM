@@ -107,7 +107,13 @@ fn default_version() -> String { "0.1.0".into() }
 fn default_language_version() -> String { "1.0".into() }
 fn default_prism_path() -> String { "prism".into() }
 fn default_output_dir() -> String { "Assets/Generated/PrSM".into() }
-fn default_include() -> Vec<String> { vec!["**/*.prsm".into()] }
+// Issue #75: default include also covers legacy `.mn` files so the
+// compiler and Unity importer see the same set. A companion tweak to
+// `collect_prsm_files_recursive` in `driver.rs` applies the same rule
+// to ad-hoc directory walks.
+fn default_include() -> Vec<String> {
+    vec!["**/*.prsm".into(), "**/*.mn".into()]
+}
 fn default_true() -> bool { true }
 
 fn is_prism_source_file(path: &Path) -> bool {

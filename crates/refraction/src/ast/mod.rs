@@ -362,6 +362,16 @@ pub enum Member {
         decl: Box<Decl>,
         span: Span,
     },
+    /// Issue #60: member-position `listen event [until X] { ... }`.
+    /// Registers the listener during Awake (the synthetic awake block)
+    /// using the same lifecycle as a body-level `listen` statement.
+    ListenDecl {
+        event: Expr,
+        params: Vec<String>,
+        lifetime: ListenLifetime,
+        body: Block,
+        span: Span,
+    },
 }
 
 /// A single state inside a `state machine` declaration.
@@ -814,8 +824,14 @@ pub enum Expr {
         span: Span,
     },
     Range {
-        start: Box<Expr>,
-        end: Box<Expr>,
+        // Issue #58: both endpoints are optional to support open-ended
+        // slice syntax `arr[2..]`, `arr[..3]`, `arr[..]`. For the classic
+        // closed form `a..b` / `a until b` / `a downTo b` both sides are
+        // `Some(...)`. Open-ended ranges are only valid in index position;
+        // for-loop lowering emits E-level diagnostics if it encounters
+        // an open-ended range outside slice context.
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
         inclusive: bool,
         descending: bool,
         step: Option<Box<Expr>>,
@@ -851,6 +867,10 @@ pub enum Expr {
     /// `(a, b, c)` — tuple expression (Language 4)
     Tuple {
         elements: Vec<Expr>,
+        /// Issue #61: optional per-element name for named tuple literals
+        /// (`(hp: 100, mp: 50)`). Always the same length as `elements`;
+        /// `None` for unnamed positional elements.
+        names: Vec<Option<String>>,
         span: Span,
     },
     /// `[1, 2, 3]` — list literal (Language 4)
@@ -916,6 +936,15 @@ pub enum Expr {
     StackAlloc {
         element_ty: TypeRef,
         size: Box<Expr>,
+        span: Span,
+    },
+    /// Issue #49: `try { expr } catch (e: T) { expr }` in expression
+    /// position. The lang-4 spec promises this shape. Lowers to an
+    /// immediately invoked function expression (IIFE) that wraps a C#
+    /// try/catch and returns the last expression of whichever arm ran.
+    TryExpr {
+        try_block: Block,
+        catches: Vec<CatchClause>,
         span: Span,
     },
 }
@@ -1036,6 +1065,9 @@ pub enum ParamMod {
 pub struct Annotation {
     pub name: String,
     pub args: Vec<Expr>,
+    /// Issue #55: optional per-argument name for `@burst(compileSynchronously = true)`.
+    /// Always the same length as `args`; `None` for positional args.
+    pub arg_names: Vec<Option<String>>,
     pub span: Span,
 }
 
