@@ -366,22 +366,36 @@ impl PrismLspServer {
         let query_context = self.build_query_context(Some(&position.file_path));
         let runtime_path = query_context.runtime_path(&position.file_path);
         self.ensure_hir(&query_context.source_files);
-        // Take caches out temporarily to avoid borrow conflicts with &mut self sidecar calls.
-        let index = self.cached_index.take().unwrap();
-        let hir = self.cached_hir.take().unwrap();
+        // Issue #91: the old `.take().unwrap()` pattern was fragile
+        // in two ways: (a) if `sidecar_completion_items` panicked
+        // the caches were never restored, leaving them `None`, and
+        // (b) the `.unwrap()` on the second take panicked if a
+        // previous request had already left the cache in a bad
+        // state. Clone the caches once at the start so we only
+        // touch `self.cached_index` / `self.cached_hir` on read
+        // paths and never mutate them from this request.
+        //
+        // Cloning a `ProjectIndex` / `HirProject` is not free but
+        // is bounded by the number of symbols in the project; for
+        // interactive completion latency it is indistinguishable
+        // from the take+restore dance in practice.
+        let index_snapshot = match self.cached_index.clone() {
+            Some(index) => index,
+            None => return self.send_ok(request.id, json!({ "isIncomplete": false, "items": [] })),
+        };
+        let hir_snapshot = match self.cached_hir.clone() {
+            Some(hir) => hir,
+            None => return self.send_ok(request.id, json!({ "isIncomplete": false, "items": [] })),
+        };
+
         let fallback_items = lsp_support::completion_items(
             &document_text,
             position.line,
             position.col,
             &runtime_path,
-            &index,
-            &hir,
+            &index_snapshot,
+            &hir_snapshot,
         );
-        // Put caches back before sidecar call.
-        self.cached_index = Some(index);
-        self.cached_hir = Some(hir);
-        let index = self.cached_index.take().unwrap();
-        let hir = self.cached_hir.take().unwrap();
         let items = self
             .sidecar_completion_items(
                 &position.file_path,
@@ -389,13 +403,11 @@ impl PrismLspServer {
                 position.line,
                 position.col,
                 &runtime_path,
-                &index,
-                &hir,
+                &index_snapshot,
+                &hir_snapshot,
             )
             .map(|sidecar_items| merge_completion_items(sidecar_items, fallback_items.clone()))
             .unwrap_or(fallback_items);
-        self.cached_index = Some(index);
-        self.cached_hir = Some(hir);
 
         self.send_ok(request.id, json!({
             "isIncomplete": false,
@@ -575,7 +587,12 @@ impl PrismLspServer {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim()
-            .to_ascii_lowercase();
+            // Issue #86: use Unicode-aware case folding so CJK / diacritic
+            // identifiers (which the lexer accepts) can be searched
+            // case-insensitively. `to_ascii_lowercase` leaves every
+            // non-ASCII character unchanged, so `Café` vs `café` failed
+            // to match. `to_lowercase` performs Unicode case folding.
+            .to_lowercase();
 
         let Some(query_context) = self.build_workspace_query_context() else {
             return self.send_ok(request.id, json!([]));
@@ -4307,9 +4324,11 @@ fn workspace_symbol_score(symbol: &IndexedSymbol, query: &str) -> Option<u8> {
         return Some(4);
     }
 
-    let name = symbol.name.to_ascii_lowercase();
-    let qualified_name = symbol.qualified_name.to_ascii_lowercase();
-    let signature = symbol.signature.to_ascii_lowercase();
+    // Issue #86: Unicode-aware case folding. See matching change in
+    // `handle_workspace_symbols`.
+    let name = symbol.name.to_lowercase();
+    let qualified_name = symbol.qualified_name.to_lowercase();
+    let signature = symbol.signature.to_lowercase();
 
     if name == query {
         return Some(0);
@@ -4362,15 +4381,21 @@ fn validate_rename_target(new_name: &str) -> Option<String> {
 }
 
 fn is_valid_identifier(value: &str) -> bool {
+    // Issue #87: mirror the lexer's identifier rules. The lexer uses
+    // `char::is_alphabetic()` / `is_alphanumeric()` (see
+    // `crates/refraction/src/lexer/lexer.rs:105, 315`), so names like
+    // `한글`, `école`, `変数` are valid PrSM identifiers and must
+    // pass rename validation too. The old `is_ascii_alphabetic()`
+    // check silently rejected every non-English rename target.
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return false;
     };
-    if !(first.is_ascii_alphabetic() || first == '_') {
+    if !(first.is_alphabetic() || first == '_') {
         return false;
     }
 
-    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    chars.all(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 fn is_reserved_keyword(value: &str) -> bool {

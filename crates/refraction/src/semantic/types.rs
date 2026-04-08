@@ -88,6 +88,17 @@ impl PrismType {
         if self == target {
             return true;
         }
+        // Issue #82: the `null` literal is analyzed as
+        // `Nullable(Error)`. It must be assignable to any nullable
+        // target, otherwise `var x: Int? = null` — the canonical
+        // nullable initialization pattern — would be rejected as a
+        // type mismatch. This was a regression introduced by the
+        // field-initializer type check landed in v3.3.0 (#63).
+        if let PrismType::Nullable(inner) = self {
+            if inner.is_error() && matches!(target, PrismType::Nullable(_)) {
+                return true;
+            }
+        }
         // Issue #20: a lambda literal trusts the explicit annotation
         // on the target. The semantic analyzer reports the lambda's
         // type as `External("lambda")` because PrSM does not yet

@@ -5098,6 +5098,21 @@ fn pascal_case(name: &str) -> String {
 }
 
 fn format_float(n: f64) -> String {
+    // Issue #84: Rust's `f64::to_string()` produces `"inf"`,
+    // `"-inf"`, and `"NaN"` for non-finite values. Appending an `f`
+    // suffix yields `"inf.0f"`, `"-inf.0f"`, `"NaN.0f"` — none of
+    // which are valid C# literals. Emit the canonical C# constants
+    // instead so the generated `.cs` compiles.
+    if n.is_nan() {
+        return "float.NaN".into();
+    }
+    if n.is_infinite() {
+        return if n > 0.0 {
+            "float.PositiveInfinity".into()
+        } else {
+            "float.NegativeInfinity".into()
+        };
+    }
     let s = n.to_string();
     if s.contains('.') {
         format!("{}f", s)
@@ -6403,5 +6418,37 @@ fn bind_infrastructure(members: &[Member]) -> Option<Vec<CsMember>> {
         CsMember::RawCode(event_line),
         CsMember::RawCode(helper_lines.join("\n")),
     ])
+}
+
+#[cfg(test)]
+mod format_float_tests {
+    use super::format_float;
+
+    // Issue #84: non-finite float literals must NOT reach the
+    // emitter via Rust's Display impl (which yields `"inf"`,
+    // `"-inf"`, `"NaN"` — all invalid C#).
+    #[test]
+    fn format_float_positive_infinity_uses_csharp_constant() {
+        assert_eq!(format_float(f64::INFINITY), "float.PositiveInfinity");
+    }
+
+    #[test]
+    fn format_float_negative_infinity_uses_csharp_constant() {
+        assert_eq!(format_float(f64::NEG_INFINITY), "float.NegativeInfinity");
+    }
+
+    #[test]
+    fn format_float_nan_uses_csharp_constant() {
+        assert_eq!(format_float(f64::NAN), "float.NaN");
+    }
+
+    // Sanity: ordinary finite values still round-trip through the
+    // original formatter.
+    #[test]
+    fn format_float_finite_values_unchanged() {
+        assert_eq!(format_float(3.14), "3.14f");
+        assert_eq!(format_float(5.0), "5.0f");
+        assert_eq!(format_float(-2.5), "-2.5f");
+    }
 }
 

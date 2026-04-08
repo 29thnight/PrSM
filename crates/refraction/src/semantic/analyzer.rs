@@ -777,6 +777,7 @@ impl Analyzer {
             Member::Func {
                 name,
                 name_span,
+                params,
                 return_ty,
                 is_operator,
                 ..
@@ -795,6 +796,28 @@ impl Analyzer {
                         format!("'{}' is a reserved built-in method name (maps to Unity API). Choose a different name.", name),
                         *name_span,
                     );
+                }
+                // Issue #88: operator overloads cannot carry parameter
+                // modifiers (`ref` / `out` / `vararg`). The lowering
+                // hardcodes `CsParamMod::None`, silently dropping the
+                // modifier. Reject at the analyzer layer with a
+                // clear diagnostic instead of silently miscompiling.
+                // `operator get` / `operator set` (indexers) are
+                // excluded: the indexer lowering path reads indices
+                // positionally and is not subject to this restriction.
+                if *is_operator && name != "get" && name != "set" {
+                    for p in params {
+                        if p.modifier != ParamMod::None || p.is_vararg {
+                            self.diag.error(
+                                "E211",
+                                format!(
+                                    "Operator overload parameters cannot carry 'ref', 'out', or 'vararg' modifiers. Found on parameter '{}' of operator '{}'.",
+                                    p.name, name
+                                ),
+                                p.span,
+                            );
+                        }
+                    }
                 }
                 let ret = return_ty.as_ref().map(|t| self.resolve_typeref(t)).unwrap_or(PrismType::Unit);
                 let definition_id = self.record_member_definition(
@@ -4119,5 +4142,67 @@ component PlayerHealth : MonoBehaviour {
             "expected no W036 for related smart cast: {:?}",
             diags
         );
+    }
+
+    // Issue #82: v3.3.0 regression — `var x: Int? = null` previously
+    // emitted E020 because the field-initializer type check did not
+    // recognize `Nullable(Error)` (the analyzed type of a `null`
+    // literal) as assignable to a nullable target.
+    #[test]
+    fn test_null_literal_assignable_to_nullable_field() {
+        let diags = errors("component Foo : MonoBehaviour {\n  var x: Int? = null\n  val name: String? = null\n}");
+        assert!(
+            diags.is_empty(),
+            "expected no diagnostics for null assignment to nullable fields: {:?}",
+            diags
+        );
+    }
+
+    // Issue #82 (cont): a wrong-typed initializer to a nullable
+    // field should still be caught.
+    #[test]
+    fn test_wrong_typed_nullable_field_init_still_catches() {
+        let diags = errors("component Foo : MonoBehaviour {\n  var x: Int? = \"oops\"\n}");
+        assert!(
+            diags.iter().any(|d| d.code == "E020"),
+            "expected E020 for wrong-typed nullable field init: {:?}",
+            diags
+        );
+    }
+
+    // Issue #88: operator overloads with ref/out/vararg modifiers
+    // should be rejected with E211.
+    #[test]
+    fn test_operator_with_ref_param_emits_e211() {
+        let diags = errors(
+            "data class Entry(id: Int) {\n  operator equals(ref other: Entry): Bool = other.id == id\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E211"),
+            "expected E211 for operator with ref param: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn test_operator_with_vararg_param_emits_e211() {
+        let diags = errors(
+            "data class Bag(total: Int) {\n  operator plus(vararg more: Int): Bag = this\n}",
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "E211"),
+            "expected E211 for operator with vararg param: {:?}",
+            diags
+        );
+    }
+
+    // Issue #88 (cont): regular operator declarations without modifiers
+    // must still work.
+    #[test]
+    fn test_operator_no_modifier_ok() {
+        let diags = errors(
+            "data class Point(x: Int, y: Int) {\n  operator equals(other: Point): Bool = other.x == x\n}",
+        );
+        assert!(diags.is_empty(), "expected no diagnostics: {:?}", diags);
     }
 }

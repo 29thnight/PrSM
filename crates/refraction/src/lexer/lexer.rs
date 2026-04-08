@@ -265,8 +265,22 @@ impl Lexer {
         {
             self.advance(); // consume 'm'
             self.advance(); // consume 's'
-            let value: f64 = num_str.parse().unwrap_or(0.0) / 1000.0;
-            return self.make_span_token(TokenKind::DurationLiteral(value), start);
+            // Issue #89: surface a parse error instead of silently
+            // falling back to 0.0. Overflow in a duration literal
+            // would previously emit a token with value 0, compiling
+            // successfully.
+            match num_str.parse::<f64>() {
+                Ok(n) if n.is_finite() => {
+                    let value = n / 1000.0;
+                    return self.make_span_token(TokenKind::DurationLiteral(value), start);
+                }
+                _ => {
+                    return self.make_span_token(
+                        TokenKind::Error(format!("duration literal '{}ms' cannot be represented", num_str)),
+                        start,
+                    );
+                }
+            }
         }
 
         // Duration suffix: 's' for seconds
@@ -274,8 +288,18 @@ impl Lexer {
             && !self.peek_next().map_or(false, |c| c.is_alphanumeric() || c == '_')
         {
             self.advance(); // consume 's'
-            let value: f64 = num_str.parse().unwrap_or(0.0);
-            return self.make_span_token(TokenKind::DurationLiteral(value), start);
+            // Issue #89: see the matching ms arm.
+            match num_str.parse::<f64>() {
+                Ok(n) if n.is_finite() => {
+                    return self.make_span_token(TokenKind::DurationLiteral(n), start);
+                }
+                _ => {
+                    return self.make_span_token(
+                        TokenKind::Error(format!("duration literal '{}s' cannot be represented", num_str)),
+                        start,
+                    );
+                }
+            }
         }
 
         // Float suffix: 'f' (optional, for clarity)
@@ -292,16 +316,50 @@ impl Lexer {
             && !self.peek_next().map_or(false, |c| c.is_alphanumeric() || c == '_')
         {
             self.advance(); // consume 'L'
-            let value: i64 = num_str.parse().unwrap_or(0);
-            return self.make_span_token(TokenKind::IntLiteral(value), start);
+            // Issue #89: long overflow would silently become 0.
+            match num_str.parse::<i64>() {
+                Ok(value) => {
+                    return self.make_span_token(TokenKind::IntLiteral(value), start);
+                }
+                Err(_) => {
+                    return self.make_span_token(
+                        TokenKind::Error(format!("long literal '{}L' overflows i64", num_str)),
+                        start,
+                    );
+                }
+            }
         }
 
         if is_float {
-            let value: f64 = num_str.parse().unwrap_or(0.0);
-            self.make_span_token(TokenKind::FloatLiteral(value), start)
+            // Issue #89: float overflow / malformed input was silently
+            // replaced with 0.0. Float parse on IEEE 754 representable
+            // values cannot overflow (they become infinity), but a
+            // malformed string like `1.2.3` still errors out.
+            match num_str.parse::<f64>() {
+                Ok(value) if value.is_finite() => {
+                    self.make_span_token(TokenKind::FloatLiteral(value), start)
+                }
+                Ok(_) => self.make_span_token(
+                    TokenKind::Error(format!("float literal '{}' overflows to infinity", num_str)),
+                    start,
+                ),
+                Err(_) => self.make_span_token(
+                    TokenKind::Error(format!("float literal '{}' is malformed", num_str)),
+                    start,
+                ),
+            }
         } else {
-            let value: i64 = num_str.parse().unwrap_or(0);
-            self.make_span_token(TokenKind::IntLiteral(value), start)
+            // Issue #89: int overflow now raises an error token so
+            // the parser surfaces a diagnostic. Values up to
+            // i64::MAX still succeed; anything beyond becomes an
+            // Error token with a descriptive message.
+            match num_str.parse::<i64>() {
+                Ok(value) => self.make_span_token(TokenKind::IntLiteral(value), start),
+                Err(_) => self.make_span_token(
+                    TokenKind::Error(format!("integer literal '{}' overflows i64", num_str)),
+                    start,
+                ),
+            }
         }
     }
 
@@ -1167,6 +1225,55 @@ mod tests {
     fn test_unexpected_character() {
         let tokens = lex("~");
         assert!(matches!(tokens[0], TokenKind::Error(_)));
+    }
+
+    // Issue #89: numeric literal overflow previously silently
+    // became 0 via `.unwrap_or(0)`. The lexer must now emit an
+    // Error token so the parser surfaces a diagnostic.
+    #[test]
+    fn test_integer_literal_overflow_emits_error() {
+        // i64::MAX is 9_223_372_036_854_775_807 — add a few digits.
+        let tokens = lex("999999999999999999999");
+        assert!(
+            matches!(tokens[0], TokenKind::Error(_)),
+            "expected Error token for integer overflow, got {:?}",
+            tokens[0]
+        );
+    }
+
+    #[test]
+    fn test_long_literal_overflow_emits_error() {
+        let tokens = lex("999999999999999999999L");
+        assert!(
+            matches!(tokens[0], TokenKind::Error(_)),
+            "expected Error token for long overflow, got {:?}",
+            tokens[0]
+        );
+    }
+
+    #[test]
+    fn test_duration_literal_overflow_emits_error() {
+        // A duration literal with integer part that overflows f64
+        // max. 310 digits of 9s are ~1e309, past f64::MAX (~1.8e308)
+        // so the parse yields infinity.
+        let digits = "9".repeat(310);
+        let input = format!("{}s", digits);
+        let tokens = lex(&input);
+        assert!(
+            matches!(tokens[0], TokenKind::Error(_)),
+            "expected Error token for duration overflow, got {:?}",
+            tokens[0]
+        );
+    }
+
+    #[test]
+    fn test_valid_numeric_literals_still_parse() {
+        // Sanity — normal literals still work.
+        assert_eq!(lex("42"), vec![TokenKind::IntLiteral(42)]);
+        assert_eq!(lex("42L"), vec![TokenKind::IntLiteral(42)]);
+        assert_eq!(lex("3.14"), vec![TokenKind::FloatLiteral(3.14)]);
+        assert!(matches!(lex("500ms")[0], TokenKind::DurationLiteral(_)));
+        assert!(matches!(lex("1s")[0], TokenKind::DurationLiteral(_)));
     }
 
     // === Whitespace handling ===
