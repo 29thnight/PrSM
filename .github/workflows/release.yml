@@ -180,11 +180,20 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────
   # 5. Submit winget manifest (auto PR to winget-pkgs)
+  #
+  # DISABLED until the initial PrSM.PrSM v3.0.0 manifest lands in
+  # microsoft/winget-pkgs (PR #355971). `vedantmgoyal9/winget-releaser@v2`
+  # is update-only and cannot create the first version of a package,
+  # so it fails until the baseline manifest is merged manually.
+  #
+  # Re-enable by flipping `if: false` back to the original condition
+  # once the v3.0.0 submission is approved:
+  #   if: startsWith(github.ref, 'refs/tags/v') && needs.build-msi.result == 'success'
   # ─────────────────────────────────────────────────────────────────
   winget-publish:
     needs: [publish, build-msi]
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v') && needs.build-msi.result == 'success'
+    if: false
     steps:
       - name: Submit to winget
         uses: vedantmgoyal9/winget-releaser@v2
