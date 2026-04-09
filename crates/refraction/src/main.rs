@@ -6,7 +6,7 @@ use std::process;
 
 #[derive(ClapParser)]
 #[command(name = "prism")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Refraction compiler for PrSM - Unity-first scripting language")]
 struct Cli {
     #[command(subcommand)]

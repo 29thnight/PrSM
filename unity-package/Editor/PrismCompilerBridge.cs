@@ -199,7 +199,7 @@ namespace Prism.Editor
             string extensionsRoot = Path.Combine(home, ".vscode", "extensions");
             if (Directory.Exists(extensionsRoot))
             {
-                foreach (string extensionDir in Directory.GetDirectories(extensionsRoot, "prsm-lang.prsm-lang-*"))
+                foreach (string extensionDir in Directory.GetDirectories(extensionsRoot, "parkyoungung.prsm-lang-*"))
                 {
                     candidates.Add(Path.Combine(extensionDir, "bin", "prism.exe"));
                     candidates.Add(Path.Combine(extensionDir, "bin", "prism"));

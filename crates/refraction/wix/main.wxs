@@ -18,7 +18,7 @@
         Manufacturer='PrSM Contributors'
         Language='1033'
         Codepage='1252'
-        Version='3.5.1'>
+        Version='3.5.2'>
 
         <Package Id='*'
             Keywords='Installer'
@@ -53,8 +53,8 @@
                             Source='$(var.CargoTargetBinDir)\prism.exe' KeyPath='yes' />
                     </Component>
                     <Component Id='vsix_bundle' Guid='D4E5F6A7-B8C9-0123-DEFA-234567890123'>
-                        <File Id='prsm_vsix' Name='prsm-lang.prsm-lang.vsix'
-                            Source='$(var.CargoTargetBinDir)\..\prsm-lang.prsm-lang-$(var.Version).vsix'
+                        <File Id='prsm_vsix' Name='parkyoungung.prsm-lang.vsix'
+                            Source='$(var.CargoTargetBinDir)\..\parkyoungung.prsm-lang-$(var.Version).vsix'
                             KeyPath='yes' />
                     </Component>
                     <Component Id='file_icon' Guid='E5F6A7B8-C9D0-1234-EFAB-345678901234'>
@@ -108,7 +108,7 @@
 
         <CustomAction Id='InstallVSIX'
             Directory='APPLICATIONFOLDER'
-            ExeCommand='cmd.exe /c "code --install-extension "[APPLICATIONFOLDER]prsm-lang.prsm-lang.vsix" --force 2>nul"'
+            ExeCommand='cmd.exe /c "code --install-extension "[APPLICATIONFOLDER]parkyoungung.prsm-lang.vsix" --force 2>nul"'
             Execute='deferred'
             Impersonate='yes'
             Return='ignore' />
