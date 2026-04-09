@@ -18,7 +18,7 @@
         Manufacturer='PrSM Contributors'
         Language='1033'
         Codepage='1252'
-        Version='3.5.2'>
+        Version='3.5.3'>
 
         <Package Id='*'
             Keywords='Installer'
@@ -95,27 +95,57 @@
 
         <!-- ========================================================== -->
         <!-- Custom Actions: VS Code extension install                   -->
+        <!--                                                              -->
+        <!-- Root cause of earlier silent failure (verified v3.5.2 log):  -->
+        <!-- `code` on PATH does not resolve inside Windows Installer's   -->
+        <!-- deferred impersonation token. Even Impersonate='yes' does    -->
+        <!-- not inherit the interactive user's PATH. We must invoke      -->
+        <!-- code.cmd via its absolute path discovered at AppSearch time. -->
         <!-- ========================================================== -->
 
-        <Property Id='VSCODECLI' Value='code' />
-
-        <!-- Detect VS Code CLI -->
-        <Property Id='VSCODEPATH'>
-            <RegistrySearch Id='VSCodeRegistry' Root='HKCU'
+        <!-- Detect VS Code: User-scope installer (HKCU, default layout)  -->
+        <Property Id='VSCODEPATH_USER'>
+            <RegistrySearch Id='VSCodeRegistryUser' Root='HKCU'
                 Key='Software\Microsoft\Windows\CurrentVersion\Uninstall\{771FD6B0-FA20-440A-A002-3B3BAC16DC50}_is1'
                 Name='InstallLocation' Type='raw' />
         </Property>
 
+        <!-- Detect VS Code: System-scope installer (HKLM, 64-bit)        -->
+        <Property Id='VSCODEPATH_SYS'>
+            <RegistrySearch Id='VSCodeRegistrySys' Root='HKLM'
+                Key='Software\Microsoft\Windows\CurrentVersion\Uninstall\{EA457B21-F73E-494C-ACAB-524FDE069978}_is1'
+                Name='InstallLocation' Type='raw' Win64='yes' />
+        </Property>
+
+        <!-- Combine: prefer User installer, fall back to System.         -->
+        <!-- Both SetProperty elements target the same property           -->
+        <!-- (VSCODEPATH) but must have distinct CustomAction names so    -->
+        <!-- WiX does not collide them. Action attributes provide the     -->
+        <!-- explicit override.                                           -->
+        <SetProperty Id='VSCODEPATH' Action='SetVSCODEPATHFromUser'
+            Value='[VSCODEPATH_USER]' After='AppSearch' Sequence='both'>
+            <![CDATA[VSCODEPATH_USER]]>
+        </SetProperty>
+        <SetProperty Id='VSCODEPATH' Action='SetVSCODEPATHFromSys'
+            Value='[VSCODEPATH_SYS]' After='AppSearch' Sequence='both'>
+            <![CDATA[NOT VSCODEPATH_USER AND VSCODEPATH_SYS]]>
+        </SetProperty>
+
+        <!-- Install the VSIX via absolute path to code.cmd. The outer    -->
+        <!-- cmd.exe /c wrapper is only needed so that a missing VS Code  -->
+        <!-- installation never brings the entire MSI down: Return=ignore -->
+        <!-- plus the VSCODEPATH condition below give two layers of       -->
+        <!-- safety.                                                      -->
         <CustomAction Id='InstallVSIX'
             Directory='APPLICATIONFOLDER'
-            ExeCommand='cmd.exe /c "code --install-extension "[APPLICATIONFOLDER]parkyoungung.prsm-lang.vsix" --force 2>nul"'
+            ExeCommand='cmd.exe /c ""[VSCODEPATH]bin\code.cmd" --install-extension "[APPLICATIONFOLDER]parkyoungung.prsm-lang.vsix" --force"'
             Execute='deferred'
             Impersonate='yes'
             Return='ignore' />
 
         <InstallExecuteSequence>
             <Custom Action='InstallVSIX' Before='InstallFinalize'>
-                <![CDATA[NOT Installed AND &VSCodeExtension = 3]]>
+                <![CDATA[NOT Installed AND &VSCodeExtension = 3 AND VSCODEPATH]]>
             </Custom>
         </InstallExecuteSequence>
 
@@ -127,7 +157,7 @@
         <WixVariable Id='WixUILicenseRtf' Value='crates\refraction\wix\License.rtf' />
 
         <Property Id='WIXUI_EXITDIALOGOPTIONALTEXT'
-            Value='PrSM has been installed successfully.&#13;&#10;&#13;&#10;To install the Unity package, open Unity and go to:&#13;&#10;Window > Package Manager > + > Add package from git URL:&#13;&#10;https://github.com/29thnight/PrSM.git?path=unity-package' />
+            Value='PrSM has been installed successfully.&#13;&#10;&#13;&#10;VS Code extension: If automatic installation was skipped (VS Code not detected) or failed, the VSIX is available at:&#13;&#10;  [APPLICATIONFOLDER]parkyoungung.prsm-lang.vsix&#13;&#10;Install it manually via VS Code: Extensions > ··· > Install from VSIX.&#13;&#10;&#13;&#10;To install the Unity package, open Unity and go to:&#13;&#10;Window > Package Manager > + > Add package from git URL:&#13;&#10;https://github.com/29thnight/PrSM.git?path=unity-package' />
 
     </Product>
 </Wix>
