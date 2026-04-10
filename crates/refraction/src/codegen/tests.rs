@@ -77,7 +77,7 @@ mod e2e {
     fn test_lifecycle_update() {
         let output = compile("component Foo : MonoBehaviour {\n  update {\n    move()\n  }\n}");
         assert!(output.contains("private void Update()"));
-        assert!(output.contains("move();"));
+        assert!(output.contains("Move();"));
     }
 
     #[test]
@@ -90,21 +90,21 @@ mod e2e {
     #[test]
     fn test_func_block_body() {
         let output = compile("component Foo : MonoBehaviour {\n  func jump() {\n    print(\"jump\")\n  }\n}");
-        assert!(output.contains("public void jump()"));
+        assert!(output.contains("public void Jump()"));
         assert!(output.contains("Debug.Log(\"jump\")"));
     }
 
     #[test]
     fn test_func_expr_body() {
         let output = compile("component Foo : MonoBehaviour {\n  func isDead(): Bool = hp <= 0\n}");
-        assert!(output.contains("public bool isDead()"));
+        assert!(output.contains("public bool IsDead()"));
         assert!(output.contains("return hp <= 0;"));
     }
 
     #[test]
     fn test_private_func() {
         let output = compile("component Foo : MonoBehaviour {\n  private func helper() {\n  }\n}");
-        assert!(output.contains("private void helper()"));
+        assert!(output.contains("private void Helper()"));
     }
 
     #[test]
@@ -132,21 +132,21 @@ mod e2e {
     #[test]
     fn test_start_coroutine() {
         let output = compile("component Foo : MonoBehaviour {\n  func go() {\n    start blink()\n  }\n  coroutine blink() {\n    wait 1.0s\n  }\n}");
-        assert!(output.contains("StartCoroutine(blink())"));
+        assert!(output.contains("StartCoroutine(Blink())"));
     }
 
     #[test]
     fn test_listen_without_lambda_params() {
         let output = compile("component Foo : MonoBehaviour {\n  serialize button: Button\n  start {\n    listen button.onClick {\n      play()\n    }\n  }\n}");
         assert!(output.contains("button.onClick.AddListener(() =>"));
-        assert!(output.contains("play();"));
+        assert!(output.contains("Play();"));
     }
 
     #[test]
     fn test_listen_with_lambda_param() {
         let output = compile("component Foo : MonoBehaviour {\n  serialize slider: Slider\n  start {\n    listen slider.onValueChanged {\n      value => setVolume(value)\n    }\n  }\n}");
         assert!(output.contains("slider.onValueChanged.AddListener((value) =>"));
-        assert!(output.contains("setVolume(value);"));
+        assert!(output.contains("SetVolume(value);"));
     }
 
     #[test]
@@ -173,9 +173,9 @@ mod e2e {
     fn test_if_else() {
         let output = compile("component Foo : MonoBehaviour {\n  func f() {\n    if hp <= 0 {\n      die()\n    } else {\n      run()\n    }\n  }\n}");
         assert!(output.contains("if (hp <= 0)"));
-        assert!(output.contains("die();"));
+        assert!(output.contains("Die();"));
         assert!(output.contains("else"));
-        assert!(output.contains("run();"));
+        assert!(output.contains("Run();"));
     }
 
     #[test]
@@ -341,7 +341,7 @@ component PlayerController : MonoBehaviour {
         assert!(output.contains("private void Update()"));
         assert!(output.contains("Input.GetAxis(\"Horizontal\")"));
         assert!(output.contains("new Vector3(h, 0, v)"));
-        assert!(output.contains("public void jump()"));
+        assert!(output.contains("public void Jump()"));
         assert!(output.contains("rb.AddForce"));
         assert!(output.contains("new Vector3(0, jumpForce, 0)"));
         // Safe call: animator?.play("Jump") → if (animator != null) animator.Play("Jump")
@@ -384,7 +384,7 @@ component PlayerHealth : MonoBehaviour {
         assert!(output.contains("private int _hp = 100;"));
         assert!(output.contains("if (invincible)"));
         assert!(output.contains("hp -= amount;"));
-        assert!(output.contains("StartCoroutine(hitInvincible())"));
+        assert!(output.contains("StartCoroutine(HitInvincible())"));
         assert!(output.contains("System.Collections.IEnumerator hitInvincible()"));
         assert!(output.contains("yield return new WaitForSeconds("));
         assert!(output.contains("invincible = true;"));
@@ -585,7 +585,7 @@ component PlayerHealth : MonoBehaviour {
 }"#;
         let output = compile(src);
         assert!(output.contains("public class Registry<T> where T : Component"), "should generate generic class with where clause");
-        assert!(output.contains("void add(T item)"), "should generate method with generic param type");
+        assert!(output.contains("void Add(T item)"), "should generate method with generic param type");
     }
 
     #[test]
@@ -594,7 +594,7 @@ component PlayerHealth : MonoBehaviour {
   func findAll<T>(): List<T> where T : Component { }
 }"#;
         let output = compile(src);
-        assert!(output.contains("List<T> findAll<T>()"), "should generate generic method signature");
+        assert!(output.contains("List<T> FindAll<T>()"), "should generate generic method signature");
         assert!(output.contains("where T : Component"), "should generate where clause on method");
     }
 
@@ -643,7 +643,7 @@ component PlayerHealth : MonoBehaviour {
     fn test_single_binding_destructure_inlined() {
         let src = "component Foo : MonoBehaviour {\n  func f() {\n    val Stats(hp) = getStats()\n  }\n}";
         let output = compile(src);
-        assert!(output.contains("getStats().hp"), "single binding should inline without temp variable");
+        assert!(output.contains("GetStats().hp"), "single binding should inline without temp variable");
         assert!(!output.contains("_prsm_d"), "should NOT have temp variable for single binding");
     }
 
@@ -884,8 +884,8 @@ hello world
 }"#;
         let output = compile(src);
         assert!(output.contains("public abstract class Weapon"), "abstract class modifier");
-        assert!(output.contains("public abstract void attack()"), "abstract func signature");
-        assert!(output.contains("public virtual void reload()"), "open func becomes virtual");
+        assert!(output.contains("public abstract void Attack()"), "abstract func signature");
+        assert!(output.contains("public virtual void Reload()"), "open func becomes virtual");
     }
 
     #[test]
@@ -901,7 +901,7 @@ hello world
   override func attack() { }
 }"#;
         let output = compile(src);
-        assert!(output.contains("public override void attack()"), "override func");
+        assert!(output.contains("public override void Attack()"), "override func");
     }
 
     #[test]
@@ -1036,7 +1036,7 @@ hello world
 }"#;
         let output = compile(src);
         assert!(
-            output.contains("using var stream = openFile()"),
+            output.contains("using var stream = OpenFile()"),
             "use declaration form: {}",
             output
         );
@@ -1053,7 +1053,7 @@ hello world
 }"#;
         let output = compile(src);
         assert!(
-            output.contains("using (var stream = openFile())"),
+            output.contains("using (var stream = OpenFile())"),
             "use block form opens using statement: {}",
             output
         );
@@ -1073,7 +1073,7 @@ hello world
 }"#;
         let output = compile(src);
         assert!(
-            output.contains("using FileStream s = openStream()"),
+            output.contains("using FileStream s = OpenStream()"),
             "use with explicit type: {}",
             output
         );
@@ -1239,12 +1239,12 @@ hello world
 }"#;
         let output = compile(src);
         assert!(
-            output.contains("async Cysharp.Threading.Tasks.UniTask<string> loadProfile()"),
+            output.contains("async Cysharp.Threading.Tasks.UniTask<string> LoadProfile()"),
             "expected async UniTask<string>: {}",
             output
         );
         assert!(
-            output.contains("await fetch(\"/api/profile\")"),
+            output.contains("await Fetch(\"/api/profile\")"),
             "expected await call: {}",
             output
         );
@@ -1259,7 +1259,7 @@ hello world
 }"#;
         let output = compile(src);
         assert!(
-            output.contains("async Cysharp.Threading.Tasks.UniTask ping()"),
+            output.contains("async Cysharp.Threading.Tasks.UniTask Ping()"),
             "expected async UniTask (void): {}",
             output
         );
@@ -1899,8 +1899,8 @@ hello world
         let src = "component Probe : MonoBehaviour {\n  func getResult(): (Int, String) = (42, \"answer\")\n  func go() {\n    val (num, name) = getResult()\n    log(\"$num $name\")\n  }\n}";
         let output = compile(src);
         assert!(
-            output.contains("var (num, name) = getResult()"),
-            "expected `var (num, name) = getResult()`: {}",
+            output.contains("var (num, name) = GetResult()"),
+            "expected `var (num, name) = GetResult()`: {}",
             output
         );
     }
@@ -1911,8 +1911,8 @@ hello world
         let src = "component Probe : MonoBehaviour {\n  func getResult(): (Int, String) = (42, \"answer\")\n  func go() {\n    val (_, name) = getResult()\n    log(name)\n  }\n}";
         let output = compile(src);
         assert!(
-            output.contains("var (_, name) = getResult()"),
-            "expected `var (_, name) = getResult()`: {}",
+            output.contains("var (_, name) = GetResult()"),
+            "expected `var (_, name) = GetResult()`: {}",
             output
         );
     }
@@ -1932,8 +1932,8 @@ hello world
             output
         );
         assert!(
-            output.contains("public string getName()"),
-            "expected `getName` method after `@return` annotation: {}",
+            output.contains("public string GetName()"),
+            "expected `GetName` method after `@return` annotation: {}",
             output
         );
     }
@@ -2032,7 +2032,7 @@ hello world
         let src = "component Probe : MonoBehaviour {\n  func instantiate(prefab: GameObject, parent: Transform? = null): GameObject {\n    return GameObject.Instantiate(prefab, parent)\n  }\n  func go(some: GameObject, target: Transform) {\n    instantiate(some, parent: target)\n  }\n}";
         let output = compile(src);
         assert!(
-            output.contains("instantiate(some, parent: target)"),
+            output.contains("Instantiate(some, parent: target)"),
             "expected named argument call with keyword name: {}",
             output
         );
@@ -2542,7 +2542,7 @@ component Probe : MonoBehaviour {
             output
         );
         assert!(
-            output.contains("drawGizmos();"),
+            output.contains("DrawGizmos();"),
             "expected guarded body: {}",
             output
         );
@@ -3213,7 +3213,7 @@ component Probe : MonoBehaviour {
 }"#;
         let output = compile(src);
         assert!(
-            output.contains("if (isValid())"),
+            output.contains("if (IsValid())"),
             "if expression body must not be absorbed as trailing lambda: {}",
             output
         );
@@ -3415,7 +3415,7 @@ func calculateForces() {
             output
         );
         assert!(
-            output.contains("calculateForces"),
+            output.contains("CalculateForces"),
             "function body must survive wrapping: {}",
             output
         );

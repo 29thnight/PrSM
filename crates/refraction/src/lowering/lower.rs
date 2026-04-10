@@ -2328,7 +2328,7 @@ fn lower_func_member(
 
             // Abstract functions emit signature only (no body)
             if *is_abstract {
-                let cs_name = lower_func_name_with_generics(name, type_params);
+                let cs_name = lower_func_name_with_generics(&pascal_case(name), type_params);
                 return CsMember::RawCode(format!(
                     "{} {} {}({});",
                     mods,
@@ -2353,7 +2353,8 @@ fn lower_func_member(
             });
 
             // Build method name with optional type parameters
-            let cs_name = lower_func_name_with_generics(name, type_params);
+            // PascalCase: PrSM camelCase → C# PascalCase convention
+            let cs_name = lower_func_name_with_generics(&pascal_case(name), type_params);
 
             // Language 5, Sprint 2: forward `@burst` and `@header` style
             // annotations to C# attributes on the lowered method.
@@ -2543,7 +2544,7 @@ fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
 
             // Abstract functions emit signature only (no body)
             if *is_abstract {
-                let cs_name = lower_func_name_with_generics(name, type_params);
+                let cs_name = lower_func_name_with_generics(&pascal_case(name), type_params);
                 return CsMember::RawCode(format!(
                     "{} {} {}({});",
                     mods,
@@ -2568,7 +2569,8 @@ fn lower_func_member_with_ctx(m: &Member, ctx: &mut ComponentCtx) -> CsMember {
             });
 
             // Build method name with optional type parameters
-            let cs_name = lower_func_name_with_generics(name, type_params);
+            // PascalCase: PrSM camelCase → C# PascalCase convention
+            let cs_name = lower_func_name_with_generics(&pascal_case(name), type_params);
 
             // Language 5, Sprint 2: forward function annotations to attrs.
             let attrs = lower_func_annotations(annotations);
@@ -3766,17 +3768,23 @@ fn lower_expr_with_expected_type(
                 BinOp::And => "&&", BinOp::Or => "||",
                 BinOp::In => unreachable!("handled above"),
             };
-            format!(
-                "{} {} {}",
-                lower_expr_with_expected_type(left, None, callable_signatures),
-                op_str,
-                lower_expr_with_expected_type(right, None, callable_signatures),
-            )
+            let left_str = lower_expr_with_expected_type(left, None, callable_signatures);
+            let right_str = lower_expr_with_expected_type(right, None, callable_signatures);
+            let left_out = if needs_parens_for_binary(left, op) { format!("({})", left_str) } else { left_str };
+            let right_out = if needs_parens_for_binary(right, op) { format!("({})", right_str) } else { right_str };
+            format!("{} {} {}", left_out, op_str, right_out)
         }
         Expr::Unary { op, operand, .. } => {
+            let inner = lower_expr_with_expected_type(operand, None, callable_signatures);
             match op {
-                UnaryOp::Negate => format!("-({})", lower_expr_with_expected_type(operand, None, callable_signatures)),
-                UnaryOp::Not => format!("!({})", lower_expr_with_expected_type(operand, None, callable_signatures)),
+                UnaryOp::Negate => {
+                    match operand.as_ref() {
+                        Expr::IntLit { .. } | Expr::FloatLit { .. } | Expr::Ident { .. }
+                        | Expr::MemberAccess { .. } | Expr::This(_) => format!("-{}", inner),
+                        _ => format!("-({})", inner),
+                    }
+                }
+                UnaryOp::Not => format!("!({})", inner),
             }
         }
         Expr::MemberAccess { receiver, name, .. } => {
@@ -3864,7 +3872,9 @@ fn lower_expr_with_expected_type(
                     // constructor call so the result is valid C#.
                     format!("new {}{}({})", name, ta_str, args_str.join(", "))
                 } else {
-                    format!("{}{}({})", name, ta_str, args_str.join(", "))
+                    // Receiver-less method call on self — still needs
+                    // PascalCase to match the lowered definition name.
+                    format!("{}{}({})", pascal_case(name), ta_str, args_str.join(", "))
                 }
             }
         }
@@ -6005,6 +6015,29 @@ fn lower_where_clauses(clauses: &[WhereClause]) -> Vec<String> {
 }
 
 /// Build a C# method name with optional type parameters.
+/// Returns `true` when `child` is a binary expression whose operator has
+/// lower precedence than `parent_op`, meaning parentheses are needed to
+/// preserve evaluation order in the generated C#.
+fn needs_parens_for_binary(child: &Expr, parent_op: &BinOp) -> bool {
+    if let Expr::Binary { op: child_op, .. } = child {
+        binop_precedence(child_op) < binop_precedence(parent_op)
+    } else {
+        false
+    }
+}
+
+fn binop_precedence(op: &BinOp) -> u8 {
+    match op {
+        BinOp::Or => 1,
+        BinOp::And => 2,
+        BinOp::Eq | BinOp::NotEq => 3,
+        BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => 4,
+        BinOp::In => 4,
+        BinOp::Add | BinOp::Sub => 5,
+        BinOp::Mul | BinOp::Div | BinOp::Mod => 6,
+    }
+}
+
 fn lower_func_name_with_generics(name: &str, type_params: &[String]) -> String {
     if type_params.is_empty() {
         name.to_string()

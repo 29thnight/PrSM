@@ -647,26 +647,34 @@ fn generated_type_name_candidates(definition: &HirDefinition) -> Vec<String> {
 }
 
 fn generated_member_name(definition: &HirDefinition) -> String {
-    if definition.kind != HirDefinitionKind::Lifecycle {
-        return definition.name.clone();
-    }
-
-    match definition.name.as_str() {
-        "awake" => "Awake".into(),
-        "start" => "Start".into(),
-        "update" => "Update".into(),
-        "fixedUpdate" => "FixedUpdate".into(),
-        "lateUpdate" => "LateUpdate".into(),
-        "onEnable" => "OnEnable".into(),
-        "onDisable" => "OnDisable".into(),
-        "onDestroy" => "OnDestroy".into(),
-        "onTriggerEnter" => "OnTriggerEnter".into(),
-        "onTriggerExit" => "OnTriggerExit".into(),
-        "onTriggerStay" => "OnTriggerStay".into(),
-        "onCollisionEnter" => "OnCollisionEnter".into(),
-        "onCollisionExit" => "OnCollisionExit".into(),
-        "onCollisionStay" => "OnCollisionStay".into(),
+    match definition.kind {
+        HirDefinitionKind::Function | HirDefinitionKind::Coroutine => pascal_case(&definition.name),
+        HirDefinitionKind::Lifecycle => match definition.name.as_str() {
+            "awake" => "Awake".into(),
+            "start" => "Start".into(),
+            "update" => "Update".into(),
+            "fixedUpdate" => "FixedUpdate".into(),
+            "lateUpdate" => "LateUpdate".into(),
+            "onEnable" => "OnEnable".into(),
+            "onDisable" => "OnDisable".into(),
+            "onDestroy" => "OnDestroy".into(),
+            "onTriggerEnter" => "OnTriggerEnter".into(),
+            "onTriggerExit" => "OnTriggerExit".into(),
+            "onTriggerStay" => "OnTriggerStay".into(),
+            "onCollisionEnter" => "OnCollisionEnter".into(),
+            "onCollisionExit" => "OnCollisionExit".into(),
+            "onCollisionStay" => "OnCollisionStay".into(),
+            _ => definition.name.clone(),
+        },
         _ => definition.name.clone(),
+    }
+}
+
+fn pascal_case(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
 
@@ -945,7 +953,7 @@ public class Player : MonoBehaviour
         Debug.Log(speed);
     }
 
-    public void jump()
+    public void Jump()
     {
     }
 }
@@ -1009,7 +1017,7 @@ public class Player : MonoBehaviour
                         attributes: vec![],
                         modifiers: "public".to_string(),
                         return_ty: "void".to_string(),
-                        name: "jump".to_string(),
+                        name: "Jump".to_string(),
                         params: vec![],
                         where_clauses: vec![],
                         body: vec![],

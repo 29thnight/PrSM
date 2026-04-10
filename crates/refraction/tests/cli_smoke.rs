@@ -351,7 +351,7 @@ component UiController : MonoBehaviour {
     let generated_source = fs::read_to_string(&generated_path).unwrap();
 
     assert!(generated_source.contains("button.onClick.AddListener(() =>"));
-    assert!(generated_source.contains("nativeLog(\"clicked\");"));
+    assert!(generated_source.contains("NativeLog(\"clicked\");"));
     assert!(generated_source.contains("Debug.Log(\"raw\");"));
     assert!(generated_source.contains("public void nativeLog(string message)"));
     assert!(generated_source.contains("Debug.Log(message);"));
@@ -3730,7 +3730,7 @@ fn v2_generic_inference_from_argument_type() {
 
     let cs = fs::read_to_string(root.join("InferArg.cs")).unwrap();
     assert!(
-        cs.contains("useRb(GetComponent<Rigidbody>())"),
+        cs.contains("UseRb(GetComponent<Rigidbody>())"),
         "expected argument type inference to emit GetComponent<Rigidbody> inside call:\n{cs}"
     );
 

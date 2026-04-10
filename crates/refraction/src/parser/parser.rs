@@ -5318,7 +5318,7 @@ fn pascal_attr_case(name: &str) -> String {
 fn token_to_source_text(kind: &TokenKind) -> String {
     match kind {
         TokenKind::IntLiteral(n) => n.to_string(),
-        TokenKind::FloatLiteral(n) => format!("{n}"),
+        TokenKind::FloatLiteral(n) => format!("{n}f"),
         TokenKind::DurationLiteral(n) => format!("{n}s"),
         TokenKind::BoolTrue => "true".into(),
         TokenKind::BoolFalse => "false".into(),
@@ -5375,6 +5375,26 @@ fn token_to_source_text(kind: &TokenKind) -> String {
         TokenKind::Comma => ",".into(),
         TokenKind::Semicolon => ";".into(),
         TokenKind::At => "@".into(),
+        TokenKind::PlusEq => "+=".into(),
+        TokenKind::MinusEq => "-=".into(),
+        TokenKind::StarEq => "*=".into(),
+        TokenKind::SlashEq => "/=".into(),
+        TokenKind::PercentEq => "%=".into(),
+        TokenKind::ElvisAssign => "??=".into(),
+        TokenKind::Error(msg) => {
+            // Intrinsic blocks are tokenised by the PrSM lexer, so C#-only
+            // characters (e.g. `$` in `$"..."`) produce Error tokens.
+            // Extract the original character and emit it verbatim so the
+            // raw C# code round-trips correctly.
+            if let Some(ch) = msg
+                .strip_prefix("Unexpected character: '")
+                .and_then(|s| s.strip_suffix("'"))
+            {
+                ch.to_string()
+            } else {
+                format!("/* {} */", msg)
+            }
+        }
         _ => format!("{:?}", kind),
     }
 }
@@ -5401,6 +5421,13 @@ fn should_insert_raw_space(previous: Option<&TokenKind>, current: &TokenKind) ->
         previous,
         TokenKind::Dot | TokenKind::QuestionDot | TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
     ) {
+        return false;
+    }
+
+    // Error tokens from the lexer represent C#-only characters (e.g. `$`)
+    // that must glue directly to the next token without whitespace.
+    // Example: `$"hello"` must not become `$ "hello"`.
+    if matches!(previous, TokenKind::Error(_)) {
         return false;
     }
 
