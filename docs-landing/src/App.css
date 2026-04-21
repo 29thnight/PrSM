@@ -930,6 +930,32 @@
   }
 }
 
+.brand-docs__sidebar-fab {
+  display: none;
+  position: fixed;
+  bottom: 1.5rem;
+  left: 1.5rem;
+  z-index: 1100;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  transition: background 0.2s, transform 0.2s;
+}
+
+.brand-docs__sidebar-fab:hover {
+  background: rgba(255, 255, 255, 0.18);
+  transform: scale(1.08);
+}
+
 @media (max-width: 1024px) {
   .brand-docs__layout {
     padding-left: 0;
@@ -945,5 +971,23 @@
 
   .brand-docs__content {
     padding: 3rem 1.5rem;
+  }
+
+  .brand-docs__sidebar-fab {
+    display: flex;
+  }
+}
+
+.brand-docs__overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 999;
+}
+
+@media (max-width: 1024px) {
+  .brand-docs__overlay {
+    display: block;
   }
 }

@@ -528,6 +528,16 @@ export default function DocumentationView({ initialDocId = 'index', lang }: Docu
 
   return (
     <div className="brand-docs">
+      <button
+        className="brand-docs__sidebar-fab"
+        onClick={() => setIsSidebarOpen(prev => !prev)}
+        aria-label="Toggle navigation"
+      >
+        {isSidebarOpen
+          ? <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          : <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        }
+      </button>
       <div className="brand-docs__layout">
         <aside className={`brand-docs__sidebar ${isSidebarOpen ? 'brand-docs__sidebar--open' : ''}`}>
           <nav className="brand-docs__nav">
@@ -553,7 +563,7 @@ export default function DocumentationView({ initialDocId = 'index', lang }: Docu
 
         {isSidebarOpen && (
           <div 
-            className="brand-docs__overlay lg:hidden" 
+            className="brand-docs__overlay" 
             onClick={() => setIsSidebarOpen(false)} 
           />
         )}
